@@ -1,26 +1,34 @@
 package com.jarvis.assistant.shizuku
 
 import android.content.pm.PackageManager
+import android.os.IBinder
+import android.os.RemoteException
 import android.util.Log
+import moe.shizuku.server.IRemoteProcess
+import moe.shizuku.server.IShizukuService
 import rikka.shizuku.Shizuku
+import rikka.shizuku.ShizukuRemoteProcess
 import java.util.concurrent.TimeUnit
 
 /**
  * JARVIS Shizuku Manager — ADB-level system control without root.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CRITICAL FIX (v6): Shizuku.newProcess() is the CORRECT way to execute
- * shell commands with ADB privileges. The previous version incorrectly
- * used raw IBinder.transact() with guessed AIDL transaction codes, which
- * caused "Binder invocation to an incorrect interface" errors and broke
- * Bluetooth/WiFi/Airplane mode toggles.
+ * CRITICAL FIX (v6.1): Shizuku.newProcess() is PRIVATE in Shizuku 13.1.5.
  *
- * The key insight: Shizuku.newProcess() is PUBLIC in the `api` module
- * (dev.rikka.shizuku:api). It's only package-private in the `provider`
- * module. Since we depend on `shizuku-api`, we CAN call it directly.
+ * The method was deprecated and made private — planned for removal in
+ * API 14. Calling it directly causes a Kotlin compiler error:
+ *   "Cannot access 'static fun newProcess(...)': it is private"
  *
- * Usage: Shizuku.newProcess(arrayOf("sh", "-c", "YOUR_COMMAND"), null, null)
- * This returns a Process object we can read stdout/stderr from.
+ * THE CORRECT APPROACH:
+ * 1. Get the IBinder via Shizuku.getBinder() (PUBLIC)
+ * 2. Create an AIDL proxy via IShizukuService.Stub.asInterface(binder) (PUBLIC)
+ * 3. Call service.newProcess(cmd, env, dir) (PUBLIC AIDL method)
+ * 4. Wrap the returned IRemoteProcess in ShizukuRemoteProcess via reflection
+ *    (the constructor is package-private but we can access it with reflection)
+ *
+ * This is the SAME thing Shizuku.newProcess() does internally, but we
+ * bypass the private Kotlin accessor by calling the AIDL interface directly.
  * ═══════════════════════════════════════════════════════════════════════
  */
 object ShizukuManager {
@@ -106,32 +114,75 @@ object ShizukuManager {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Shell Command Execution — USING Shizuku.newProcess()
+    // AIDL-BASED SHELL EXECUTION
     //
-    // This is the CORRECT way to execute shell commands with ADB
-    // privileges via Shizuku. The method is PUBLIC in the api module.
-    //
-    // Previous broken approach: raw IBinder.transact() with guessed
-    // AIDL transaction codes → caused "Binder invocation to an
-    // incorrect interface" errors.
-    //
-    // Correct approach: Shizuku.newProcess() → returns a Process
-    // object that runs with ADB-level permissions.
+    // Shizuku.newProcess() is PRIVATE in 13.1.5. We bypass it by:
+    // 1. Getting the IShizukuService AIDL interface from the public binder
+    // 2. Calling service.newProcess() which IS public in the AIDL interface
+    // 3. Wrapping the returned IRemoteProcess in ShizukuRemoteProcess via reflection
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * Execute a shell command with ADB-level privileges via Shizuku.newProcess().
+     * Get the IShizukuService AIDL interface from the public binder.
+     * This is the CORRECT way to access Shizuku's service methods.
+     */
+    private val shizukuService: IShizukuService?
+        get() = try {
+            val binder = Shizuku.getBinder()
+            if (binder != null) IShizukuService.Stub.asInterface(binder) else null
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get Shizuku service: ${e.message}")
+            null
+        }
+
+    /**
+     * Reflective accessor for the package-private ShizukuRemoteProcess constructor.
+     * ShizukuRemoteProcess(IRemoteProcess) is package-private in Shizuku,
+     * but we can access it via reflection since we need it to wrap the
+     * IRemoteProcess returned by the AIDL call.
+     */
+    private val remoteProcessCtor by lazy {
+        try {
+            ShizukuRemoteProcess::class.java
+                .getDeclaredConstructor(IRemoteProcess::class.java)
+                .apply { isAccessible = true }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to access ShizukuRemoteProcess constructor: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Create a new Process with ADB-level privileges via the Shizuku AIDL interface.
      *
-     * This is the ONLY correct way to execute system commands through Shizuku.
-     * The command runs as shell (ADB) user, which has permission to:
-     *   - Toggle WiFi, Bluetooth, Airplane Mode via `svc` commands
-     *   - Install/uninstall apps via `pm` commands
-     *   - Simulate input via `input` commands
-     *   - Change system settings via `settings` commands
-     *   - And much more
+     * This is equivalent to the private Shizuku.newProcess() but calls the
+     * AIDL interface directly:
+     *   1. IShizukuService.Stub.asInterface(Shizuku.getBinder()) → service proxy
+     *   2. service.newProcess(cmd, env, dir) → IRemoteProcess
+     *   3. ShizukuRemoteProcess(IRemoteProcess) → java.lang.Process (via reflection)
      *
-     * @param command The shell command to execute (e.g., "svc wifi enable")
-     * @return ShellResult with stdout, stderr, exit code, and success flag
+     * @throws IllegalStateException if Shizuku service is not available
+     * @throws RuntimeException if reflection fails to create ShizukuRemoteProcess
+     */
+    private fun newProcess(cmd: Array<String>, env: Array<String>? = null, dir: String? = null): Process {
+        val service = shizukuService
+            ?: throw IllegalStateException("Shizuku service not available")
+
+        // Call the AIDL method — this is PUBLIC in the IShizukuService interface
+        val remoteProcess: IRemoteProcess = service.newProcess(cmd, env, dir)
+
+        // Wrap the IRemoteProcess in a ShizukuRemoteProcess (package-private constructor)
+        val ctor = remoteProcessCtor
+            ?: throw RuntimeException("ShizukuRemoteProcess constructor not accessible")
+
+        return ctor.newInstance(remoteProcess) as Process
+    }
+
+    /**
+     * Execute a shell command with ADB-level privileges via Shizuku.
+     *
+     * Uses the AIDL interface to call newProcess() since Shizuku.newProcess()
+     * is private in Shizuku 13.1.5.
      */
     fun executeShellCommand(command: String): ShellResult {
         if (!isReady()) {
@@ -142,14 +193,7 @@ object ShizukuManager {
         }
 
         return try {
-            // ═══ THE FIX: Use Shizuku.newProcess() directly ═══
-            // This is PUBLIC in the Shizuku API module (dev.rikka.shizuku:api:13.1.5)
-            // It creates a Process that runs with ADB-level permissions.
-            val process = Shizuku.newProcess(
-                arrayOf("sh", "-c", command),
-                null,  // environment variables (null = inherit)
-                null   // working directory (null = default)
-            )
+            val process = newProcess(arrayOf("sh", "-c", command), null, null)
 
             val completed = process.waitFor(SHELL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             if (!completed) {
@@ -166,6 +210,9 @@ object ShizukuManager {
         } catch (e: SecurityException) {
             Log.e(TAG, "Shizuku permission denied for: $command", e)
             ShellResult("", "Shizuku permission denied: ${e.message}", -1, false)
+        } catch (e: RemoteException) {
+            Log.e(TAG, "Shizuku RemoteException for: $command", e)
+            ShellResult("", "Shizuku remote error: ${e.message}", -1, false)
         } catch (e: Exception) {
             Log.e(TAG, "Shell command failed: $command", e)
             ShellResult("", e.message ?: "Unknown error", -1, false)
@@ -174,40 +221,24 @@ object ShizukuManager {
 
     // ─── System Toggles ────────────────────────────────────────
 
-    /**
-     * Toggle WiFi using `svc wifi enable/disable`.
-     * Fallback to `cmd wifi enable/disable` on some devices.
-     */
     fun toggleWifi(enable: Boolean): ShellResult {
         val state = if (enable) "enable" else "disable"
         val result = executeShellCommand("svc wifi $state")
         if (result.isSuccess) return result
-        // Fallback: some OEMs use `cmd wifi` instead of `svc wifi`
         return executeShellCommand("cmd wifi $state")
     }
 
-    /**
-     * Toggle Bluetooth using `svc bluetooth enable/disable`.
-     * Fallback to `cmd bluetooth_manager enable/disable`.
-     */
     fun toggleBluetooth(enable: Boolean): ShellResult {
         val state = if (enable) "enable" else "disable"
         val result = executeShellCommand("svc bluetooth $state")
         if (result.isSuccess) return result
-        // Fallback for Samsung and other OEMs
         return executeShellCommand("cmd bluetooth_manager $state")
     }
 
-    /**
-     * Toggle Airplane Mode.
-     * Requires both: settings put + broadcast for the system to pick up the change.
-     */
     fun toggleAirplaneMode(enable: Boolean): ShellResult {
         val state = if (enable) "1" else "0"
         val boolState = if (enable) "true" else "false"
-        // Step 1: Write the setting
         val settingsResult = executeShellCommand("settings put global airplane_mode_on $state")
-        // Step 2: Broadcast the change so the system applies it
         executeShellCommand("am broadcast -a android.intent.action.AIRPLANE_MODE --ez state $boolState")
         return if (settingsResult.isSuccess) settingsResult
         else executeShellCommand("am broadcast -a android.intent.action.AIRPLANE_MODE --ez state $boolState")
@@ -221,16 +252,9 @@ object ShizukuManager {
     fun forceStopApp(packageName: String): ShellResult =
         executeShellCommand("am force-stop $packageName")
 
-    /**
-     * Open an app using the monkey command.
-     * This launches the app's main launcher activity.
-     */
     fun openApp(packageName: String): ShellResult =
         executeShellCommand("monkey -p $packageName -c android.intent.category.LAUNCHER 1")
 
-    /**
-     * Start an app using am start — more reliable than monkey for some apps.
-     */
     fun startApp(packageName: String): ShellResult =
         executeShellCommand("am start -n $packageName/.MainActivity 2>/dev/null || monkey -p $packageName -c android.intent.category.LAUNCHER 1")
 
