@@ -165,13 +165,29 @@ class JarvisSensoryService : Service() {
         if (isAudioRecording || !audioEnabled) return
 
         try {
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                SAMPLE_RATE,
-                CHANNEL_CONFIG,
-                AUDIO_FORMAT,
-                bufferSize
-            )
+            // BUG FIX: Use VOICE_COMMUNICATION instead of VOICE_RECOGNITION.
+            // VOICE_RECOGNITION triggers system beeps on Samsung, Xiaomi, and
+            // other OEM skins. VOICE_COMMUNICATION is zero-beep and includes
+            // echo cancellation / noise suppression — better for voice.
+            // Falls back to MIC if VOICE_COMMUNICATION fails.
+            audioRecord = try {
+                AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    SAMPLE_RATE,
+                    CHANNEL_CONFIG,
+                    AUDIO_FORMAT,
+                    bufferSize
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "VOICE_COMMUNICATION failed, falling back to MIC: ${e.message}")
+                AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    SAMPLE_RATE,
+                    CHANNEL_CONFIG,
+                    AUDIO_FORMAT,
+                    bufferSize
+                )
+            }
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 Log.e(TAG, "AudioRecord not initialized")

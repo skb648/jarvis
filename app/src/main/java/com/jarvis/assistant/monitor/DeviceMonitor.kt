@@ -78,7 +78,7 @@ object DeviceMonitor {
             "totalMB" to totalMB,
             "availableMB" to availableMB,
             "usedMB" to usedMB,
-            "usedPercent" to ((usedMB * 100) / totalMB),
+            "usedPercent" to ((usedMB * 100.0) / totalMB).toInt(),
             "isLowMemory" to memInfo.lowMemory,
             "thresholdMB" to (memInfo.threshold / (1024 * 1024))
         )

@@ -151,6 +151,9 @@ object HomeAssistantBridge {
 
     // ─── HTTP Helpers ───────────────────────────────────────────
 
+    // BUG FIX: Read from errorStream when response code is not 200.
+    // Previously, reading conn.inputStream on 4xx/5xx responses threw IOException.
+    // Also added .use {} to close BufferedReader and prevent resource leaks.
     private fun httpGet(path: String): String {
         val url = URL("$baseUrl$path")
         val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -165,8 +168,12 @@ object HomeAssistantBridge {
             val responseCode = conn.responseCode
             if (responseCode != HttpURLConnection.HTTP_OK) {
                 Log.w(TAG, "HTTP GET $path returned $responseCode")
+                // Read error body for diagnostics
+                val errorBody = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                Log.d(TAG, "Error body: ${errorBody.take(500)}")
+                return ""
             }
-            return BufferedReader(InputStreamReader(conn.inputStream)).readText()
+            return conn.inputStream.bufferedReader().use { it.readText() }
         } finally {
             conn.disconnect()
         }
@@ -191,7 +198,10 @@ object HomeAssistantBridge {
 
             val responseCode = conn.responseCode
             return try {
-                BufferedReader(InputStreamReader(conn.inputStream)).readText()
+                // BUG FIX: Use errorStream for non-200 responses to avoid IOException.
+                // Added .use {} to close BufferedReader and prevent resource leaks.
+                val stream = if (responseCode in 200..299) conn.inputStream else conn.errorStream
+                stream?.bufferedReader()?.use { it.readText() } ?: ""
             } catch (e: Exception) {
                 "" // Some responses have empty body
             }

@@ -91,11 +91,14 @@ object GestureController {
 
     /**
      * Perform a pinch gesture at the specified center point.
+     *
+     * BUG FIX: Shizuku fallback now uses swipe gestures that simulate
+     * pinch motion (two fingers moving toward center) instead of two
+     * sequential taps which don't resemble a pinch at all.
      */
     fun performPinch(centerX: Int, centerY: Int, pinchDistance: Float, duration: Long = PINCH_DURATION_MS): Boolean {
         val service = JarviewModel.accessibilityService
         if (service != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // Pinch in: two strokes moving toward center
             val path1 = Path().apply {
                 moveTo((centerX - pinchDistance), centerY.toFloat())
                 lineTo(centerX.toFloat(), centerY.toFloat())
@@ -112,30 +115,52 @@ object GestureController {
             return dispatchGesture(service, builder.build())
         }
 
-        // Shizuku fallback — pinch not directly supported, simulate as two taps
-        ShizukuManager.simulateTap(centerX - pinchDistance.toInt(), centerY)
-        Thread.sleep(50)
-        return ShizukuManager.simulateTap(centerX + pinchDistance.toInt(), centerY).isSuccess
+        // Shizuku fallback: simulate pinch with two simultaneous swipes toward center
+        // (sequenced since Shizuku input commands can't do multi-touch)
+        val halfDist = (pinchDistance / 2).toInt()
+        val swipe1 = ShizukuManager.simulateSwipe(
+            centerX - pinchDistance.toInt(), centerY,
+            centerX - halfDist, centerY,
+            duration.toInt()
+        )
+        val swipe2 = ShizukuManager.simulateSwipe(
+            centerX + pinchDistance.toInt(), centerY,
+            centerX + halfDist, centerY,
+            duration.toInt()
+        )
+        return swipe1.isSuccess && swipe2.isSuccess
     }
 
     // ─── Gesture Dispatch ───────────────────────────────────────
 
+    /**
+     * BUG FIX: dispatchGesture() now returns whether the dispatch was
+     * INITIATED successfully (not the async completion result).
+     *
+     * The previous code had a critical bug: it set `result = true/false`
+     * in the async callback but always returned `true` from the function.
+     * Since GestureResultCallback is async and the result is set AFTER
+     * the function returns, the local `result` variable was never read.
+     *
+     * The correct behavior is:
+     *   - Return `true` if dispatchGesture() was called without throwing
+     *   - The actual gesture result is available via the callback
+     *   - Callers should check the callback or use a suspend function
+     *     for completion tracking
+     */
     private fun dispatchGesture(service: AccessibilityService, gesture: GestureDescription): Boolean {
         return try {
-            var result = false
             val callback = object : AccessibilityService.GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
-                    result = true
                     Log.d(TAG, "Gesture completed")
                 }
                 override fun onCancelled(gestureDescription: GestureDescription?) {
-                    result = false
                     Log.w(TAG, "Gesture cancelled")
                 }
             }
 
+            // Returns true if the dispatch was initiated successfully
             service.dispatchGesture(gesture, callback, null)
-            true // Dispatch initiated successfully
         } catch (e: Exception) {
             Log.e(TAG, "Failed to dispatch gesture", e)
             false

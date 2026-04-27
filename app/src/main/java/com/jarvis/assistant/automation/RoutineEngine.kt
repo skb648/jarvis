@@ -74,7 +74,9 @@ class RoutineEngine(context: Context) {
         val json = prefs.getString(KEY_ROUTINES, null) ?: return emptyList()
         return try {
             val type = object : TypeToken<List<Routine>>() {}.type
-            gson.fromJson(json, type)
+            // BUG FIX: gson.fromJson() can return null (e.g., JSON "null").
+            // Added null-safe operator with emptyList() fallback to prevent NPE.
+            gson.fromJson<List<Routine>>(json, type) ?: emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse routines", e)
             emptyList()
@@ -128,7 +130,16 @@ class RoutineEngine(context: Context) {
             val startMinutes = startParts[0].toInt() * 60 + startParts[1].toInt()
             val endMinutes = endParts[0].toInt() * 60 + endParts[1].toInt()
 
-            return currentMinutes in startMinutes..endMinutes
+            // BUG FIX: Handle overnight time ranges (e.g., 22:00-06:00).
+            // When startMinutes > endMinutes, the range wraps past midnight.
+            // Example: 22:00-06:00 → 23:30 is in range, 12:00 is not.
+            return if (startMinutes <= endMinutes) {
+                // Same-day range: e.g., 09:00-17:00
+                currentMinutes in startMinutes..endMinutes
+            } else {
+                // Overnight range: e.g., 22:00-06:00
+                currentMinutes >= startMinutes || currentMinutes <= endMinutes
+            }
         } catch (e: Exception) {
             return true
         }
