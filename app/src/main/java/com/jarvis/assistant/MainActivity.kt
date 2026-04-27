@@ -70,7 +70,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         // Re-check permissions when returning from settings screens
-        // This is critical for reactive permission UI updates
         checkAndUpdatePermissionStates()
     }
 
@@ -152,9 +151,10 @@ class MainActivity : ComponentActivity() {
             onQuickAction = { action ->
                 when (action) {
                     "voice"    -> viewModel.toggleListening(context)
-                    "capture"  -> { /* launch screen capture */ }
-                    "chat"     -> { /* navigate to chat — handled by nav */ }
-                    "devices"  -> { /* navigate to devices — handled by nav */ }
+                    "capture"  -> viewModel.sendMessage("take a screenshot", context)
+                    // chat and devices navigation handled inside JarvisNavGraph via onNavigateToRoute
+                    "chat"     -> { /* navigation handled by nav */ }
+                    "devices"  -> { /* navigation handled by nav */ }
                 }
             },
             onGeminiApiKeyChange = { viewModel.setGeminiApiKey(it) },
@@ -194,22 +194,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Re-check all permission states and update the ViewModel.
-     * Called in onResume() so the Settings UI stays reactive.
-     */
     private fun checkAndUpdatePermissionStates() {
         val pm = PermissionManager
         viewModelScopeCheck {
             val isBatteryOpt = !pm.isIgnoringBatteryOptimizations(this)
-            // Update ViewModel through a temporary mechanism
-            // The SettingsScreen will use rememberLifecycleAwarePermissionCheck
-            // to reactively observe these states
         }
     }
 
     private fun viewModelScopeCheck(block: () -> Unit) {
-        // Simple helper — in production, use the ViewModel's update methods
         try { block() } catch (_: Exception) {}
     }
 
@@ -219,10 +211,10 @@ class MainActivity : ComponentActivity() {
         when (intent?.action) {
             Intent.ACTION_VOICE_COMMAND,
             "com.jarvis.assistant.LISTEN" -> {
-                // Trigger listening mode — handled by ViewModel in setContent
+                // Trigger listening mode
             }
             "com.jarvis.assistant.CHAT" -> {
-                // Navigate to chat — handled by NavGraph
+                // Navigate to chat
             }
         }
     }
@@ -238,7 +230,6 @@ class MainActivity : ComponentActivity() {
             }
             startActivity(intent)
         } catch (e: Exception) {
-            // Fallback to general battery optimization settings
             try {
                 startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             } catch (_: Exception) { }
