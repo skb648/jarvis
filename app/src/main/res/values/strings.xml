@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JARVIS</string>
+    <string name="app_name_full">JARVIS AI Assistant</string>
+    <string name="widget_listen">Listen</string>
+    <string name="widget_capture">Capture</string>
+    <string name="widget_read">Read</string>
+    <string name="accessibility_service_description">JARVIS Accessibility Service — Enables screen reading, gesture automation, and deep system control for your AI assistant.</string>
+    <string name="shortcut_voice">Voice Command</string>
+    <string name="shortcut_capture">Capture Screen</string>
+    <string name="shortcut_read">Read Screen</string>
+</resources>

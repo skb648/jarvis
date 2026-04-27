@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#B30A0E21"
+    android:padding="12dp">
+
+    <!-- Brain State -->
+    <TextView
+        android:id="@+id/widget_brain_state"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="JARVIS: Idle"
+        android:textColor="#FF00D4FF"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:fontFamily="monospace" />
+
+    <!-- Last Command -->
+    <TextView
+        android:id="@+id/widget_last_command"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="No recent command"
+        android:textColor="#CCFFFFFF"
+        android:textSize="11sp"
+        android:ellipsize="end"
+        android:maxLines="2"
+        android:layout_marginTop="4dp" />
+
+    <!-- Action Buttons -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp"
+        android:gravity="center">
+
+        <Button
+            android:id="@+id/widget_btn_listen"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:text="@string/widget_listen"
+            android:textSize="10sp"
+            android:textColor="#FF00D4FF"
+            android:background="@drawable/widget_btn_bg"
+            android:layout_marginEnd="4dp" />
+
+        <Button
+            android:id="@+id/widget_btn_capture"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:text="@string/widget_capture"
+            android:textSize="10sp"
+            android:textColor="#FF00D4FF"
+            android:background="@drawable/widget_btn_bg"
+            android:layout_marginEnd="4dp" />
+
+        <Button
+            android:id="@+id/widget_btn_read"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:text="@string/widget_read"
+            android:textSize="10sp"
+            android:textColor="#FF00D4FF"
+            android:background="@drawable/widget_btn_bg" />
+    </LinearLayout>
+</LinearLayout>

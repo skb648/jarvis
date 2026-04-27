@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="voice_command"
+        android:enabled="true"
+        android:icon="@drawable/ic_mic_shortcut"
+        android:shortcutShortLabel="@string/shortcut_voice"
+        android:shortcutLongLabel="@string/shortcut_voice">
+        <intent
+            android:action="com.jarvis.assistant.VOICE_COMMAND"
+            android:targetPackage="com.jarvis.assistant"
+            android:targetClass="com.jarvis.assistant.MainActivity" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="capture_screen"
+        android:enabled="true"
+        android:icon="@drawable/ic_camera_shortcut"
+        android:shortcutShortLabel="@string/shortcut_capture"
+        android:shortcutLongLabel="@string/shortcut_capture">
+        <intent
+            android:action="com.jarvis.assistant.CAPTURE_SCREEN"
+            android:targetPackage="com.jarvis.assistant"
+            android:targetClass="com.jarvis.assistant.MainActivity" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="read_screen"
+        android:enabled="true"
+        android:icon="@drawable/ic_screen_shortcut"
+        android:shortcutShortLabel="@string/shortcut_read"
+        android:shortcutLongLabel="@string/shortcut_read">
+        <intent
+            android:action="com.jarvis.assistant.READ_SCREEN"
+            android:targetPackage="com.jarvis.assistant"
+            android:targetClass="com.jarvis.assistant.MainActivity" />
+    </shortcut>
+</shortcuts>

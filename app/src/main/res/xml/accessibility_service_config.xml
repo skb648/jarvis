@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ─── JARVIS Accessibility Service Configuration ──────────────
+     SILENT MONITORING MODE — No TalkBack interference.
+
+     CRITICAL: This config deliberately DOES NOT request:
+       - flagRequestTouchExplorationMode  (causes TalkBack/double-tap)
+       - flagRequestTouchExploration       (causes TalkBack/double-tap)
+       - canRequestTouchExplorationMode    (causes TalkBack/double-tap)
+       - flagEnableAccessibilityVolume     (alters audio routing)
+       - flagRequestAccessibilityButton    (adds system button)
+
+     The service operates in "silent observer" mode:
+       - Monitors screen events (window changes, text, clicks)
+       - Performs gesture automation (tap, swipe, scroll)
+       - Extracts on-screen text and node info
+       - Executes global actions (back, home, recents)
+
+     Touch exploration is NEVER requested so the user's normal
+     touch behavior (single-tap to click, single-finger scroll)
+     remains completely unaffected.
+────────────────────────────────────────────────────────────── -->
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/accessibility_service_description"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked|typeViewFocused|typeViewTextChanged|typeNotificationStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:canRequestFilterKeyEvents="true"
+    android:notificationTimeout="100" />

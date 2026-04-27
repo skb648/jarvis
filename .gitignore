@@ -1,0 +1,38 @@
+# ─── Android ──────────────────────────────────────────
+*.apk
+*.aab
+*.ap_
+*.dex
+local.properties
+
+# ─── Build Outputs ────────────────────────────────────
+/build
+/app/build
+*.class
+
+# ─── Android Studio / IntelliJ ────────────────────────
+.idea/
+*.iml
+.gradle/
+*.swp
+
+# ─── CXX / CMake Cache ───────────────────────────────
+app/.cxx/
+
+# ─── Pre-built .so (must be rebuilt from Rust source) ─
+# Run ./rust/build.sh or ./gradlew buildRustDebug to build
+app/src/main/jniLibs/*/*.so
+
+# ─── Rust Build Artifacts ─────────────────────────────
+rust/target/
+
+# ─── OS Files ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── Keystore ─────────────────────────────────────────
+*.jks
+*.keystore
+
+# ─── Logs ─────────────────────────────────────────────
+*.log

@@ -1,0 +1,202 @@
+package com.jarvis.assistant.smarthome
+
+import android.util.Log
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
+
+/**
+ * Home Assistant Bridge — REST API integration.
+ *
+ * Provides direct control of Home Assistant entities via the REST API.
+ * Supports:
+ *   - Fetching all entity states
+ *   - Calling services (turn_on, turn_off, toggle)
+ *   - Auto-detecting domain from entity_id prefix
+ *   - Getting individual entity states
+ */
+object HomeAssistantBridge {
+
+    private const val TAG = "JarvisHABridge"
+
+    private var baseUrl: String = ""
+    private var token: String = ""
+    private var isConfigured = false
+
+    // Domain mapping for common HA entity types
+    private val DOMAIN_MAP = mapOf(
+        "light" to "light",
+        "switch" to "switch",
+        "fan" to "fan",
+        "humidifier" to "humidifier",
+        "input_boolean" to "input_boolean",
+        "automation" to "automation",
+        "script" to "script",
+        "group" to "group",
+        "climate" to "climate",
+        "cover" to "cover",
+        "lock" to "lock",
+        "media_player" to "media_player",
+        "camera" to "camera",
+        "sensor" to "sensor",
+        "binary_sensor" to "binary_sensor"
+    )
+
+    /**
+     * Configure the bridge with Home Assistant URL and long-lived access token.
+     */
+    fun configure(url: String, accessToken: String) {
+        baseUrl = url.trimEnd('/')
+        token = accessToken
+        isConfigured = true
+        Log.i(TAG, "Home Assistant configured: $baseUrl")
+    }
+
+    fun isConfigured(): Boolean = isConfigured
+
+    /**
+     * Fetch all entity states from Home Assistant.
+     */
+    fun getStates(): JSONArray? {
+        if (!isConfigured) return null
+        return try {
+            val response = httpGet("/api/states")
+            JSONArray(response)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to fetch states", e)
+            null
+        }
+    }
+
+    /**
+     * Call a Home Assistant service.
+     */
+    fun callService(domain: String, service: String, entityId: String, serviceData: JSONObject? = null): JSONObject? {
+        if (!isConfigured) return null
+        return try {
+            val body = JSONObject().apply {
+                put("entity_id", entityId)
+                serviceData?.keys()?.forEach { key ->
+                    put(key, serviceData.get(key))
+                }
+            }
+            val response = httpPost("/api/services/$domain/$service", body)
+            if (response.isNotEmpty()) JSONObject(response) else null
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to call service $domain.$service for $entityId", e)
+            null
+        }
+    }
+
+    /**
+     * Toggle an entity — auto-detects domain from entity_id.
+     */
+    fun toggleEntity(entityId: String): JSONObject? {
+        val domain = getDomainFromEntityId(entityId)
+        return callService(domain, "toggle", entityId)
+    }
+
+    /**
+     * Turn on an entity.
+     */
+    fun turnOn(entityId: String): JSONObject? {
+        val domain = getDomainFromEntityId(entityId)
+        return callService(domain, "turn_on", entityId)
+    }
+
+    /**
+     * Turn off an entity.
+     */
+    fun turnOff(entityId: String): JSONObject? {
+        val domain = getDomainFromEntityId(entityId)
+        return callService(domain, "turn_off", entityId)
+    }
+
+    /**
+     * Get the state of a specific entity.
+     */
+    fun getEntityState(entityId: String): JSONObject? {
+        if (!isConfigured) return null
+        return try {
+            val response = httpGet("/api/states/$entityId")
+            JSONObject(response)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get state for $entityId", e)
+            null
+        }
+    }
+
+    /**
+     * Get Home Assistant configuration.
+     */
+    fun getConfig(): JSONObject? {
+        if (!isConfigured) return null
+        return try {
+            val response = httpGet("/api/config")
+            JSONObject(response)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // ─── Domain Detection ───────────────────────────────────────
+
+    private fun getDomainFromEntityId(entityId: String): String {
+        val prefix = entityId.substringBefore(".", "")
+        return DOMAIN_MAP[prefix] ?: "homeassistant"
+    }
+
+    // ─── HTTP Helpers ───────────────────────────────────────────
+
+    private fun httpGet(path: String): String {
+        val url = URL("$baseUrl$path")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            setRequestProperty("Authorization", "Bearer $token")
+            setRequestProperty("Content-Type", "application/json")
+            connectTimeout = 10000
+            readTimeout = 10000
+        }
+
+        try {
+            val responseCode = conn.responseCode
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                Log.w(TAG, "HTTP GET $path returned $responseCode")
+            }
+            return BufferedReader(InputStreamReader(conn.inputStream)).readText()
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun httpPost(path: String, body: JSONObject): String {
+        val url = URL("$baseUrl$path")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            setRequestProperty("Authorization", "Bearer $token")
+            setRequestProperty("Content-Type", "application/json")
+            doOutput = true
+            connectTimeout = 10000
+            readTimeout = 10000
+        }
+
+        try {
+            conn.outputStream.use { os ->
+                val input = body.toString().toByteArray(Charsets.UTF_8)
+                os.write(input, 0, input.size)
+            }
+
+            val responseCode = conn.responseCode
+            return try {
+                BufferedReader(InputStreamReader(conn.inputStream)).readText()
+            } catch (e: Exception) {
+                "" // Some responses have empty body
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+}
