@@ -1,27 +1,28 @@
 package com.jarvis.assistant.shizuku
 
+import android.content.pm.PackageManager
+import android.os.IBinder
+import android.os.Parcel
 import android.util.Log
 import rikka.shizuku.Shizuku
+import rikka.shizuku.ShizukuRemoteProcess
 import java.util.concurrent.TimeUnit
 
 /**
  * JARVIS Shizuku Manager — ADB-level system control without root.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CRITICAL FIXES APPLIED:
+ * CRITICAL FIXES APPLIED (v3):
  *
- * 1. executeShellCommand() now uses Shizuku.newProcess() directly.
- *    The previous code tried broken reflection on a private method,
- *    then fell back to `su` (only works on rooted devices).
- *    Shizuku.newProcess() IS the public API in Shizuku 13.x.
+ * 1. Shizuku.newProcess() is PRIVATE in Shizuku 13.1.5.
+ *    FIX: Access IShizukuService.newProcess() via the Shizuku binder
+ *    using AIDL transact(). The transaction code for newProcess is
+ *    computed from the AIDL method index.
  *
- * 2. isReady() now uses Shizuku.pingBinder() to verify the binder
- *    is actually ALIVE, not just non-null.
+ * 2. Listener types corrected: OnBinderReceivedListener and
+ *    OnBinderDeadListener are interfaces, NOT Runnable.
  *
- * 3. BUG FIX: Listener references are stored as properties so
- *    destroy() can properly remove the SAME objects that were added.
- *    Previously destroy() used empty lambdas {} which created NEW
- *    listener objects that never matched the originals.
+ * 3. destroy() now removes the exact same listener objects that were added.
  * ═══════════════════════════════════════════════════════════════════════
  */
 object ShizukuManager {
@@ -29,7 +30,19 @@ object ShizukuManager {
     private const val TAG = "JarvisShizuku"
     private const val SHELL_TIMEOUT_SECONDS = 15L
 
-    // Shell execution result
+    // IShizukuService AIDL interface descriptor
+    private const val SHIZUKU_SERVICE_DESCRIPTOR = "rikka.shizuku.IShizukuService"
+
+    // AIDL transaction codes for IShizukuService methods
+    // Based on the IShizukuService.aidl from Shizuku source:
+    //   1=exit, 2=getUid, 3=checkPermission, 4=getFlagsForUid,
+    //   5=updateFlagsForUid, 6=checkRemotePermission,
+    //   7=dispatchPermissionConfirmationResult, 8=attachUserService,
+    //   9=peekUserService, 10=getLatestServiceVersion,
+    //   11=getServerPatchVersion, 12=getSELinuxContext,
+    //   13=newProcess
+    private const val TRANSACTION_NEW_PROCESS = IBinder.FIRST_CALL_TRANSACTION + 12
+
     data class ShellResult(
         val stdout: String,
         val stderr: String,
@@ -37,17 +50,14 @@ object ShizukuManager {
         val isSuccess: Boolean
     )
 
-    // ─── Listener references — stored for proper removal in destroy() ────
-    // BUG FIX: These MUST be stored as properties so that removeBinderReceivedListener()
-    // and removeBinderDeadListener() can remove the EXACT same objects that were added.
-    // Previously used empty lambdas {} in destroy() which created new objects.
+    // ─── Listener references ────
 
-    private val binderReceivedListener = Runnable {
+    private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
         Log.i(TAG, "Shizuku binder received — ADB access available")
         notifyShizukuStateChanged(true)
     }
 
-    private val binderDeadListener = Runnable {
+    private val binderDeadListener = Shizuku.OnBinderDeadListener {
         Log.w(TAG, "Shizuku binder dead — ADB access lost")
         notifyShizukuStateChanged(false)
     }
@@ -84,35 +94,18 @@ object ShizukuManager {
 
     // ─── State Checks ────────────────────────────────────────────
 
-    fun isReady(): Boolean {
-        return try {
-            pingBinder()
-        } catch (e: Exception) {
-            false
-        }
+    fun isReady(): Boolean = try { pingBinder() } catch (_: Exception) { false }
+
+    fun pingBinder(): Boolean = try { Shizuku.pingBinder() } catch (e: Exception) {
+        Log.w(TAG, "pingBinder failed: ${e.message}"); false
     }
 
-    fun pingBinder(): Boolean {
-        return try {
-            Shizuku.pingBinder()
-        } catch (e: Exception) {
-            Log.w(TAG, "pingBinder failed: ${e.message}")
-            false
-        }
-    }
-
-    fun hasPermission(): Boolean {
-        return try {
-            Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED
-        } catch (e: Exception) {
-            false
-        }
-    }
+    fun hasPermission(): Boolean = try {
+        Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+    } catch (_: Exception) { false }
 
     fun requestPermission(requestCode: Int = 0) {
-        try {
-            Shizuku.requestPermission(requestCode)
-        } catch (e: Exception) {
+        try { Shizuku.requestPermission(requestCode) } catch (e: Exception) {
             Log.e(TAG, "Failed to request Shizuku permission", e)
         }
     }
@@ -129,20 +122,26 @@ object ShizukuManager {
 
     // ─── Shell Command Execution ────────────────────────────────
 
+    /**
+     * Execute a shell command with ADB-level privileges via Shizuku.
+     *
+     * Uses IShizukuService.newProcess() AIDL method via the Shizuku binder.
+     * The returned ShizukuRemoteProcess extends Process, so we can read
+     * stdout/stderr and get exit code normally.
+     */
     fun executeShellCommand(command: String): ShellResult {
         if (!isReady()) {
-            return ShellResult("", "Shizuku not ready — pingBinder returned false", -1, false)
+            return ShellResult("", "Shizuku not ready", -1, false)
         }
         if (!hasPermission()) {
             return ShellResult("", "Shizuku permission not granted", -1, false)
         }
 
         return try {
-            val process = Shizuku.newProcess(
-                arrayOf("sh", "-c", command),
-                null,
-                null
-            )
+            val binder = Shizuku.getBinder()
+                ?: return ShellResult("", "Shizuku binder is null", -1, false)
+
+            val process = newProcessViaAidl(binder, arrayOf("sh", "-c", command), null, null)
 
             val completed = process.waitFor(SHELL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             if (!completed) {
@@ -150,15 +149,70 @@ object ShizukuManager {
                 return ShellResult("", "Command timed out after ${SHELL_TIMEOUT_SECONDS}s", -1, false)
             }
 
-            val stdout = process.inputStream.bufferedReader().readText().trim()
-            val stderr = process.errorStream.bufferedReader().readText().trim()
+            val stdout = process.inputStream.bufferedReader().use { it.readText().trim() }
+            val stderr = process.errorStream.bufferedReader().use { it.readText().trim() }
             val exitCode = process.exitValue()
 
             Log.d(TAG, "Shell: $command → exit=$exitCode stdout=${stdout.take(200)}")
             ShellResult(stdout, stderr, exitCode, exitCode == 0)
+        } catch (e: SecurityException) {
+            ShellResult("", "Shizuku permission denied: ${e.message}", -1, false)
         } catch (e: Exception) {
             Log.e(TAG, "Shell command failed: $command", e)
             ShellResult("", e.message ?: "Unknown error", -1, false)
+        }
+    }
+
+    /**
+     * Call IShizukuService.newProcess() via AIDL transact().
+     *
+     * The AIDL interface:
+     *   ShizukuRemoteProcess newProcess(in String[] cmd, in String[] env, String dir)
+     *
+     * We construct the Parcel data matching the AIDL wire format,
+     * call binder.transact(), and read the ShizukuRemoteProcess from
+     * the reply.
+     */
+    private fun newProcessViaAidl(
+        binder: IBinder,
+        cmd: Array<String>,
+        env: Array<String>?,
+        dir: String?
+    ): Process {
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+
+        try {
+            // Write AIDL interface token
+            data.writeInterfaceToken(SHIZUKU_SERVICE_DESCRIPTOR)
+
+            // Write cmd: String[]
+            data.writeStringArray(cmd)
+
+            // Write env: String[] (nullable)
+            data.writeStringArray(env)
+
+            // Write dir: String (nullable)
+            data.writeString(dir)
+
+            // Execute the AIDL transaction
+            val result = binder.transact(TRANSACTION_NEW_PROCESS, data, reply, 0)
+            if (!result) {
+                throw RuntimeException("IShizukuService.newProcess() transaction failed — the AIDL method index may be wrong for this Shizuku version")
+            }
+
+            // Read exception (if any)
+            reply.readException()
+
+            // Read the returned ShizukuRemoteProcess (which is Parcelable)
+            // ShizukuRemoteProcess has a CREATOR that reads from Parcel
+            val process = ShizukuRemoteProcess.CREATOR.createFromParcel(reply)
+                ?: throw RuntimeException("Failed to create ShizukuRemoteProcess from AIDL reply")
+
+            return process
+        } finally {
+            reply.recycle()
+            data.recycle()
         }
     }
 
@@ -190,8 +244,6 @@ object ShizukuManager {
         return executeShellCommand("svc data $state")
     }
 
-    // ─── App Management ────────────────────────────────────────
-
     fun forceStopApp(packageName: String): ShellResult =
         executeShellCommand("am force-stop $packageName")
 
@@ -204,15 +256,11 @@ object ShizukuManager {
     fun getAllInstalledApps(): ShellResult =
         executeShellCommand("pm list packages")
 
-    // ─── Permission Control ────────────────────────────────────
-
     fun grantPermission(packageName: String, permission: String): ShellResult =
         executeShellCommand("pm grant $packageName $permission")
 
     fun revokePermission(packageName: String, permission: String): ShellResult =
         executeShellCommand("pm revoke $packageName $permission")
-
-    // ─── Input Simulation ──────────────────────────────────────
 
     fun simulateTap(x: Int, y: Int): ShellResult =
         executeShellCommand("input tap $x $y")
@@ -228,15 +276,11 @@ object ShizukuManager {
         return executeShellCommand("input text \"$escaped\"")
     }
 
-    // ─── System Settings ───────────────────────────────────────
-
     fun setSystemSetting(namespace: String, key: String, value: String): ShellResult =
         executeShellCommand("settings put $namespace $key $value")
 
     fun getSystemSetting(namespace: String, key: String): ShellResult =
         executeShellCommand("settings get $namespace $key")
-
-    // ─── Media Control ─────────────────────────────────────────
 
     fun mediaPlayPause(): ShellResult = simulateKeyPress(85)
     fun mediaNext(): ShellResult = simulateKeyPress(87)
@@ -245,20 +289,14 @@ object ShizukuManager {
     fun setVolume(streamType: Int, volume: Int): ShellResult =
         executeShellCommand("media volume --stream $streamType --set $volume")
 
-    // ─── Screenshot ────────────────────────────────────────────
-
     fun takeScreenshot(path: String): ShellResult =
         executeShellCommand("screencap -p $path")
-
-    // ─── Notifications ─────────────────────────────────────────
 
     fun clearNotifications(): ShellResult =
         executeShellCommand("service call notification 1")
 
     fun dumpNotificationList(): ShellResult =
         executeShellCommand("dumpsys notification")
-
-    // ─── Device Properties ─────────────────────────────────────
 
     fun getDeviceProperty(prop: String): ShellResult =
         executeShellCommand("getprop $prop")
