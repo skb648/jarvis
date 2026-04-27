@@ -91,12 +91,45 @@ fun JarvisNavGraph(
     onPermissionsRequest: () -> Unit,
     onHealthCheck: () -> Unit,
     onSaveAndApplyKeys: (String, String) -> Unit = { _, _ -> },
+    onShizukuRequestPermission: () -> Unit = {},
     apiKeySaveResult: ApiKeySaveResult = ApiKeySaveResult.NONE,
     onConsumeApiKeySaveResult: () -> Unit = {}
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
+
+    /**
+     * CRITICAL FIX: Quick action navigation callback.
+     *
+     * When the HomeScreen "Chat" or "Devices" buttons are pressed,
+     * onQuickAction fires with "chat" or "devices". The HomeScreen
+     * itself can't navigate, so this callback routes through the
+     * NavController to switch screens.
+     */
+    val handleQuickAction: (String) -> Unit = { action ->
+        when (action) {
+            "chat" -> {
+                navController.navigate("chat") {
+                    popUpTo(navController.graph.findStartDestination().id) {
+                        saveState = true
+                    }
+                    launchSingleTop = true
+                    restoreState = true
+                }
+            }
+            "devices" -> {
+                navController.navigate("smarthome") {
+                    popUpTo(navController.graph.findStartDestination().id) {
+                        saveState = true
+                    }
+                    launchSingleTop = true
+                    restoreState = true
+                }
+            }
+            else -> onQuickAction(action)
+        }
+    }
 
     Scaffold(
         containerColor = DeepNavy,
@@ -160,7 +193,7 @@ fun JarvisNavGraph(
                     audioAmplitude = audioAmplitude,
                     deviceCount = deviceCount,
                     activeDeviceCount = activeDeviceCount,
-                    onQuickAction = onQuickAction
+                    onQuickAction = handleQuickAction  // FIX: Now navigates for chat/devices
                 )
             }
             composable("assistant") {
@@ -221,6 +254,7 @@ fun JarvisNavGraph(
                     onPermissionsRequest = onPermissionsRequest,
                     onHealthCheck = onHealthCheck,
                     onSaveAndApplyKeys = onSaveAndApplyKeys,
+                    onShizukuRequestPermission = onShizukuRequestPermission,
                     apiKeySaveResult = apiKeySaveResult,
                     onConsumeApiKeySaveResult = onConsumeApiKeySaveResult
                 )

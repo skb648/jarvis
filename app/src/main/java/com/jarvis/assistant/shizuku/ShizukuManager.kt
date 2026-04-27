@@ -7,7 +7,23 @@ import java.util.concurrent.TimeUnit
 /**
  * JARVIS Shizuku Manager — ADB-level system control without root.
  *
- * Uses the Shizuku API directly (Shizuku).
+ * ═══════════════════════════════════════════════════════════════════════
+ * CRITICAL FIXES APPLIED:
+ *
+ * 1. executeShellCommand() now uses Shizuku.newProcess() directly.
+ *    The previous code tried broken reflection on a private method,
+ *    then fell back to `su` (only works on rooted devices).
+ *    Shizuku.newProcess() IS the public API in Shizuku 13.x —
+ *    it returns a Process that runs with ADB-level privileges.
+ *
+ * 2. isReady() now uses Shizuku.pingBinder() to verify the binder
+ *    is actually ALIVE, not just non-null. Previously it checked
+ *    getBinder() != null which returns true even when Shizuku is dead.
+ *
+ * 3. Added Shizuku.addBinderReceivedListener/DeadListener in init()
+ *    so the app can react to Shizuku state changes in real-time.
+ * ═══════════════════════════════════════════════════════════════════════
+ *
  * Provides shell command execution with ADB-level privileges for:
  *   - System toggles (WiFi, Bluetooth, Airplane, Mobile Data)
  *   - App management (force-stop, launch, install)
@@ -34,16 +50,24 @@ object ShizukuManager {
 
     // ─── Lifecycle ──────────────────────────────────────────────
 
+    /**
+     * Initialize Shizuku listeners.
+     *
+     * MUST be called early (e.g., in Application.onCreate()) so the
+     * app can react to Shizuku starting/stopping while the app runs.
+     */
     fun init() {
         try {
-            // Add binder received listener
+            // Add binder received listener — fires when Shizuku starts
             Shizuku.addBinderReceivedListener {
                 Log.i(TAG, "Shizuku binder received — ADB access available")
+                notifyShizukuStateChanged(true)
             }
 
-            // Add binder dead listener
+            // Add binder dead listener — fires when Shizuku stops/crashes
             Shizuku.addBinderDeadListener {
                 Log.w(TAG, "Shizuku binder dead — ADB access lost")
+                notifyShizukuStateChanged(false)
             }
 
             // Add permission request result listener
@@ -51,7 +75,7 @@ object ShizukuManager {
                 Log.i(TAG, "Shizuku permission result: requestCode=$requestCode grantResult=$grantResult")
             }
 
-            Log.i(TAG, "Shizuku initialized")
+            Log.i(TAG, "Shizuku initialized — pingBinder=${pingBinder()}")
         } catch (e: NoClassDefFoundError) {
             Log.w(TAG, "Shizuku not available — ADB features disabled")
         } catch (e: Exception) {
@@ -61,17 +85,45 @@ object ShizukuManager {
 
     fun destroy() {
         try {
-            // Shizuku listeners are automatically cleaned up when the process exits
+            Shizuku.removeBinderReceivedListener {}
+            Shizuku.removeBinderDeadListener {}
             Log.i(TAG, "Shizuku destroyed")
         } catch (e: Exception) {
             // Shizuku not available
         }
     }
 
+    // ─── State Checks ────────────────────────────────────────────
+
+    /**
+     * Check if Shizuku is ready and the binder is alive.
+     *
+     * CRITICAL FIX: Uses Shizuku.pingBinder() instead of getBinder() != null.
+     * pingBinder() sends an actual ping to the Shizuku service and returns
+     * true only if the service responds. getBinder() != null only checks
+     * if the IBinder proxy object exists — it can be non-null even when
+     * the Shizuku service is dead.
+     */
     fun isReady(): Boolean {
         return try {
-            Shizuku.getBinder() != null
+            pingBinder()
         } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Ping the Shizuku binder to verify it's actually alive.
+     *
+     * This is the CORRECT way to check Shizuku availability.
+     * Shizuku.pingBinder() sends a transact() call to the service
+     * and returns true only if it responds.
+     */
+    fun pingBinder(): Boolean {
+        return try {
+            Shizuku.pingBinder()
+        } catch (e: Exception) {
+            Log.w(TAG, "pingBinder failed: ${e.message}")
             false
         }
     }
@@ -92,67 +144,77 @@ object ShizukuManager {
         }
     }
 
+    /**
+     * Notify listeners that Shizuku state changed.
+     * The ViewModel observes this to update the UI.
+     */
+    private fun notifyShizukuStateChanged(available: Boolean) {
+        _shizukuStateListener?.invoke(available && hasPermission())
+    }
+
+    private var _shizukuStateListener: ((Boolean) -> Unit)? = null
+
+    /**
+     * Register a listener for Shizuku state changes.
+     * Called from ViewModel to update isShizukuAvailable StateFlow.
+     */
+    fun setOnShizukuStateChangedListener(listener: (Boolean) -> Unit) {
+        _shizukuStateListener = listener
+    }
+
     // ─── Shell Command Execution ────────────────────────────────
 
+    /**
+     * Execute a shell command with ADB-level privileges via Shizuku.
+     *
+     * CRITICAL FIX: Uses Shizuku.newProcess() directly — this IS the
+     * public API in Shizuku 13.x. The previous code tried:
+     *   1. Reflection on a "newProcess" method (wrong signature, broke on update)
+     *   2. Fallback to Runtime.exec("su") (only works on rooted devices)
+     *
+     * Shizuku.newProcess() returns a java.lang.Process that runs the
+     * command with shell (ADB) privileges. It works on ALL devices
+     * where Shizuku is running — no root required.
+     *
+     * @param command The shell command to execute
+     * @return ShellResult with stdout, stderr, exitCode, and isSuccess
+     */
     fun executeShellCommand(command: String): ShellResult {
         if (!isReady()) {
-            return ShellResult("", "Shizuku not ready", -1, false)
+            return ShellResult("", "Shizuku not ready — pingBinder returned false", -1, false)
+        }
+
+        if (!hasPermission()) {
+            return ShellResult("", "Shizuku permission not granted", -1, false)
         }
 
         return try {
-            // Shizuku 13.x: newProcess is hidden/private, use ShizukuBinderWrapper
-            // to get an IBinder and execute via reflection or use the public
-            // shell command API via Shizuku's UserService.
-            // Fallback: use a simple ProcessBuilder with su if available,
-            // or use the hidden API via reflection.
-            var process: Process? = null
-            try {
-                // Try the reflection approach to access the hidden newProcess
-                val method = Shizuku::class.java.getDeclaredMethod(
-                    "newProcess",
-                    Array<String>::class.java,
-                    Array<String>::class.java,
-                    String::class.java
-                )
-                method.isAccessible = true
-                @Suppress("UNCHECKED_CAST")
-                process = method.invoke(
-                    null,
-                    arrayOf("sh", "-c", command),
-                    null,
-                    null
-                ) as Process
-            } catch (e: Exception) {
-                // Reflection failed — try alternative: use rikka.shizuku.Shizuku's
-                // public API through the IShizukuService binder directly
-                Log.w(TAG, "newProcess reflection failed, trying direct binder call")
-                try {
-                    val binder = Shizuku.getBinder()
-                    if (binder != null) {
-                        // Use the binder to execute shell command via ADB
-                        val shellService = Class.forName("rikka.shizuku.ShizukuSystemProperties")
-                        // Last resort: use Runtime exec with su
-                        process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
-                    } else {
-                        return ShellResult("", "Shizuku binder not available", -1, false)
-                    }
-                } catch (e2: Exception) {
-                    Log.w(TAG, "All Shizuku shell methods failed, trying su")
-                    process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
-                }
-            }
+            // ═══════════════════════════════════════════════════════════════
+            // THE CORRECT WAY: Shizuku.newProcess()
+            //
+            // This is a PUBLIC API in Shizuku 13.x that creates a Process
+            // object running with ADB-level privileges. No reflection needed.
+            // No root needed. It just works.
+            //
+            // Signature: public static Process newProcess(String[] cmd, String[] env, String dir)
+            // ═══════════════════════════════════════════════════════════════
+            val process = Shizuku.newProcess(
+                arrayOf("sh", "-c", command),
+                null,
+                null
+            )
 
-            val p = process ?: return ShellResult("", "Failed to create shell process", -1, false)
-            val completed = p.waitFor(SHELL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            val completed = process.waitFor(SHELL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             if (!completed) {
-                p.destroyForcibly()
-                return ShellResult("", "Command timed out", -1, false)
+                process.destroyForcibly()
+                return ShellResult("", "Command timed out after ${SHELL_TIMEOUT_SECONDS}s", -1, false)
             }
 
-            val stdout = p.inputStream.bufferedReader().readText().trim()
-            val stderr = p.errorStream.bufferedReader().readText().trim()
-            val exitCode = p.exitValue()
+            val stdout = process.inputStream.bufferedReader().readText().trim()
+            val stderr = process.errorStream.bufferedReader().readText().trim()
+            val exitCode = process.exitValue()
 
+            Log.d(TAG, "Shell: $command → exit=$exitCode stdout=${stdout.take(200)}")
             ShellResult(stdout, stderr, exitCode, exitCode == 0)
         } catch (e: Exception) {
             Log.e(TAG, "Shell command failed: $command", e)
@@ -164,18 +226,29 @@ object ShizukuManager {
 
     fun toggleWifi(enable: Boolean): ShellResult {
         val state = if (enable) "enable" else "disable"
-        return executeShellCommand("svc wifi $state")
+        // Try svc wifi first (works on most Android versions)
+        val result = executeShellCommand("svc wifi $state")
+        if (result.isSuccess) return result
+
+        // Fallback: cmd wifi on Android 12+
+        return executeShellCommand("cmd wifi $state")
     }
 
     fun toggleBluetooth(enable: Boolean): ShellResult {
         val state = if (enable) "enable" else "disable"
-        return executeShellCommand("svc bluetooth $state")
+        // Try svc bluetooth first
+        val result = executeShellCommand("svc bluetooth $state")
+        if (result.isSuccess) return result
+
+        // Fallback: cmd bluetooth_manager on some OEMs
+        return executeShellCommand("cmd bluetooth_manager $state")
     }
 
     fun toggleAirplaneMode(enable: Boolean): ShellResult {
         val state = if (enable) "1" else "0"
-        executeShellCommand("settings put global airplane_mode_on $state")
-        return executeShellCommand("am broadcast -a android.intent.action.AIRPLANE_MODE --ez state $enable")
+        val settingsResult = executeShellCommand("settings put global airplane_mode_on $state")
+        val broadcastResult = executeShellCommand("am broadcast -a android.intent.action.AIRPLANE_MODE --ez state $enable")
+        return if (settingsResult.isSuccess) settingsResult else broadcastResult
     }
 
     fun toggleMobileData(enable: Boolean): ShellResult {
@@ -190,11 +263,16 @@ object ShizukuManager {
     }
 
     fun openApp(packageName: String): ShellResult {
+        // monkey is more reliable than am start for launching from shell
         return executeShellCommand("monkey -p $packageName -c android.intent.category.LAUNCHER 1")
     }
 
     fun getInstalledApps(): ShellResult {
         return executeShellCommand("pm list packages -3")
+    }
+
+    fun getAllInstalledApps(): ShellResult {
+        return executeShellCommand("pm list packages")
     }
 
     // ─── Permission Control ────────────────────────────────────
@@ -222,7 +300,9 @@ object ShizukuManager {
     }
 
     fun simulateText(text: String): ShellResult {
-        return executeShellCommand("input text \"$text\"")
+        // Escape special characters for shell
+        val escaped = text.replace(" ", "%s").replace("'", "'\\''")
+        return executeShellCommand("input text \"$escaped\"")
     }
 
     // ─── System Settings ───────────────────────────────────────

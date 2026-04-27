@@ -17,7 +17,7 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
 
         // CMake build for JNI stub (when Rust .so is not available)
@@ -102,19 +102,36 @@ android {
     }
 }
 
-// ─── Rust build tasks (optional — only runs if cargo-ndk is available) ────
-// These tasks are registered but NOT automatically triggered.
-// The CMake JNI stub provides fallback when Rust .so is absent.
-// To build Rust manually: ./gradlew buildRustDebug
+// ═══════════════════════════════════════════════════════════════════════════════
+// Rust NDK Build Integration — CRITICAL FIX
+//
+// PREVIOUS BUG: The Rust build tasks were registered but NOT automatically
+// triggered. The comment said: "We do NOT automatically depend on Rust build
+// tasks anymore." This meant cargo-ndk was NEVER called during a normal
+// ./gradlew assembleRelease, causing the APK to ship with only the CMake
+// JNI stub instead of the real Rust libjarvis_rust.so.
+//
+// FIX: The Rust build tasks are now AUTOMATICALLY executed as a pre-build
+// dependency for both debug and release builds. The flow is:
+//
+//   1. Pre-build task checks if cargo-ndk is available on PATH
+//   2. If cargo-ndk exists: builds libjarvis_rust.so for arm64-v8a + armeabi-v7a
+//   3. If cargo-ndk is missing: skips gracefully (CMake stub provides fallback)
+//   4. CMake then either links against the real .so or builds the stub
+//
+// The Gradle tasks are also safe to run manually:
+//   ./gradlew buildRustDebug
+//   ./gradlew buildRustRelease
+// ═══════════════════════════════════════════════════════════════════════════════
 
 val rustDir = file("${project.projectDir}/../rust")
 val jniLibsDir = file("${project.projectDir}/src/main/jniLibs")
 
+// Only build for arm64-v8a and armeabi-v7a (the two most common Android ABIs)
+// x86 and x86_64 are excluded to reduce build time and APK size
 val abiTargets = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
-    "armeabi-v7a" to "armv7-linux-androideabi",
-    "x86_64" to "x86_64-linux-android",
-    "x86" to "i686-linux-android"
+    "armeabi-v7a" to "armv7-linux-androideabi"
 )
 
 fun createRustBuildTask(abi: String, target: String, buildType: String): TaskProvider<Exec> {
@@ -126,9 +143,15 @@ fun createRustBuildTask(abi: String, target: String, buildType: String): TaskPro
 
         val ndkHome = System.getenv("ANDROID_NDK_HOME")
             ?: System.getenv("NDK_HOME")
-            ?: project.android.ndkDirectory.absolutePath
+            ?: try {
+                project.android.ndkDirectory.absolutePath
+            } catch (e: Exception) {
+                ""
+
+            }
 
         environment("NDK_HOME", ndkHome)
+        environment("ANDROID_NDK_HOME", ndkHome)
 
         val cargoArgs = mutableListOf(
             "ndk",
@@ -147,6 +170,20 @@ fun createRustBuildTask(abi: String, target: String, buildType: String): TaskPro
         inputs.dir("${rustDir}/src")
         inputs.file("${rustDir}/Cargo.toml")
         outputs.file("${jniLibsDir}/${abi}/libjarvis_rust.so")
+
+        // Only run if cargo-ndk is available — fail gracefully
+        onlyIf {
+            try {
+                val proc = ProcessBuilder("cargo", "ndk", "--version")
+                    .redirectErrorStream(true)
+                    .start()
+                proc.waitFor()
+                proc.exitValue() == 0
+            } catch (e: Exception) {
+                logger.lifecycle("⚠️ cargo-ndk not found — skipping Rust build for $abi. CMake stub will be used.")
+                false
+            }
+        }
     }
 }
 
@@ -168,9 +205,30 @@ tasks.register("buildRustRelease") {
     dependsOn(releaseTasks)
 }
 
-// NOTE: We do NOT automatically depend on Rust build tasks anymore.
-// The CMake JNI stub bridge handles fallback when Rust .so is missing.
-// Rust build is now OPT-IN via explicit: ./gradlew buildRustDebug
+// ═══════════════════════════════════════════════════════════════════════
+// CRITICAL FIX: Auto-wire Rust build as a pre-build dependency
+//
+// This ensures that ./gradlew assembleRelease and ./gradlew assembleDebug
+// ALWAYS attempt to build the Rust .so files before CMake runs.
+//
+// If cargo-ndk is not available, the tasks are skipped (via onlyIf {}),
+// and CMake falls back to the JNI stub. But when cargo-ndk IS available
+// (e.g., in CI/CD or a properly configured dev machine), the real
+// libjarvis_rust.so is built and packaged into the APK.
+// ═══════════════════════════════════════════════════════════════════════
+
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders") }.configureEach {
+    dependsOn("buildRustRelease")
+}
+
+// Also wire for debug builds
+tasks.matching { it.name == "preDebugBuild" }.configureEach {
+    dependsOn("buildRustDebug")
+}
+
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    dependsOn("buildRustRelease")
+}
 
 dependencies {
     val composeBom = platform(libs.compose.bom)

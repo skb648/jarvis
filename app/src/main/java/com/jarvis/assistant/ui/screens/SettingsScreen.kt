@@ -76,6 +76,7 @@ fun SettingsScreen(
     onHealthCheck: () -> Unit,
     // Batch Save & Apply — this is the HOT-SWAP trigger
     onSaveAndApplyKeys: (gemini: String, elevenLabs: String) -> Unit = { _, _ -> },
+    onShizukuRequestPermission: () -> Unit = {},
     apiKeySaveResult: ApiKeySaveResult = ApiKeySaveResult.NONE,
     onConsumeApiKeySaveResult: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -311,7 +312,7 @@ fun SettingsScreen(
 
                 HorizontalDivider(color = GlassBorder.copy(alpha = 0.4f), thickness = 0.5.dp)
 
-                ShizukuRow(isShizukuAvailable)
+                ShizukuRow(isShizukuAvailable, onShizukuRequestPermission)
 
                 HorizontalDivider(color = GlassBorder.copy(alpha = 0.4f), thickness = 0.5.dp)
 
@@ -439,15 +440,19 @@ private fun BatteryRow(isBatteryOptimized: Boolean, onDisable: () -> Unit) {
 // ─── Shizuku row ──────────────────────────────────────────────────────────────
 
 @Composable
-private fun ShizukuRow(isAvailable: Boolean) {
+private fun ShizukuRow(isAvailable: Boolean, onRequestPermission: () -> Unit = {}) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Column {
+        Column(Modifier.weight(1f)) {
             Text("Shizuku", color = TextPrimary, fontSize = 14.sp)
-            Text("System-level actions", color = TextSecondary, fontSize = 11.sp)
+            Text(
+                if (isAvailable) "ADB-level access active" else "Required for system toggles",
+                color = if (isAvailable) JarvisGreen else TextSecondary,
+                fontSize = 11.sp
+            )
         }
         if (isAvailable) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -455,7 +460,9 @@ private fun ShizukuRow(isAvailable: Boolean) {
                 Text("Active", color = JarvisGreen, fontSize = 11.sp)
             }
         } else {
-            Text("Not running", color = TextTertiary, fontSize = 11.sp)
+            TextButton(onClick = onRequestPermission) {
+                Text("CONNECT", color = WarningAmber, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+            }
         }
     }
 }

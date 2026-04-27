@@ -17,6 +17,7 @@ import com.jarvis.assistant.channels.JarviewModel
 import com.jarvis.assistant.data.SettingsRepository
 import com.jarvis.assistant.jni.RustBridge
 import com.jarvis.assistant.router.CommandRouter
+import com.jarvis.assistant.shizuku.ShizukuManager
 import com.jarvis.assistant.ui.orb.BrainState
 import com.jarvis.assistant.ui.screens.ChatMessage
 import com.jarvis.assistant.ui.screens.SmartDevice
@@ -49,6 +50,11 @@ enum class ApiKeySaveResult { NONE, SUCCESS, FAILURE }
  *    [toggleListening] starts/stops the AudioEngine immediately.
  *    When OFF, amplitude drops to 0 and AudioRecord is released.
  *    No SpeechRecognizer, no system beeps.
+ *
+ * 4. SHIZUKU STATE OBSERVATION:
+ *    The ViewModel registers a listener on ShizukuManager so the
+ *    isShizukuAvailable StateFlow updates in real-time when
+ *    Shizuku starts, stops, or permission changes.
  * ═══════════════════════════════════════════════════════════════════════
  */
 class JarvisViewModel(
@@ -59,6 +65,7 @@ class JarvisViewModel(
         private const val TAG = "JarvisViewModel"
         private const val MAX_HISTORY_ENTRIES = 10
         private const val TTS_TIMEOUT_MS = 30_000L
+        private const val SHIZUKU_CHECK_INTERVAL_MS = 5_000L
     }
 
     // ── Core state ─────────────────────────────────────────────────────────────
@@ -168,6 +175,34 @@ class JarvisViewModel(
     init {
         loadPersistedSettings()
         _isRustReady.value = RustBridge.isNativeReady()
+
+        // ── Register Shizuku state listener ────────────────────────────────
+        // This updates isShizukuAvailable in real-time when Shizuku
+        // starts, stops, or permission changes.
+        ShizukuManager.setOnShizukuStateChangedListener { available ->
+            _isShizukuAvailable.value = available
+            Log.i(TAG, "Shizuku state changed: available=$available")
+        }
+
+        // Check initial state
+        _isShizukuAvailable.value = ShizukuManager.isReady() && ShizukuManager.hasPermission()
+
+        // ── Periodic Shizuku health check ──────────────────────────────────
+        // Shizuku can die without firing the binder dead listener in some
+        // edge cases (e.g., Shizuku app force-stopped). This coroutine
+        // rechecks every 5 seconds to catch stale state.
+        viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(SHIZUKU_CHECK_INTERVAL_MS)
+                val ready = ShizukuManager.isReady()
+                val permitted = ShizukuManager.hasPermission()
+                val available = ready && permitted
+                if (_isShizukuAvailable.value != available) {
+                    _isShizukuAvailable.value = available
+                    Log.d(TAG, "Periodic Shizuku check: ready=$ready permitted=$permitted")
+                }
+            }
+        }
     }
 
     // ── Settings loading ───────────────────────────────────────────────────────
@@ -211,9 +246,7 @@ class JarvisViewModel(
     /**
      * Saves both keys to DataStore AND calls [RustBridge.initialize] immediately.
      *
-     * ═══════════════════════════════════════════════════════════════
      * This is the HOT-SWAP fix. The flow is:
-     *
      * 1. Write to DataStore (persistent storage)
      * 2. Update in-memory StateFlow values
      * 3. Call RustBridge.initialize(geminiKey, elevenLabsKey)
@@ -221,10 +254,6 @@ class JarvisViewModel(
      *    → Which calls gemini::set_api_keys()
      *    → Which writes to RwLock<ApiKeys> in Rust
      *    → Subsequent API calls use the NEW keys immediately
-     *
-     * The Rust backend uses `lazy_static! { RwLock<ApiKeys> }` so
-     * there is NO OnceCell rejection — keys can be overwritten freely.
-     * ═══════════════════════════════════════════════════════════════
      */
     fun saveAndApplyApiKeys(geminiKey: String, elevenLabsKey: String) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -236,14 +265,12 @@ class JarvisViewModel(
                 _elevenLabsApiKey.value = elevenLabsKey
 
                 // Step 2 — IMMEDIATELY push to Rust backend (hot-swap)
-                // This is NOT optional — it's the core of the fix.
                 if (RustBridge.isNativeReady()) {
                     try {
                         val ok = RustBridge.initialize(geminiKey, elevenLabsKey)
                         _isRustReady.value = ok
                         Log.i(TAG, "Hot-swap RustBridge.initialize -> $ok")
                     } catch (e: Exception) {
-                        // Keys are saved — Rust will load them on next cold start
                         Log.w(TAG, "RustBridge.initialize threw (keys still saved): ${e.message}")
                     }
                 } else {
@@ -278,9 +305,6 @@ class JarvisViewModel(
      *
      * The toggle is instant (no blocking). AudioRecord runs in a
      * background coroutine on Dispatchers.IO.
-     *
-     * NO SYSTEM BEEPS: AudioEngine uses AudioRecord with
-     * VOICE_COMMUNICATION source, never SpeechRecognizer.
      */
     fun toggleListening(context: Context) {
         if (_isListening.value) {
@@ -292,11 +316,36 @@ class JarvisViewModel(
             _currentTranscription.value = ""
         } else {
             // ── Mic ON ─────────────────────────────────────────────────────────
-            _isListening.value       = true
-            _brainState.value        = BrainState.LISTENING
-            _currentTranscription.value = ""
-            startAudioEngine(context)
+            startListening(context)
         }
+    }
+
+    /**
+     * EXPLICIT start listening — called from the "Voice" quick action
+     * button and from intent shortcuts. If already listening, this is
+     * a no-op (unlike toggleListening which would STOP it).
+     */
+    @SuppressLint("MissingPermission")
+    fun startListening(context: Context) {
+        if (_isListening.value) return  // Already listening — no-op
+
+        _isListening.value       = true
+        _brainState.value        = BrainState.LISTENING
+        _currentTranscription.value = ""
+        startAudioEngine(context)
+    }
+
+    /**
+     * EXPLICIT stop listening — called from services or when the
+     * app loses audio focus. Safe to call even when not listening.
+     */
+    fun stopListening() {
+        if (!_isListening.value) return
+        stopAudioEngine()
+        _isListening.value       = false
+        _brainState.value        = BrainState.IDLE
+        _audioAmplitude.value    = 0f
+        _currentTranscription.value = ""
     }
 
     @SuppressLint("MissingPermission")
@@ -443,8 +492,6 @@ class JarvisViewModel(
             var cleanResponse = stripEmotionTag(rawResponse)
 
             // ── ACTION HANDLER: Intercept AI response and execute REAL actions ──
-            // This prevents JARVIS from hallucinating — if the AI says "Opening YouTube",
-            // we actually open it. If the action fails, we correct the response.
             val (finalResponse, actionResult) = withContext(Dispatchers.Default) {
                 ActionHandler.interceptAndExecute(cleanResponse, context)
             }
@@ -516,62 +563,25 @@ class JarvisViewModel(
         }
     }
 
-    // ── AI command executor ────────────────────────────────────────────────────
-
-    private suspend fun executeCommandsFromAIResponse(
-        aiResponse: String,
-        context: Context
-    ) {
-        val lower = aiResponse.lowercase()
-        try {
-            val openPatterns = listOf(
-                Regex("""(?:i(?:'ll| will)?\s+(?:open|launch|start)\s+(\w+(?:\s+\w+){0,2}))"""),
-                Regex("""(?:opening\s+(\w+(?:\s+\w+){0,2}))"""),
-                Regex("""(?:let me\s+(?:open|launch)\s+(\w+(?:\s+\w+){0,2}))"""),
-            )
-            for (pattern in openPatterns) {
-                val match = pattern.find(lower) ?: continue
-                val appName = match.groupValues[1].trim()
-                    .removeSuffix(" for you").removeSuffix(" now").trim()
-                withContext(Dispatchers.Default) { CommandRouter.route("open $appName", context) }
-                break
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "executeCommandsFromAIResponse: ${e.message}")
-        }
-    }
-
     /**
      * Compute dynamic ElevenLabs TTS parameters based on current emotion.
      *
-     * CRITICAL FIX: Instead of static stability=0.5 / similarity_boost=0.75,
-     * we now adjust these parameters based on the emotion returned by
-     * nativeAnalyzeEmotion. This makes JARVIS sound HUMAN and EXPRESSIVE:
-     *
      * - "Urgent" / "Excited" / "Angry"  -> HIGH expressiveness
-     *   (similarity_boost UP, stability DOWN = more varied, emotional voice)
-     *
      * - "Calm" / "Neutral" / "Sad"     -> LOW expressiveness
-     *   (stability UP = steady, composed voice)
      */
     private fun computeTtsParams(): Pair<Float, Float> {
         val emotion = _emotion.value.lowercase()
         return when {
             emotion in listOf("urgent", "excited", "angry", "stressed", "surprised") -> {
-                // HIGH expressiveness: low stability, high similarity_boost
-                // This makes ElevenLabs produce a highly variable, emotional voice
                 Pair(0.25f, 0.90f)
             }
             emotion in listOf("happy", "joy", "confident", "playful") -> {
-                // MODERATE expressiveness
                 Pair(0.40f, 0.80f)
             }
             emotion in listOf("sad", "fearful", "disgusted") -> {
-                // SOMBER expressiveness: higher stability for steady tone
                 Pair(0.65f, 0.70f)
             }
             else -> {
-                // NEUTRAL / calm / confused
                 Pair(0.50f, 0.75f)
             }
         }
@@ -579,7 +589,6 @@ class JarvisViewModel(
 
     private suspend fun trySynthesizeAndPlay(text: String, context: Context) {
         try {
-            // Dynamic TTS parameters based on emotion
             val (stability, similarityBoost) = computeTtsParams()
             Log.d(TAG, "TTS params: emotion=${_emotion.value} stability=$stability similarityBoost=$similarityBoost")
 
@@ -624,10 +633,18 @@ class JarvisViewModel(
 
     /**
      * Direct amplitude setter for external use (e.g., from services).
-     * The primary path is through AudioEngine's onAmplitudeUpdate callback.
      */
     fun updateAmplitude(amplitude: Float) {
         _audioAmplitude.value = amplitude.coerceIn(0f, 1f)
+    }
+
+    /**
+     * Request Shizuku permission — called from Settings screen.
+     */
+    fun requestShizukuPermission() {
+        if (ShizukuManager.isReady() && !ShizukuManager.hasPermission()) {
+            ShizukuManager.requestPermission()
+        }
     }
 
     // ── Per-field setters ──────────────────────────────────────────────────────
@@ -637,7 +654,6 @@ class JarvisViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 settingsRepository.setGeminiApiKey(key)
-                // Hot-swap: immediately push to Rust if both keys are available
                 if (key.isNotEmpty() && RustBridge.isNativeReady()) {
                     _isRustReady.value = RustBridge.initialize(key, _elevenLabsApiKey.value)
                 }
@@ -756,7 +772,6 @@ class JarvisViewModel(
                         }
                         override fun onPlaybackStateChanged(playbackState: Int) {
                             if (playbackState == Player.STATE_ENDED) {
-                                // TTS finished — drop amplitude if not listening
                                 if (!_isListening.value) {
                                     _audioAmplitude.value = 0f
                                 }
@@ -782,6 +797,7 @@ class JarvisViewModel(
         try { exoPlayer?.release() } catch (_: Exception) {}
         exoPlayer = null
         try { RustBridge.shutdown() } catch (_: Exception) {}
+        ShizukuManager.setOnShizukuStateChangedListener {}
     }
 
     class Factory(private val repo: SettingsRepository) : ViewModelProvider.Factory {

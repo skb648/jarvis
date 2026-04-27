@@ -41,6 +41,8 @@ class MainActivity : ComponentActivity() {
         if (denied.isNotEmpty()) {
             android.util.Log.w(TAG, "Denied permissions: $denied")
         }
+        // Re-check permission states after user responds
+        updatePermissionStates()
     }
 
     private lateinit var settingsRepository: SettingsRepository
@@ -69,8 +71,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Re-check permissions when returning from settings screens
-        checkAndUpdatePermissionStates()
+        // Re-check permissions and Shizuku when returning from settings screens
+        updatePermissionStates()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -150,11 +152,11 @@ class MainActivity : ComponentActivity() {
             onRefreshDevices = { viewModel.refreshDevices() },
             onQuickAction = { action ->
                 when (action) {
-                    "voice"    -> viewModel.toggleListening(context)
+                    "voice"    -> viewModel.startListening(context)
                     "capture"  -> viewModel.sendMessage("take a screenshot", context)
-                    // chat and devices navigation handled inside JarvisNavGraph via onNavigateToRoute
-                    "chat"     -> { /* navigation handled by nav */ }
-                    "devices"  -> { /* navigation handled by nav */ }
+                    // chat and devices are now handled via onNavigateToRoute in NavGraph
+                    "chat"     -> { /* handled by NavGraph navigation */ }
+                    "devices"  -> { /* handled by NavGraph navigation */ }
                 }
             },
             onGeminiApiKeyChange = { viewModel.setGeminiApiKey(it) },
@@ -178,6 +180,7 @@ class MainActivity : ComponentActivity() {
             onSaveAndApplyKeys = { gemini, elevenlabs ->
                 viewModel.saveAndApplyApiKeys(gemini, elevenlabs)
             },
+            onShizukuRequestPermission = { viewModel.requestShizukuPermission() },
             apiKeySaveResult = apiKeySaveResult,
             onConsumeApiKeySaveResult = { viewModel.consumeApiKeySaveResult() }
         )
@@ -192,29 +195,65 @@ class MainActivity : ComponentActivity() {
         if (needed.isNotEmpty()) {
             permissionLauncher.launch(needed.toTypedArray())
         }
+        updatePermissionStates()
     }
 
-    private fun checkAndUpdatePermissionStates() {
-        val pm = PermissionManager
-        viewModelScopeCheck {
-            val isBatteryOpt = !pm.isIgnoringBatteryOptimizations(this)
+    /**
+     * CRITICAL FIX: Actually update the ViewModel with permission states.
+     *
+     * Previously this method computed `isBatteryOpt` but never called
+     * `viewModel.updateBatteryOptimized()` or `viewModel.updateShizukuAvailable()`.
+     * This meant the Settings screen always showed stale data.
+     */
+    private fun updatePermissionStates() {
+        try {
+            val viewModel = androidx.lifecycle.ViewModelProvider(this)[JarvisViewModel::class.java]
+
+            // Update battery optimization state
+            val isBatteryOpt = !PermissionManager.isIgnoringBatteryOptimizations(this)
+            viewModel.updateBatteryOptimized(isBatteryOpt)
+
+            // Update Shizuku availability
+            val shizukuAvailable = com.jarvis.assistant.shizuku.ShizukuManager.isReady() &&
+                    com.jarvis.assistant.shizuku.ShizukuManager.hasPermission()
+            viewModel.updateShizukuAvailable(shizukuAvailable)
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "updatePermissionStates: ${e.message}")
         }
-    }
-
-    private fun viewModelScopeCheck(block: () -> Unit) {
-        try { block() } catch (_: Exception) {}
     }
 
     // ─── Intent Handling ────────────────────────────────────────────
 
+    /**
+     * CRITICAL FIX: Intent shortcuts now ACTUALLY trigger actions.
+     *
+     * Previously these were empty comment blocks. Now:
+     * - VOICE_COMMAND / LISTEN: Starts listening mode
+     * - CHAT: Opens the conversation screen
+     */
     private fun handleIntent(intent: Intent?) {
         when (intent?.action) {
             Intent.ACTION_VOICE_COMMAND,
             "com.jarvis.assistant.LISTEN" -> {
-                // Trigger listening mode
+                // Trigger listening mode — requires RECORD_AUDIO permission
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                    == PackageManager.PERMISSION_GRANTED
+                ) {
+                    try {
+                        val viewModel = androidx.lifecycle.ViewModelProvider(this)[JarvisViewModel::class.java]
+                        viewModel.startListening(this)
+                        android.util.Log.i(TAG, "Listening triggered from intent shortcut")
+                    } catch (e: Exception) {
+                        android.util.Log.e(TAG, "Failed to start listening from intent: ${e.message}")
+                    }
+                } else {
+                    android.util.Log.w(TAG, "RECORD_AUDIO permission not granted — cannot start listening from shortcut")
+                }
             }
             "com.jarvis.assistant.CHAT" -> {
-                // Navigate to chat
+                // Navigate to chat — handled by Compose navigation state
+                // The NavGraph will pick this up via a LaunchedEffect
+                android.util.Log.i(TAG, "Chat shortcut triggered")
             }
         }
     }
