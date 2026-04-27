@@ -1,8 +1,6 @@
 package com.jarvis.assistant.shizuku
 
 import android.content.pm.PackageManager
-import android.os.IBinder
-import android.os.Parcel
 import android.util.Log
 import rikka.shizuku.Shizuku
 import java.util.concurrent.TimeUnit
@@ -11,30 +9,24 @@ import java.util.concurrent.TimeUnit
  * JARVIS Shizuku Manager — ADB-level system control without root.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CRITICAL FIXES APPLIED (v5):
+ * CRITICAL FIX (v6): Shizuku.newProcess() is the CORRECT way to execute
+ * shell commands with ADB privileges. The previous version incorrectly
+ * used raw IBinder.transact() with guessed AIDL transaction codes, which
+ * caused "Binder invocation to an incorrect interface" errors and broke
+ * Bluetooth/WiFi/Airplane mode toggles.
  *
- * 1. Shizuku.newProcess() is PRIVATE in Shizuku 13.1.5 (api module).
- *    The Kotlin compiler rejects direct calls to it.
- *    FIX: Use Shizuku.getBinder() + AIDL transact to call newProcess()
- *    via the IShizukuService interface. This is the same approach used
- *    by Shizuku's own internal code.
+ * The key insight: Shizuku.newProcess() is PUBLIC in the `api` module
+ * (dev.rikka.shizuku:api). It's only package-private in the `provider`
+ * module. Since we depend on `shizuku-api`, we CAN call it directly.
  *
- * 2. AIDL transaction code is computed dynamically by trying multiple
- *    known offsets to handle different Shizuku versions gracefully.
- *
- * 3. Listener types corrected: OnBinderReceivedListener and
- *    OnBinderDeadListener are interfaces, NOT Runnable.
- *
- * 4. destroy() now removes the exact same listener objects that were added.
+ * Usage: Shizuku.newProcess(arrayOf("sh", "-c", "YOUR_COMMAND"), null, null)
+ * This returns a Process object we can read stdout/stderr from.
  * ═══════════════════════════════════════════════════════════════════════
  */
 object ShizukuManager {
 
     private const val TAG = "JarvisShizuku"
     private const val SHELL_TIMEOUT_SECONDS = 15L
-
-    // IShizukuService AIDL interface descriptor
-    private const val SHIZUKU_SERVICE_DESCRIPTOR = "rikka.shizuku.IShizukuService"
 
     data class ShellResult(
         val stdout: String,
@@ -113,14 +105,33 @@ object ShizukuManager {
         _shizukuStateListener = listener
     }
 
-    // ─── Shell Command Execution ────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════
+    // Shell Command Execution — USING Shizuku.newProcess()
+    //
+    // This is the CORRECT way to execute shell commands with ADB
+    // privileges via Shizuku. The method is PUBLIC in the api module.
+    //
+    // Previous broken approach: raw IBinder.transact() with guessed
+    // AIDL transaction codes → caused "Binder invocation to an
+    // incorrect interface" errors.
+    //
+    // Correct approach: Shizuku.newProcess() → returns a Process
+    // object that runs with ADB-level permissions.
+    // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * Execute a shell command with ADB-level privileges via Shizuku.
+     * Execute a shell command with ADB-level privileges via Shizuku.newProcess().
      *
-     * Since Shizuku.newProcess() is private in Shizuku 13.1.5,
-     * we use the binder directly via AIDL transact to call
-     * IShizukuService.newProcess().
+     * This is the ONLY correct way to execute system commands through Shizuku.
+     * The command runs as shell (ADB) user, which has permission to:
+     *   - Toggle WiFi, Bluetooth, Airplane Mode via `svc` commands
+     *   - Install/uninstall apps via `pm` commands
+     *   - Simulate input via `input` commands
+     *   - Change system settings via `settings` commands
+     *   - And much more
+     *
+     * @param command The shell command to execute (e.g., "svc wifi enable")
+     * @return ShellResult with stdout, stderr, exit code, and success flag
      */
     fun executeShellCommand(command: String): ShellResult {
         if (!isReady()) {
@@ -131,10 +142,14 @@ object ShizukuManager {
         }
 
         return try {
-            val binder = Shizuku.getBinder()
-                ?: return ShellResult("", "Shizuku binder is null", -1, false)
-
-            val process = newProcessViaBinder(binder, arrayOf("sh", "-c", command), null, null)
+            // ═══ THE FIX: Use Shizuku.newProcess() directly ═══
+            // This is PUBLIC in the Shizuku API module (dev.rikka.shizuku:api:13.1.5)
+            // It creates a Process that runs with ADB-level permissions.
+            val process = Shizuku.newProcess(
+                arrayOf("sh", "-c", command),
+                null,  // environment variables (null = inherit)
+                null   // working directory (null = default)
+            )
 
             val completed = process.waitFor(SHELL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             if (!completed) {
@@ -149,6 +164,7 @@ object ShizukuManager {
             Log.d(TAG, "Shell: $command → exit=$exitCode stdout=${stdout.take(200)}")
             ShellResult(stdout, stderr, exitCode, exitCode == 0)
         } catch (e: SecurityException) {
+            Log.e(TAG, "Shizuku permission denied for: $command", e)
             ShellResult("", "Shizuku permission denied: ${e.message}", -1, false)
         } catch (e: Exception) {
             Log.e(TAG, "Shell command failed: $command", e)
@@ -156,98 +172,45 @@ object ShizukuManager {
         }
     }
 
-    /**
-     * Call IShizukuService.newProcess() via AIDL transact on the Shizuku binder.
-     *
-     * The AIDL method signature:
-     *   ShizukuRemoteProcess newProcess(in String[] cmd, in String[] env, String dir)
-     *
-     * We try multiple transaction codes to handle different Shizuku versions:
-     *   - Shizuku 13.x: FIRST_CALL_TRANSACTION + 12 (method index 13 in AIDL)
-     *   - Older versions may have different offsets
-     */
-    private fun newProcessViaBinder(
-        binder: IBinder,
-        cmd: Array<String>,
-        env: Array<String>?,
-        dir: String?
-    ): Process {
-        // Try different AIDL transaction codes for compatibility
-        val transactionCodes = intArrayOf(
-            IBinder.FIRST_CALL_TRANSACTION + 12,  // Shizuku 13.x
-            IBinder.FIRST_CALL_TRANSACTION + 11,  // Older versions
-            IBinder.FIRST_CALL_TRANSACTION + 13,  // Newer versions
-        )
-
-        var lastError: Exception? = null
-
-        for (code in transactionCodes) {
-            try {
-                return tryNewProcessTransact(binder, code, cmd, env, dir)
-            } catch (e: Exception) {
-                lastError = e
-                Log.d(TAG, "AIDL transact code ${code} failed: ${e.message}, trying next...")
-            }
-        }
-
-        throw lastError ?: RuntimeException("All AIDL transaction codes failed for newProcess")
-    }
-
-    private fun tryNewProcessTransact(
-        binder: IBinder,
-        transactionCode: Int,
-        cmd: Array<String>,
-        env: Array<String>?,
-        dir: String?
-    ): Process {
-        val data = Parcel.obtain()
-        val reply = Parcel.obtain()
-
-        try {
-            data.writeInterfaceToken(SHIZUKU_SERVICE_DESCRIPTOR)
-            data.writeStringArray(cmd)
-            data.writeStringArray(env)
-            data.writeString(dir)
-
-            val result = binder.transact(transactionCode, data, reply, 0)
-            if (!result) {
-                throw RuntimeException("IShizukuService.newProcess() transaction failed for code $transactionCode")
-            }
-
-            reply.readException()
-
-            // Read the ShizukuRemoteProcess (Parcelable)
-            val process = rikka.shizuku.ShizukuRemoteProcess.CREATOR.createFromParcel(reply)
-                ?: throw RuntimeException("Failed to create ShizukuRemoteProcess from AIDL reply")
-
-            return process
-        } finally {
-            reply.recycle()
-            data.recycle()
-        }
-    }
-
     // ─── System Toggles ────────────────────────────────────────
 
+    /**
+     * Toggle WiFi using `svc wifi enable/disable`.
+     * Fallback to `cmd wifi enable/disable` on some devices.
+     */
     fun toggleWifi(enable: Boolean): ShellResult {
         val state = if (enable) "enable" else "disable"
         val result = executeShellCommand("svc wifi $state")
         if (result.isSuccess) return result
+        // Fallback: some OEMs use `cmd wifi` instead of `svc wifi`
         return executeShellCommand("cmd wifi $state")
     }
 
+    /**
+     * Toggle Bluetooth using `svc bluetooth enable/disable`.
+     * Fallback to `cmd bluetooth_manager enable/disable`.
+     */
     fun toggleBluetooth(enable: Boolean): ShellResult {
         val state = if (enable) "enable" else "disable"
         val result = executeShellCommand("svc bluetooth $state")
         if (result.isSuccess) return result
+        // Fallback for Samsung and other OEMs
         return executeShellCommand("cmd bluetooth_manager $state")
     }
 
+    /**
+     * Toggle Airplane Mode.
+     * Requires both: settings put + broadcast for the system to pick up the change.
+     */
     fun toggleAirplaneMode(enable: Boolean): ShellResult {
         val state = if (enable) "1" else "0"
+        val boolState = if (enable) "true" else "false"
+        // Step 1: Write the setting
         val settingsResult = executeShellCommand("settings put global airplane_mode_on $state")
-        executeShellCommand("am broadcast -a android.intent.action.AIRPLANE_MODE --ez state $enable")
-        return if (settingsResult.isSuccess) settingsResult else executeShellCommand("am broadcast -a android.intent.action.AIRPLANE_MODE --ez state $enable")
+        // Step 2: Broadcast the change so the system applies it
+        executeShellCommand("am broadcast -a android.intent.action.AIRPLANE_MODE --ez state $boolState")
+        return if (settingsResult.isSuccess) settingsResult
+        else executeShellCommand("am broadcast -a android.intent.action.AIRPLANE_MODE --ez state $boolState")
     }
 
     fun toggleMobileData(enable: Boolean): ShellResult {
@@ -258,8 +221,18 @@ object ShizukuManager {
     fun forceStopApp(packageName: String): ShellResult =
         executeShellCommand("am force-stop $packageName")
 
+    /**
+     * Open an app using the monkey command.
+     * This launches the app's main launcher activity.
+     */
     fun openApp(packageName: String): ShellResult =
         executeShellCommand("monkey -p $packageName -c android.intent.category.LAUNCHER 1")
+
+    /**
+     * Start an app using am start — more reliable than monkey for some apps.
+     */
+    fun startApp(packageName: String): ShellResult =
+        executeShellCommand("am start -n $packageName/.MainActivity 2>/dev/null || monkey -p $packageName -c android.intent.category.LAUNCHER 1")
 
     fun getInstalledApps(): ShellResult =
         executeShellCommand("pm list packages -3")

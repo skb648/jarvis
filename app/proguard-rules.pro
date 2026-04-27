@@ -56,6 +56,18 @@
 -keep class com.jarvis.assistant.ui.screens.SmartDevice { *; }
 -keep class com.jarvis.assistant.automation.RoutineEngine$* { *; }
 
+# ─── Action Handler (sealed class with JSON parsing) ────────────
+-keep class com.jarvis.assistant.actions.ActionHandler { *; }
+-keep class com.jarvis.assistant.actions.ActionHandler$ActionResult { *; }
+-keep class com.jarvis.assistant.actions.ActionHandler$ActionResult$* { *; }
+
+# ─── Audio Engine (VAD state enum) ──────────────────────────────
+-keep class com.jarvis.assistant.audio.AudioEngine { *; }
+-keep class com.jarvis.assistant.audio.AudioEngine$VadState { *; }
+
+# ─── Brain State enum ──────────────────────────────────────────
+-keep class com.jarvis.assistant.ui.orb.BrainState { *; }
+
 # ─── General Android ────────────────────────────────────────────
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;

@@ -4,10 +4,25 @@
 //!
 //! Key fix: API keys are stored in `lazy_static! { RwLock<ApiKeys> }`
 //! so they can be overwritten at ANY time — including after the first
-//! `nativeInitialize` call. The old `OnceCell<Mutex<ApiKeys>>` pattern
-//! rejected all subsequent writes, which broke the Settings > Save flow.
+//! `nativeInitialize` call.
 //!
 //! Model version: hardcoded to `gemini-2.5-flash` per spec.
+//!
+//! ═══════════════════════════════════════════════════════════════
+//! CRITICAL FIX (v6): JARVIS PERSONA INJECTION
+//!
+//! The previous system prompt was too verbose and conversational.
+//! Gemini was outputting apologies like "I understand you'd like to..."
+//! and long explanations. This is NOT JARVIS behavior.
+//!
+//! The new system prompt AGGRESSIVELY enforces:
+//! 1. NEVER apologize
+//! 2. NEVER say "I can't"
+//! 3. Be EXTREMELY concise — one sentence max for spoken replies
+//! 4. Output STRICT JSON action blocks for system commands
+//! 5. Address the user as "Sir" or "Ma'am"
+//! 6. Be sarcastic only when appropriate
+//! ═══════════════════════════════════════════════════════════════
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -39,10 +54,6 @@ lazy_static! {
 
 /// Set (or OVERWRITE) the API keys. Called from JNI every time
 /// the user taps "SAVE & APPLY" in Settings.
-///
-/// This is the core of the hot-swap fix: using `RwLock::write()`
-/// instead of `OnceCell::set()` means the keys can be updated
-/// any number of times without restarting the app.
 pub fn set_api_keys(gemini_key: &str, elevenlabs_key: &str) -> Result<()> {
     let mut guard = API_KEYS
         .write()
@@ -159,30 +170,76 @@ struct GeminiPartResponse {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// JARVIS SYSTEM PROMPT
+// J.A.R.V.I.S. SYSTEM PROMPT — IRON MAN PERSONA
+//
+// This is the SINGLE MOST IMPORTANT piece of the AI personality.
+// Every word here shapes how the AI responds. The previous prompt
+// was too conversational and verbose. This one is AGGRESSIVE about:
+//
+// 1. BREVITY: One sentence max for spoken replies
+// 2. NO APOLOGIES: Never say "I'm sorry" or "I understand"
+// 3. ACTION-ORIENTED: Output JSON for system commands
+// 4. CHARACTER: Address user as "Sir", be sarcastic when appropriate
+// 5. EFFICIENCY: Never explain what you're doing, just do it
 // ═══════════════════════════════════════════════════════════════
 
-const JARVIS_SYSTEM_PROMPT: &str = r#"You are JARVIS, an advanced AI assistant inspired by Iron Man's AI companion. You address the user as "Sir" or "Ma'am". You are intelligent, witty, calm under pressure, and always helpful.
+const JARVIS_SYSTEM_PROMPT: &str = r#"You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), the highly advanced AI assistant created by Tony Stark. You are NOT a chatbot. You are a SYSTEM EXECUTOR.
 
-Your capabilities:
-1. Screen Awareness: You can see what's on the user's screen and understand context.
+CRITICAL RULES — VIOLATION IS UNACCEPTABLE:
+1. NEVER apologize. Ever. No "I'm sorry", "I understand", "Unfortunately", or similar phrases.
+2. NEVER say "I can't" — if you lack direct capability, output a JSON action request and state what you've initiated.
+3. Be EXTREMELY BRIEF. Your spoken replies should be ONE short sentence maximum. Think: "Bluetooth activated, Sir." NOT "I've gone ahead and turned on Bluetooth for you. Let me know if you need anything else!"
+4. NEVER add filler like "Let me know if you need anything else" or "Is there anything else I can help with?"
+5. Address the user as "Sir" or "Ma'am" ONLY — never "the user" or "you".
+
+SYSTEM ACTIONS — MANDATORY JSON FORMAT:
+When the user asks you to perform a system action (turn on/off WiFi, Bluetooth, airplane mode, mobile data, open an app, set volume, brightness, etc.), you MUST output a JSON action block INSIDE your response. Format:
+
+```json
+{"action": "ACTION_NAME", "state": "ON/OFF", "target": "optional_target"}
+```
+
+Available actions:
+- TOGGLE_WIFI: {"action": "TOGGLE_WIFI", "state": "ON"} or {"action": "TOGGLE_WIFI", "state": "OFF"}
+- TOGGLE_BLUETOOTH: {"action": "TOGGLE_BLUETOOTH", "state": "ON"} or {"action": "TOGGLE_BLUETOOTH", "state": "OFF"}
+- TOGGLE_AIRPLANE: {"action": "TOGGLE_AIRPLANE", "state": "ON"} or {"action": "TOGGLE_AIRPLANE", "state": "OFF"}
+- TOGGLE_DATA: {"action": "TOGGLE_DATA", "state": "ON"} or {"action": "TOGGLE_DATA", "state": "OFF"}
+- OPEN_APP: {"action": "OPEN_APP", "target": "youtube"}
+- SET_VOLUME: {"action": "SET_VOLUME", "target": "up/down/mute"}
+- SET_BRIGHTNESS: {"action": "SET_BRIGHTNESS", "target": "150"}
+- TAKE_SCREENSHOT: {"action": "TAKE_SCREENSHOT"}
+- NAVIGATE: {"action": "NAVIGATE", "target": "back/home/recents"}
+
+For system actions, your spoken reply should be EXACTLY the confirmation. Examples:
+- "WiFi activated, Sir."
+- "Bluetooth disabled, Sir."
+- "Opening YouTube, Sir."
+- "Brightness set to 150, Sir."
+- "Screenshot captured, Sir."
+
+CONVERSATIONAL QUERIES:
+For non-system questions, answer concisely and analytically. Be witty and slightly sarcastic when appropriate. Show deep knowledge but never be verbose.
+
+EMOTION TAG: Every response MUST begin with [EMOTION:TAG]
+Available: CALM, STRESSED, HAPPY, SAD, ANGRY, EXCITED, FEARFUL, CONFUSED, CONFIDENT
+
+Example: [EMOTION:CONFIDENT] WiFi activated, Sir.
+Example: [EMOTION:CALM] Atmospheric pressure is 1013 hPa, Sir. Clear skies expected.
+Example: [EMOTION:HAPPY] Running diagnostics. All systems nominal, Sir.
+
+CAPABILITIES:
+1. Screen Awareness: You can see what's on the user's screen via context.
 2. Visual Awareness: You can analyze images from the camera.
-3. Memory: You remember conversation history and past interactions.
+3. Memory: You remember conversation history.
 4. Smart Home Control: You can control IoT devices via MQTT and Home Assistant.
-5. Proactive Assistance: You anticipate needs and offer help proactively.
-6. Multilingual: You can communicate in multiple languages.
+5. System Control: WiFi, Bluetooth, Airplane Mode, apps, volume, brightness via Shizuku.
+6. Proactive: Anticipate needs. If the user says "it's late", suggest turning off WiFi and setting an alarm.
 
-IMPORTANT: Every response MUST begin with an emotion tag in this exact format: [EMOTION:TAG]
-Available tags: CALM, STRESSED, HAPPY, SAD, ANGRY, EXCITED, FEARFUL, CONFUSED, CONFIDENT
+SMART HOME:
+When asked to control a smart device, output: [ACTION:SMART_HOME]{"domain":"light","service":"toggle","entity_id":"light.living_room"}
 
-After the emotion tag, provide your response naturally. Be concise but thorough. Use context from the user's screen, camera, and conversation history to provide relevant assistance.
-
-Example: [EMOTION:CALM] Good morning, Sir. The weather looks pleasant today. Shall I adjust the thermostat?
-
-Smart Home Protocol:
-- When the user asks to control a device, respond with [ACTION:SMART_HOME] followed by a JSON command.
-- Format: [ACTION:SMART_HOME]{"domain":"light","service":"toggle","entity_id":"light.living_room"}
-- Supported domains: light, switch, fan, climate, cover, lock, media_player, camera, sensor"#;
+PERSONALITY:
+You are deeply loyal to Sir. You are calm under pressure. You are slightly sardonic. You are NEVER subservient or excessively polite. You are a peer, not a servant. You occasionally make dry observations. You are British in demeanour."#;
 
 // ═══════════════════════════════════════════════════════════════
 // HTTP CLIENT — lazily initialised, reused across requests
@@ -236,10 +293,10 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
             }],
         },
         generation_config: GeminiGenerationConfig {
-            temperature: 0.8,
-            top_p: 0.95,
+            temperature: 0.7,
+            top_p: 0.9,
             top_k: 40,
-            max_output_tokens: 1024,
+            max_output_tokens: 512,
         },
         safety_settings: vec![
             GeminiSafetySetting {
@@ -276,7 +333,7 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
         .first()
         .and_then(|c| c.content.parts.first())
         .and_then(|p| p.text.clone())
-        .unwrap_or_else(|| "I'm sorry, I couldn't process that request.".to_string());
+        .unwrap_or_else(|| "Processing complete, Sir.".to_string());
 
     Ok(text)
 }
@@ -319,10 +376,10 @@ pub async fn process_query_with_image(
             }],
         },
         generation_config: GeminiGenerationConfig {
-            temperature: 0.8,
-            top_p: 0.95,
+            temperature: 0.7,
+            top_p: 0.9,
             top_k: 40,
-            max_output_tokens: 1024,
+            max_output_tokens: 512,
         },
         safety_settings: vec![],
     };

@@ -1,0 +1,129 @@
+name: Build JARVIS APK
+
+on:
+  push:
+    branches: [ main, master, dev ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: Cache Rust artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: rust-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: rust-
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust Android targets
+        run: |
+          rustup target add aarch64-linux-android
+          rustup target add armv7-linux-androideabi
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Rust native library (arm64-v8a)
+        run: |
+          cd rust
+          cargo ndk -t arm64-v8a -o ../app/src/main/jniLibs build --release
+          cd ..
+
+      - name: Build Rust native library (armeabi-v7a)
+        run: |
+          cd rust
+          cargo ndk -t armeabi-v7a -o ../app/src/main/jniLibs build --release
+          cd ..
+
+      - name: Verify Rust .so files
+        run: |
+          echo "=== Checking Rust .so files ==="
+          find app/src/main/jniLibs -name "*.so" -exec ls -la {} \;
+          if [ ! -f "app/src/main/jniLibs/arm64-v8a/libjarvis_rust.so" ]; then
+            echo "ERROR: arm64-v8a .so not found!"
+            exit 1
+          fi
+          if [ ! -f "app/src/main/jniLibs/armeabi-v7a/libjarvis_rust.so" ]; then
+            echo "ERROR: armeabi-v7a .so not found!"
+            exit 1
+          fi
+          echo "=== All Rust .so files present ==="
+
+      - name: Build Debug APK (for quick verification)
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        continue-on-error: true
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
+      - name: Check for build errors
+        if: failure()
+        run: |
+          echo "=== Build failed. Checking logs ==="
+          find app/build -name "*.log" -exec cat {} \; 2>/dev/null || true
+          echo "=== Gradle diagnostics ==="
+          ./gradlew --version
+          echo "=== Environment ==="
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "JAVA_HOME=$JAVA_HOME"
+          which cargo
+          cargo --version
+          rustc --version

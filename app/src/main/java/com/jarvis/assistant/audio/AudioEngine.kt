@@ -5,6 +5,8 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.annotation.RequiresPermission
 import com.jarvis.assistant.jni.RustBridge
@@ -12,38 +14,37 @@ import kotlinx.coroutines.*
 import kotlin.math.sqrt
 
 /**
- * AudioEngine — Production-grade silent audio capture engine.
+ * AudioEngine — Production-grade silent audio capture engine WITH VAD.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CRITICAL DESIGN DECISIONS:
+ * CRITICAL FIXES (v6):
  *
- * 1. ZERO SYSTEM BEEPS:
- *    Uses [MediaRecorder.AudioSource.VOICE_COMMUNICATION] as primary,
- *    falls back to [MediaRecorder.AudioSource.MIC].
- *    NEVER uses AudioSource.VOICE_RECOGNITION (triggers system beeps
- *    on Samsung, Xiaomi, and other OEM skins).
- *    NEVER uses SpeechRecognizer (causes recurring audio focus beeps).
+ * 1. VOICE ACTIVITY DETECTION (VAD):
+ *    When startListening() is active and VAD mode is enabled, the engine
+ *    monitors RMS amplitude in real-time. When the user starts speaking
+ *    (RMS exceeds SPEECH_THRESHOLD), it begins recording. When the user
+ *    stops speaking (RMS stays below SILENCE_THRESHOLD for SILENCE_TIMEOUT_MS),
+ *    it automatically stops recording and delivers the captured audio.
  *
- * 2. PURE PCM LOOP:
- *    The while(isRunning) loop reads raw 16-bit PCM bytes from
- *    AudioRecord. No intent, no SpeechRecognizer, no MediaCodec.
- *    This is the ONLY way to guarantee silence.
+ * 2. END-OF-SPEECH DETECTION:
+ *    The VAD uses a dual-threshold system:
+ *    - SPEECH_THRESHOLD: RMS must exceed this to START recording
+ *    - SILENCE_THRESHOLD: RMS must drop below this to consider silence
+ *    - SILENCE_TIMEOUT_MS: How long silence must persist before we
+ *      conclude the user has finished speaking (1.5 seconds)
+ *    This prevents premature cutoff during natural speech pauses.
  *
- * 3. REAL-TIME RMS AMPLITUDE:
- *    Every frame calculates the Root Mean Square of the PCM buffer.
- *    The result is emitted via [onAmplitudeUpdate] callback, which
- *    the ViewModel exposes as a `MutableStateFlow<Float>`.
- *    This drives the hologram orb's reactive animations.
+ * 3. WAKE WORD INTEGRATION:
+ *    When wake word is detected, the engine automatically enters VAD
+ *    mode and starts recording the user's command.
  *
- * 4. MIC TOGGLE — INSTANT:
- *    [stopListening] sets `isRunning = false`, calls `.stop()` and
- *    `.release()` on AudioRecord IMMEDIATELY. No pending callbacks,
- *    no delayed disposal. The UI toggle is responsive.
+ * 4. AMPLITUDE REACTIVITY:
+ *    Every frame calculates RMS and emits it via onAmplitudeUpdate.
+ *    This drives the hologram orb's reactive animations in real-time.
+ *
+ * 5. ZERO SYSTEM BEEPS:
+ *    Uses VOICE_COMMUNICATION as primary source (never triggers beeps).
  * ═══════════════════════════════════════════════════════════════════════
- *
- * Lifecycle:
- *   startListening() → reads PCM frames in a background coroutine forever
- *   stopListening()  → cancels the coroutine, stops + releases AudioRecord immediately
  */
 class AudioEngine(
     private val context: Context,
@@ -51,22 +52,19 @@ class AudioEngine(
     val onAmplitudeUpdate: (Float) -> Unit,
     /** Called on Main thread when the Rust JNI wake-word fires. */
     val onWakeWordDetected: () -> Unit,
-    /** Called on Main thread when command recording is complete. */
+    /** Called on Main thread when command recording is complete (VAD or manual). */
     val onCommandReady: (ByteArray) -> Unit
 ) {
 
     companion object {
         private const val TAG = "AudioEngine"
 
-        // ── Audio format: 44.1 kHz mono 16-bit PCM ────────────────────────
-        // Per the spec, we use 44100Hz for maximum compatibility.
-        // The Rust backend can resample if needed.
+        // ── Audio format: 44.1 kHz mono 16-bit PCM ────────────────────
         private const val SAMPLE_RATE     = 44_100
         private const val CHANNEL_CONFIG  = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT    = AudioFormat.ENCODING_PCM_16BIT
 
         // Frame: 2048 samples ≈ 46 ms per read cycle at 44.1kHz
-        // Small enough for responsive amplitude, large enough for efficiency
         private const val FRAME_SAMPLES   = 2_048
         private const val FRAME_BYTES     = FRAME_SAMPLES * 2   // 2 bytes / 16-bit sample
 
@@ -76,22 +74,45 @@ class AudioEngine(
         // Skip wake-word JNI call when signal is pure silence (saves CPU)
         private const val SILENCE_FLOOR   = 0.003f
 
+        // ── VAD Parameters ────────────────────────────────────────────
+        // RMS threshold above which we consider the user is speaking
+        private const val SPEECH_THRESHOLD = 0.015f
+        // RMS threshold below which we consider silence (lower than speech
+        // threshold to create hysteresis and prevent rapid on/off toggling)
+        private const val SILENCE_THRESHOLD = 0.010f
+        // How long (in milliseconds) silence must persist before we
+        // conclude the user has finished speaking
+        private const val SILENCE_TIMEOUT_MS = 1500L
+        // Minimum recording duration before allowing silence-based cutoff
+        // (prevents cutting off the first syllable)
+        private const val MIN_RECORDING_MS = 500L
+
         // RMS smoothing: exponential moving average factor.
-        // Higher = more responsive, Lower = smoother.
-        // 0.3 provides a good balance for orb animation.
         private const val RMS_SMOOTHING   = 0.3f
     }
 
-    // ── State ──────────────────────────────────────────────────────────────────
+    // ── VAD State ──────────────────────────────────────────────────────────
+    enum class VadState {
+        IDLE,            // Not recording, monitoring for wake word
+        SPEECH_DETECTED, // User started speaking, recording command
+        SILENCE_AFTER_SPEECH  // Speech ended, waiting to confirm end-of-speech
+    }
+
     @Volatile var isRunning          = false
         private set
     @Volatile private var isRecordingCommand = false
+    @Volatile private var vadState: VadState = VadState.IDLE
 
     private var audioRecord:    AudioRecord? = null
     private var listeningJob:   Job?         = null
 
     // Smoothed RMS to prevent orb jitter
     private var smoothedRms: Float = 0f
+
+    // VAD tracking
+    private var silenceStartTime: Long = 0L
+    private var recordingStartTime: Long = 0L
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val commandFrames   = mutableListOf<ByteArray>()
     private var cmdFrameCount   = 0
@@ -100,7 +121,7 @@ class AudioEngine(
     /** Isolated coroutine scope — cancelled only in [release]. */
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // ── Public API ─────────────────────────────────────────────────────────────
+    // ── Public API ─────────────────────────────────────────────────────────
 
     /**
      * Start the silent audio loop. Requires RECORD_AUDIO permission.
@@ -136,6 +157,7 @@ class AudioEngine(
         audioRecord = ar
         isRunning   = true
         smoothedRms = 0f
+        vadState    = VadState.IDLE
         ar.startRecording()
         Log.i(TAG, "AudioRecord STARTED  source=${ar.audioSource}  sample_rate=$SAMPLE_RATE  buf_size=$bufSize")
 
@@ -153,21 +175,56 @@ class AudioEngine(
                 smoothedRms = RMS_SMOOTHING * rawAmp + (1f - RMS_SMOOTHING) * smoothedRms
                 withContext(Dispatchers.Main) { onAmplitudeUpdate(smoothedRms) }
 
-                // ── 2. Command buffer OR wake-word probe ──────────────────────
+                // ── 2. VAD processing ──────────────────────────────────────────
                 if (isRecordingCommand) {
+                    // We are actively recording a command
                     commandFrames.add(frame)
                     cmdFrameCount++
-                    if (cmdFrameCount >= maxCmdFrames) {
-                        flushCommandBuffer()    // auto-close at max length
-                    }
-                } else if (rawAmp > SILENCE_FLOOR && RustBridge.isNativeReady()) {
-                    try {
-                        if (RustBridge.nativeDetectWakeWord(frame, SAMPLE_RATE)) {
-                            Log.i(TAG, "Wake word detected")
-                            withContext(Dispatchers.Main) { onWakeWordDetected() }
+
+                    // Check for end-of-speech via VAD
+                    val recordingDuration = System.currentTimeMillis() - recordingStartTime
+
+                    if (rawAmp < SILENCE_THRESHOLD && recordingDuration > MIN_RECORDING_MS) {
+                        // User might have stopped speaking
+                        if (vadState == VadState.SPEECH_DETECTED) {
+                            vadState = VadState.SILENCE_AFTER_SPEECH
+                            silenceStartTime = System.currentTimeMillis()
+                            Log.d(TAG, "VAD: Silence detected after speech, waiting ${SILENCE_TIMEOUT_MS}ms")
                         }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "nativeDetectWakeWord error: ${e.message}")
+
+                        // Check if silence has persisted long enough
+                        if (vadState == VadState.SILENCE_AFTER_SPEECH) {
+                            val silenceDuration = System.currentTimeMillis() - silenceStartTime
+                            if (silenceDuration >= SILENCE_TIMEOUT_MS) {
+                                Log.i(TAG, "VAD: End-of-speech confirmed (silence=${silenceDuration}ms, recording=${recordingDuration}ms)")
+                                flushCommandBuffer()
+                            }
+                        }
+                    } else if (rawAmp >= SPEECH_THRESHOLD) {
+                        // User is still speaking — reset silence timer
+                        if (vadState == VadState.SILENCE_AFTER_SPEECH) {
+                            Log.d(TAG, "VAD: Speech resumed, cancelling end-of-speech timer")
+                        }
+                        vadState = VadState.SPEECH_DETECTED
+                    }
+
+                    // Auto-close at max length (safety net)
+                    if (cmdFrameCount >= maxCmdFrames) {
+                        Log.i(TAG, "VAD: Max recording time reached, flushing command")
+                        flushCommandBuffer()
+                    }
+
+                } else {
+                    // ── 3. Wake word probe (when not recording) ─────────────
+                    if (rawAmp > SILENCE_FLOOR && RustBridge.isNativeReady()) {
+                        try {
+                            if (RustBridge.nativeDetectWakeWord(frame, SAMPLE_RATE)) {
+                                Log.i(TAG, "Wake word detected — entering VAD recording mode")
+                                withContext(Dispatchers.Main) { onWakeWordDetected() }
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "nativeDetectWakeWord error: ${e.message}")
+                        }
                     }
                 }
             }
@@ -177,14 +234,6 @@ class AudioEngine(
 
     /**
      * Attempt to create an AudioRecord with the best zero-beep audio source.
-     *
-     * Priority:
-     *   1. VOICE_COMMUNICATION — echo-cancelled, noise-suppressed, NO system beeps
-     *   2. MIC — raw microphone, also NO system beeps
-     *
-     * We NEVER use VOICE_RECOGNITION because it triggers recurring
-     * audio-focus change notifications on many OEM Android skins,
-     * which produce audible "beep" sounds every second.
      */
     private fun tryCreateAudioRecord(bufSize: Int): AudioRecord? {
         // Try VOICE_COMMUNICATION first (best for voice, zero-beep)
@@ -206,7 +255,7 @@ class AudioEngine(
             Log.w(TAG, "VOICE_COMMUNICATION failed: ${e.message}, trying MIC fallback")
         }
 
-        // Fallback: raw MIC (also zero-beep, no SpeechRecognizer involvement)
+        // Fallback: raw MIC (also zero-beep)
         return try {
             val ar = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
@@ -230,18 +279,12 @@ class AudioEngine(
     }
 
     /**
-     * Stop the audio loop and **immediately** release the AudioRecord resource.
-     *
-     * This is called from the Mic toggle — must be fast (UI is waiting).
-     * Sets isRunning = false to break the while loop, cancels the coroutine,
-     * then stop() + release() the AudioRecord hardware.
-     *
-     * NO SYSTEM BEEPS: We never used SpeechRecognizer or VOICE_RECOGNITION,
-     * so there are no system sounds to clean up.
+     * Stop the audio loop and IMMEDIATELY release AudioRecord.
      */
     fun stopListening() {
         isRunning = false
         isRecordingCommand = false
+        vadState = VadState.IDLE
 
         listeningJob?.cancel()
         listeningJob = null
@@ -257,12 +300,23 @@ class AudioEngine(
         Log.i(TAG, "AudioRecord STOPPED + released")
     }
 
-    /** Begin accumulating frames as a user voice command. */
+    /**
+     * Begin recording a command with VAD (Voice Activity Detection).
+     *
+     * Called when:
+     * 1. User presses the mic button → manual trigger
+     * 2. Wake word detected → automatic trigger
+     *
+     * VAD will auto-stop recording when silence is detected after speech.
+     */
     fun startCommandRecording() {
         commandFrames.clear()
         cmdFrameCount = 0
         isRecordingCommand = true
-        Log.d(TAG, "Command recording started")
+        vadState = VadState.IDLE
+        recordingStartTime = System.currentTimeMillis()
+        silenceStartTime = 0L
+        Log.d(TAG, "Command recording started with VAD — will auto-stop on ${SILENCE_TIMEOUT_MS}ms silence")
     }
 
     /** Stop command recording and deliver accumulated PCM bytes. */
@@ -284,6 +338,7 @@ class AudioEngine(
 
     private suspend fun flushCommandBuffer() {
         isRecordingCommand = false
+        vadState = VadState.IDLE
         val frames = commandFrames.toList()
         commandFrames.clear()
         cmdFrameCount = 0
@@ -292,18 +347,14 @@ class AudioEngine(
         val out = ByteArray(frames.sumOf { it.size })
         var off = 0
         for (f in frames) { f.copyInto(out, off); off += f.size }
-        Log.i(TAG, "Command flushed: ${out.size} bytes (~${out.size / (SAMPLE_RATE * 2)} s)")
+        val durationSec = out.size.toFloat() / (SAMPLE_RATE * 2)
+        Log.i(TAG, "Command flushed: ${out.size} bytes (~${"%.1f".format(durationSec)}s)")
         withContext(Dispatchers.Main) { onCommandReady(out) }
     }
 
     /**
      * Root-mean-square of raw little-endian signed 16-bit PCM.
      * Returns [0f..1f] normalised to Int16 full-scale.
-     *
-     * This is the core amplitude calculation that feeds the orb animation.
-     * Each sample is converted from two bytes (little-endian) to a signed
-     * 16-bit integer, squared, summed, then we take the square root of
-     * the mean and normalise by dividing by 32768 (max Int16 value).
      */
     private fun rms(pcm: ByteArray): Float {
         val n = pcm.size / 2
@@ -311,7 +362,7 @@ class AudioEngine(
         var sum = 0.0
         for (i in 0 until n) {
             val lo = pcm[i * 2].toInt() and 0xFF
-            val hi = pcm[i * 2 + 1].toInt()        // sign-extended by Kotlin
+            val hi = pcm[i * 2 + 1].toInt()
             val s  = (hi shl 8) or lo
             sum   += s.toLong() * s.toLong()
         }

@@ -41,7 +41,6 @@ class MainActivity : ComponentActivity() {
         if (denied.isNotEmpty()) {
             android.util.Log.w(TAG, "Denied permissions: $denied")
         }
-        // Re-check permission states after user responds
         updatePermissionStates()
     }
 
@@ -52,16 +51,10 @@ class MainActivity : ComponentActivity() {
 
         settingsRepository = (application as JarvisApp).settingsRepository
 
-        // Enable edge-to-edge rendering
         enableEdgeToEdge()
-
-        // Request permissions on first launch
         requestPermissionsIfNeeded()
-
-        // Handle intent shortcuts
         handleIntent(intent)
 
-        // Set content
         setContent {
             JarvisTheme {
                 MainContent()
@@ -71,7 +64,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Re-check permissions and Shizuku when returning from settings screens
         updatePermissionStates()
     }
 
@@ -82,12 +74,30 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Main composable content — wires the ViewModel state to the NavGraph.
+     *
+     * ═══════════════════════════════════════════════════════════════════════
+     * CRITICAL FIX (v6): Chat screen voice button now ACTUALLY starts/stops
+     * the microphone. Previously, onToggleVoice called toggleVoiceMode()
+     * which only flipped a UI flag. Now it calls toggleVoiceMode(context)
+     * which starts the AudioEngine.
+     * ═══════════════════════════════════════════════════════════════════════
      */
     @Composable
     private fun MainContent() {
         val viewModel: JarvisViewModel = viewModel(
             factory = JarvisViewModel.Factory(settingsRepository)
         )
+
+        // CRITICAL FIX: Pass application context to ViewModel for wake word monitoring
+        val context = this
+        LaunchedEffect(Unit) {
+            viewModel.setApplicationContext(context)
+            // Start wake word monitor if enabled
+            if (viewModel.isWakeWordEnabled.value) {
+                viewModel.startWakeWordMonitor(context)
+            }
+        }
+
         val brainState by viewModel.brainState.collectAsState()
         val audioAmplitude by viewModel.audioAmplitude.collectAsState()
         val currentTranscription by viewModel.currentTranscription.collectAsState()
@@ -114,8 +124,6 @@ class MainActivity : ComponentActivity() {
         val isShizukuAvailable by viewModel.isShizukuAvailable.collectAsState()
         val isRustReady by viewModel.isRustReady.collectAsState()
         val apiKeySaveResult by viewModel.apiKeySaveResult.collectAsState()
-
-        val context = this
 
         JarvisNavGraph(
             brainState = brainState,
@@ -147,14 +155,16 @@ class MainActivity : ComponentActivity() {
             isRustReady = isRustReady,
             onToggleListening = { viewModel.toggleListening(context) },
             onSendMessage = { viewModel.sendMessage(it, context) },
-            onToggleVoice = { viewModel.toggleVoiceMode() },
+            // ═══ CRITICAL FIX: Chat screen voice button now starts/stops mic ═══
+            // Previously: viewModel.toggleVoiceMode() — just flipped a flag, mic stayed dead
+            // Now: viewModel.toggleVoiceMode(context) — actually starts AudioEngine
+            onToggleVoice = { viewModel.toggleVoiceMode(context) },
             onToggleDevice = { id, state -> viewModel.toggleDevice(id, state) },
             onRefreshDevices = { viewModel.refreshDevices() },
             onQuickAction = { action ->
                 when (action) {
                     "voice"    -> viewModel.startListening(context)
                     "capture"  -> viewModel.sendMessage("take a screenshot", context)
-                    // chat and devices are now handled via onNavigateToRoute in NavGraph
                     "chat"     -> { /* handled by NavGraph navigation */ }
                     "devices"  -> { /* handled by NavGraph navigation */ }
                 }
@@ -198,22 +208,13 @@ class MainActivity : ComponentActivity() {
         updatePermissionStates()
     }
 
-    /**
-     * CRITICAL FIX: Actually update the ViewModel with permission states.
-     *
-     * Previously this method computed `isBatteryOpt` but never called
-     * `viewModel.updateBatteryOptimized()` or `viewModel.updateShizukuAvailable()`.
-     * This meant the Settings screen always showed stale data.
-     */
     private fun updatePermissionStates() {
         try {
             val viewModel = androidx.lifecycle.ViewModelProvider(this)[JarvisViewModel::class.java]
 
-            // Update battery optimization state
             val isBatteryOpt = !PermissionManager.isIgnoringBatteryOptimizations(this)
             viewModel.updateBatteryOptimized(isBatteryOpt)
 
-            // Update Shizuku availability
             val shizukuAvailable = com.jarvis.assistant.shizuku.ShizukuManager.isReady() &&
                     com.jarvis.assistant.shizuku.ShizukuManager.hasPermission()
             viewModel.updateShizukuAvailable(shizukuAvailable)
@@ -224,18 +225,10 @@ class MainActivity : ComponentActivity() {
 
     // ─── Intent Handling ────────────────────────────────────────────
 
-    /**
-     * CRITICAL FIX: Intent shortcuts now ACTUALLY trigger actions.
-     *
-     * Previously these were empty comment blocks. Now:
-     * - VOICE_COMMAND / LISTEN: Starts listening mode
-     * - CHAT: Opens the conversation screen
-     */
     private fun handleIntent(intent: Intent?) {
         when (intent?.action) {
             Intent.ACTION_VOICE_COMMAND,
             "com.jarvis.assistant.LISTEN" -> {
-                // Trigger listening mode — requires RECORD_AUDIO permission
                 if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                     == PackageManager.PERMISSION_GRANTED
                 ) {
@@ -247,12 +240,10 @@ class MainActivity : ComponentActivity() {
                         android.util.Log.e(TAG, "Failed to start listening from intent: ${e.message}")
                     }
                 } else {
-                    android.util.Log.w(TAG, "RECORD_AUDIO permission not granted — cannot start listening from shortcut")
+                    android.util.Log.w(TAG, "RECORD_AUDIO permission not granted")
                 }
             }
             "com.jarvis.assistant.CHAT" -> {
-                // Navigate to chat — handled by Compose navigation state
-                // The NavGraph will pick this up via a LaunchedEffect
                 android.util.Log.i(TAG, "Chat shortcut triggered")
             }
         }

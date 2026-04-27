@@ -10,17 +10,21 @@ import com.jarvis.assistant.shizuku.ShizukuManager
 /**
  * ActionHandler — Intercepts AI responses and executes REAL Android actions.
  *
- * CRITICAL FIX: This class prevents JARVIS from "hallucinating" actions.
+ * ═══════════════════════════════════════════════════════════════════════
+ * CRITICAL FIX (v6): JSON ACTION BLOCK PARSING
  *
- * When Gemini returns a response like "Opening YouTube for you, Sir.",
- * the ActionHandler intercepts it BEFORE speaking and:
- *   1. Parses the intent (open app, toggle setting, etc.)
- *   2. Executes the REAL Android action via Intent or Shizuku
- *   3. Only allows the "Opening X" response AFTER the intent is
- *      successfully fired
+ * The JARVIS persona now outputs structured JSON action blocks for system
+ * commands. For example:
+ *   {"action": "TOGGLE_BLUETOOTH", "state": "ON"}
+ *   {"action": "OPEN_APP", "target": "youtube"}
+ *   {"action": "SET_VOLUME", "target": "up"}
  *
- * If the action FAILS, JARVIS says "I couldn't open X" instead of
- * lying about having done it.
+ * This ActionHandler now parses BOTH:
+ * 1. JSON action blocks (from the new JARVIS persona)
+ * 2. Natural language patterns (from older/fallback responses)
+ *
+ * JSON actions take priority because they are explicit and unambiguous.
+ * ═══════════════════════════════════════════════════════════════════════
  */
 object ActionHandler {
 
@@ -82,12 +86,158 @@ object ActionHandler {
     /**
      * Intercept an AI response and execute any actions found in it.
      *
-     * This is the main entry point. Call this BEFORE the response is
-     * spoken aloud. If the AI claims to have opened an app, this method
-     * will actually open it. If the action fails, the response is
-     * modified to reflect the failure instead of hallucinating success.
+     * PRIORITY:
+     * 1. JSON action blocks — explicit, unambiguous, from JARVIS persona
+     * 2. Natural language patterns — fallback for verbose AI responses
      */
     fun interceptAndExecute(aiResponse: String, context: Context): Pair<String, ActionResult> {
+        // ═══ PRIORITY 1: Parse JSON action blocks ═══
+        val jsonActionResult = parseAndExecuteJsonActions(aiResponse, context)
+        if (jsonActionResult.second !is ActionResult.NoAction) {
+            return jsonActionResult
+        }
+
+        // ═══ PRIORITY 2: Natural language pattern matching ═══
+        return parseNaturalLanguageActions(aiResponse, context)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // JSON ACTION BLOCK PARSING
+    //
+    // The JARVIS persona outputs JSON blocks like:
+    //   {"action": "TOGGLE_BLUETOOTH", "state": "ON"}
+    //   {"action": "OPEN_APP", "target": "youtube"}
+    //   {"action": "SET_VOLUME", "target": "up"}
+    //
+    // We extract these, execute them, and strip them from the spoken reply.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private fun parseAndExecuteJsonActions(aiResponse: String, context: Context): Pair<String, ActionResult> {
+        // Find JSON blocks in the response — could be inside ```json``` or standalone
+        val jsonPattern = Regex("""\{\s*"action"\s*:\s*"(\w+)"\s*(?:,\s*"state"\s*:\s*"(\w+)"\s*)?(?:,\s*"target"\s*:\s*"([^"]+)"\s*)?\}""")
+        val match = jsonPattern.find(aiResponse)
+
+        if (match == null) return aiResponse to ActionResult.NoAction
+
+        val action = match.groupValues[1].uppercase()
+        val state = match.groupValues[2].ifBlank { "" }
+        val target = match.groupValues[3].ifBlank { "" }
+
+        Log.i(TAG, "JSON action detected: action=$action state=$state target=$target")
+
+        // Execute the action
+        val result = when (action) {
+            "TOGGLE_WIFI" -> {
+                val enable = state == "ON"
+                executeToggle("wifi_${if (enable) "on" else "off"}", context)
+            }
+            "TOGGLE_BLUETOOTH" -> {
+                val enable = state == "ON"
+                executeToggle("bluetooth_${if (enable) "on" else "off"}", context)
+            }
+            "TOGGLE_AIRPLANE" -> {
+                val enable = state == "ON"
+                executeToggle("airplane_${if (enable) "on" else "off"}", context)
+            }
+            "TOGGLE_DATA" -> {
+                val enable = state == "ON"
+                executeToggle("data_${if (enable) "on" else "off"}", context)
+            }
+            "OPEN_APP" -> {
+                val appName = target.lowercase().trim()
+                if (appName.isNotEmpty()) executeOpenApp(appName, context)
+                else ActionResult.Failed("No app name specified.")
+            }
+            "SET_VOLUME" -> {
+                when (target.lowercase()) {
+                    "up", "raise", "higher" -> executeVolume("up", context)
+                    "down", "lower" -> executeVolume("down", context)
+                    "mute", "silent", "0" -> executeVolume("mute", context)
+                    else -> {
+                        // Try parsing as a number
+                        val level = target.toIntOrNull()
+                        if (level != null) {
+                            if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+                                ShizukuManager.setVolume(3, level.coerceIn(0, 15))
+                                ActionResult.Success("Volume set to $level, Sir.")
+                            } else {
+                                ActionResult.Failed("I need Shizuku access to set volume levels.")
+                            }
+                        } else {
+                            ActionResult.Failed("Unknown volume target: $target")
+                        }
+                    }
+                }
+            }
+            "SET_BRIGHTNESS" -> {
+                val level = target.toIntOrNull()?.coerceIn(0, 255)
+                if (level != null) {
+                    if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+                        val result = ShizukuManager.setSystemSetting("system", "screen_brightness", level.toString())
+                        if (result.isSuccess) ActionResult.Success("Brightness set to $level, Sir.")
+                        else ActionResult.Failed("Could not set brightness. ${result.stderr}")
+                    } else {
+                        ActionResult.Failed("I need Shizuku access to set brightness.")
+                    }
+                } else {
+                    ActionResult.Failed("Invalid brightness value: $target")
+                }
+            }
+            "TAKE_SCREENSHOT" -> {
+                if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+                    val path = "/sdcard/Pictures/screenshots/jarvis_${System.currentTimeMillis()}.png"
+                    val result = ShizukuManager.takeScreenshot(path)
+                    if (result.isSuccess) ActionResult.Success("Screenshot captured, Sir.")
+                    else ActionResult.Failed("Could not take screenshot. ${result.stderr}")
+                } else {
+                    ActionResult.Failed("I need Shizuku access to take screenshots.")
+                }
+            }
+            "NAVIGATE" -> {
+                if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+                    val keyCode = when (target.lowercase()) {
+                        "back" -> 4
+                        "home" -> 3
+                        "recents" -> 187
+                        else -> null
+                    }
+                    if (keyCode != null) {
+                        ShizukuManager.simulateKeyPress(keyCode)
+                        ActionResult.Success("Done, Sir.")
+                    } else {
+                        ActionResult.Failed("Unknown navigation target: $target")
+                    }
+                } else {
+                    ActionResult.Failed("I need Shizuku access for navigation.")
+                }
+            }
+            else -> ActionResult.NoAction
+        }
+
+        // Strip the JSON block from the spoken response
+        val cleanResponse = jsonPattern.replace(aiResponse, "").trim()
+            .replace(Regex("```json\\s*"), "").replace(Regex("```\\s*"), "")
+            .trim()
+
+        // If the cleaned response is empty after stripping JSON, provide a default
+        val finalResponse = if (cleanResponse.isBlank()) {
+            when (result) {
+                is ActionResult.Success -> result.message
+                is ActionResult.Failed -> "Action failed. ${result.message}"
+                is ActionResult.NoAction -> "Acknowledged, Sir."
+            }
+        } else {
+            cleanResponse
+        }
+
+        return finalResponse to result
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // NATURAL LANGUAGE PATTERN MATCHING (fallback)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private fun parseNaturalLanguageActions(aiResponse: String, context: Context): Pair<String, ActionResult> {
         val lower = aiResponse.lowercase()
 
         // 1. Open / Launch app patterns
@@ -177,7 +327,9 @@ object ActionHandler {
         return aiResponse to ActionResult.NoAction
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
     // Action Executors
+    // ═══════════════════════════════════════════════════════════════════════
 
     private fun executeOpenApp(appName: String, context: Context): ActionResult {
         Log.i(TAG, "Executing OPEN APP: $appName")
@@ -187,14 +339,14 @@ object ActionHandler {
             val launched = tryLaunchApp(knownPackage, context)
             if (launched) {
                 Log.i(TAG, "Successfully launched $appName via known package: $knownPackage")
-                return ActionResult.Success("Opening ${appName.replaceFirstChar { it.uppercase() }} for you, Sir.")
+                return ActionResult.Success("Opening ${appName.replaceFirstChar { it.uppercase() }}, Sir.")
             }
 
             if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
                 val result = ShizukuManager.openApp(knownPackage)
                 if (result.isSuccess) {
                     Log.i(TAG, "Force-launched $appName via Shizuku")
-                    return ActionResult.Success("Opening ${appName.replaceFirstChar { it.uppercase() }} via system command, Sir.")
+                    return ActionResult.Success("Opening ${appName.replaceFirstChar { it.uppercase() }}, Sir.")
                 }
             }
 
@@ -206,13 +358,13 @@ object ActionHandler {
             val launched = tryLaunchApp(foundPackage, context)
             if (launched) {
                 Log.i(TAG, "Successfully launched $appName via discovered package: $foundPackage")
-                return ActionResult.Success("Opening ${appName.replaceFirstChar { it.uppercase() }} for you, Sir.")
+                return ActionResult.Success("Opening ${appName.replaceFirstChar { it.uppercase() }}, Sir.")
             }
 
             if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
                 val result = ShizukuManager.openApp(foundPackage)
                 if (result.isSuccess) {
-                    return ActionResult.Success("Opening ${appName.replaceFirstChar { it.uppercase() }} via system command, Sir.")
+                    return ActionResult.Success("Opening ${appName.replaceFirstChar { it.uppercase() }}, Sir.")
                 }
             }
         }
@@ -227,7 +379,7 @@ object ActionHandler {
                     val pkg = matchingLine.substringAfter("package:").trim()
                     val openResult = ShizukuManager.openApp(pkg)
                     if (openResult.isSuccess) {
-                        return ActionResult.Success("Opening ${appName.replaceFirstChar { it.uppercase() }} for you, Sir.")
+                        return ActionResult.Success("Opening ${appName.replaceFirstChar { it.uppercase() }}, Sir.")
                     }
                 }
             }

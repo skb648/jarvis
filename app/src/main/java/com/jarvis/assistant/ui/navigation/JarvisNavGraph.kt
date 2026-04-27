@@ -8,6 +8,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -100,12 +101,7 @@ fun JarvisNavGraph(
     val currentDestination = navBackStackEntry?.destination
 
     /**
-     * CRITICAL FIX: Quick action navigation callback.
-     *
-     * When the HomeScreen "Chat" or "Devices" buttons are pressed,
-     * onQuickAction fires with "chat" or "devices". The HomeScreen
-     * itself can't navigate, so this callback routes through the
-     * NavController to switch screens.
+     * Quick action navigation callback.
      */
     val handleQuickAction: (String) -> Unit = { action ->
         when (action) {
@@ -193,7 +189,7 @@ fun JarvisNavGraph(
                     audioAmplitude = audioAmplitude,
                     deviceCount = deviceCount,
                     activeDeviceCount = activeDeviceCount,
-                    onQuickAction = handleQuickAction  // FIX: Now navigates for chat/devices
+                    onQuickAction = handleQuickAction
                 )
             }
             composable("assistant") {
@@ -213,6 +209,8 @@ fun JarvisNavGraph(
                     isTyping = isTyping,
                     isVoiceMode = isVoiceMode,
                     onSendMessage = onSendMessage,
+                    // CRITICAL FIX: Voice button in Chat screen now ACTUALLY
+                    // starts/stops the microphone instead of just toggling a UI flag
                     onToggleVoice = onToggleVoice
                 )
             }
