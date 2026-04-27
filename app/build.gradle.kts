@@ -25,7 +25,7 @@ android {
             cmake {
                 cppFlags += ""
                 arguments += listOf(
-                    "-DANDROID_STL=c++_shared"
+                    "-DANDROID_STL=none"
                 )
             }
         }
@@ -42,8 +42,8 @@ android {
             }
         }
         release {
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

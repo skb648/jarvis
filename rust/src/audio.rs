@@ -164,7 +164,7 @@ fn estimate_emotion_from_audio(pitch_hz: f64, volume_db: f64, energy: f64) -> (S
 }
 
 /// Compute FFT spectrum of audio samples (for visual equalizer).
-#[allow(dead_code)]
+#[allow(dead_code, unused_variables)]
 pub fn compute_spectrum(audio_data: &[u8], _sample_rate: u32) -> Vec<f64> {
     let samples = bytes_to_f64_samples(audio_data);
     if samples.is_empty() {

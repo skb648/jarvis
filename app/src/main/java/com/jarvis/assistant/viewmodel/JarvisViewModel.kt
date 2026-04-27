@@ -407,7 +407,10 @@ class JarvisViewModel(
     // ── Query processing ───────────────────────────────────────────────────────
 
     fun processQuery(query: String, context: Context) {
-        if (_brainState.value != BrainState.IDLE && _brainState.value != BrainState.ERROR) return
+        // Allow text queries even when mic is on (LISTENING) — the user
+        // should be able to type while the orb is listening.
+        // Only block if already THINKING or SPEAKING to prevent duplicate AI calls.
+        if (_brainState.value == BrainState.THINKING || _brainState.value == BrainState.SPEAKING) return
 
         viewModelScope.launch(Dispatchers.Main) {
             try {
@@ -746,8 +749,9 @@ class JarvisViewModel(
         val recent  = _messages.value.takeLast(MAX_HISTORY_ENTRIES)
         val entries = recent.map { m ->
             val role    = if (m.isFromUser) "user" else "model"
-            val escaped = m.content.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
-            """{"role":"$role","content":"$escaped"}"""
+            // Use Gson for proper JSON escaping — prevents injection & broken JSON
+            val escaped = com.google.gson.Gson().toJson(m.content)
+            """{"role":"$role","content":$escaped}"""
         }
         return "[${entries.joinToString(",")}]"
     }

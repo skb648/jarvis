@@ -9,18 +9,19 @@ use jni::sys::{jboolean, jdouble, jfloat, jint, jstring};
 use jni::JNIEnv;
 use jni::JavaVM;
 use log::LevelFilter;
-use once_cell::sync::OnceCell;
 
-static RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
-
-fn runtime() -> &'static tokio::runtime::Runtime {
-    RUNTIME.get_or_init(|| {
+lazy_static::lazy_static! {
+    static ref RUNTIME: tokio::runtime::Runtime = {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .enable_all()
             .build()
             .expect("Failed to create Tokio runtime")
-    })
+    };
+}
+
+fn runtime() -> &'static tokio::runtime::Runtime {
+    &RUNTIME
 }
 
 #[no_mangle]

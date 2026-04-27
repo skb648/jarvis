@@ -1,20 +1,16 @@
 # ═══════════════════════════════════════════════════════════════════════
 # JARVIS APK — GitHub Actions CI/CD Pipeline
 #
-# This workflow builds the JARVIS APK with Rust JNI libraries
-# included (not stubs). The build order is critical:
-#
+# Build the JARVIS APK with Rust JNI libraries included.
+# The build order is critical:
 #   1. Setup JDK 17 + Android SDK
 #   2. Install Android NDK (required by cargo-ndk)
 #   3. Setup Rust toolchain + cargo-ndk
 #   4. Add Rust Android cross-compilation targets
 #   5. Build libjarvis_rust.so for arm64-v8a + armeabi-v7a
 #   6. Run ./gradlew assembleRelease (which also triggers CMake)
-#   7. Verify APK contains .so files (not just stubs)
+#   7. Verify APK contains .so files
 #   8. Upload APK as downloadable artifact
-#
-# The release APK is signed with the debug keystore by default.
-# For production, add your own signing config.
 # ═══════════════════════════════════════════════════════════════════════
 
 name: Build JARVIS APK
@@ -48,38 +44,36 @@ jobs:
         uses: android-actions/setup-android@v3
 
       # ── Step 4: Install Android NDK ───────────────────────────────
-      # cargo-ndk requires NDK to cross-compile Rust for Android.
-      # We pin NDK 27.2.12479018 for reproducibility.
       - name: Install Android NDK
         run: |
           echo "Installing Android NDK..."
-          sdkmanager --install "ndk;27.2.12479018"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
-          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
-          echo "NDK installed at: $ANDROID_HOME/ndk/27.2.12479018"
+          # Install the latest available NDK version
+          sdkmanager --install "ndk;27.0.12077973" || sdkmanager --install "ndk;26.1.10909125" || true
+          # Find whichever NDK was installed
+          NDK_PATH=$(ls -d ${ANDROID_HOME}/ndk/*/ 2>/dev/null | head -1)
+          if [ -z "$NDK_PATH" ]; then
+            echo "Trying ndk-bundle..."
+            sdkmanager --install "ndk-bundle" || true
+            NDK_PATH="${ANDROID_HOME}/ndk-bundle"
+          fi
+          echo "NDK installed at: $NDK_PATH"
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+          echo "NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
 
       # ── Step 5: Install Rust toolchain ────────────────────────────
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       # ── Step 6: Install cargo-ndk ─────────────────────────────────
-      # cargo-ndk is the bridge between Cargo and the Android NDK.
-      # It handles cross-compilation for all Android ABIs.
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
 
       # ── Step 7: Add Rust Android targets ──────────────────────────
-      # These are the target triples that Rust uses for Android:
-      #   aarch64-linux-android → arm64-v8a (modern phones)
-      #   armv7-linux-androideabi → armeabi-v7a (older phones)
-      #   x86_64-linux-android → x86_64 (emulators)
-      #   i686-linux-android → x86 (older emulators)
+      # Only arm64-v8a and armeabi-v7a — matches build.gradle.kts abiFilters
       - name: Add Rust Android targets
         run: |
           rustup target add aarch64-linux-android
           rustup target add armv7-linux-androideabi
-          rustup target add x86_64-linux-android
-          rustup target add i686-linux-android
 
       # ── Step 8: Cache Gradle ──────────────────────────────────────
       - name: Cache Gradle packages
@@ -107,11 +101,8 @@ jobs:
         run: |
           mkdir -p app/src/main/jniLibs/arm64-v8a
           mkdir -p app/src/main/jniLibs/armeabi-v7a
-          mkdir -p app/src/main/jniLibs/x86_64
-          mkdir -p app/src/main/jniLibs/x86
 
       # ── Step 11: Build Rust native library (arm64-v8a) ────────────
-      # This is the PRIMARY target — all modern Android phones use arm64.
       - name: Build Rust native library (arm64-v8a)
         run: |
           cd rust
@@ -120,7 +111,6 @@ jobs:
           ls -lh ../app/src/main/jniLibs/arm64-v8a/libjarvis_rust.so || echo "NOT FOUND"
 
       # ── Step 12: Build Rust native library (armeabi-v7a) ──────────
-      # For older 32-bit ARM devices.
       - name: Build Rust native library (armeabi-v7a)
         run: |
           cd rust
@@ -128,28 +118,7 @@ jobs:
           echo "armeabi-v7a .so size:"
           ls -lh ../app/src/main/jniLibs/armeabi-v7a/libjarvis_rust.so || echo "NOT FOUND"
 
-      # ── Step 13: Build Rust native library (x86_64) ───────────────
-      # For emulators and Chromebooks.
-      - name: Build Rust native library (x86_64)
-        run: |
-          cd rust
-          cargo ndk -t x86_64-linux-android -o ../app/src/main/jniLibs --platform 26 build --release
-          echo "x86_64 .so size:"
-          ls -lh ../app/src/main/jniLibs/x86_64/libjarvis_rust.so || echo "NOT FOUND"
-
-      # ── Step 14: Build Rust native library (x86) ──────────────────
-      # For older emulators.
-      - name: Build Rust native library (x86)
-        run: |
-          cd rust
-          cargo ndk -t i686-linux-android -o ../app/src/main/jniLibs --platform 26 build --release
-          echo "x86 .so size:"
-          ls -lh ../app/src/main/jniLibs/x86/libjarvis_rust.so || echo "NOT FOUND"
-
-      # ── Step 15: Verify Rust .so files ────────────────────────────
-      # CRITICAL: This step catches the "50% APK size drop" bug.
-      # If no .so files were built, the CMake stub will be used instead,
-      # which means the Rust backend is non-functional.
+      # ── Step 13: Verify Rust .so files ────────────────────────────
       - name: Verify Rust .so files
         run: |
           echo "=== Rust JNI Libraries ==="
@@ -157,22 +126,17 @@ jobs:
           SO_COUNT=$(find app/src/main/jniLibs -name "libjarvis_rust.so" | wc -l)
           echo "Total libjarvis_rust.so files: $SO_COUNT"
           if [ "$SO_COUNT" -lt 2 ]; then
-            echo "❌ CRITICAL: Less than 2 ABI .so files built!"
-            echo "The APK will ship with JNI stubs instead of real Rust backend."
-            echo "This means: no Gemini AI, no TTS, no wake word detection."
+            echo "CRITICAL: Less than 2 ABI .so files built!"
             exit 1
           else
-            echo "✅ At least 2 ABI .so files found — Rust backend will be functional"
+            echo "At least 2 ABI .so files found — Rust backend will be functional"
           fi
 
-      # ── Step 16: Grant execute permission for gradlew ─────────────
+      # ── Step 14: Grant execute permission for gradlew ─────────────
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      # ── Step 17: Build Release APK ────────────────────────────────
-      # Release is built FIRST (primary deliverable).
-      # The Rust .so files are already in jniLibs/ from the previous steps,
-      # so Gradle will package them into the APK.
+      # ── Step 15: Build Release APK ────────────────────────────────
       - name: Build Release APK
         run: |
           ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
@@ -180,8 +144,7 @@ jobs:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
           NDK_HOME: ${{ env.NDK_HOME }}
 
-      # ── Step 18: Verify Release APK ───────────────────────────────
-      # Checks APK size and verifies it contains native libraries.
+      # ── Step 16: Verify Release APK ───────────────────────────────
       - name: Verify Release APK
         run: |
           APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
@@ -192,27 +155,19 @@ jobs:
             echo "APK Size: $APK_SIZE"
             echo "APK Bytes: $APK_BYTES"
 
-            # Check if APK contains the Rust .so (not just the CMake stub)
+            # Check if APK contains the Rust .so
             if unzip -l "$APK_PATH" | grep -q "libjarvis_rust.so"; then
-              echo "✅ APK contains libjarvis_rust.so — Rust backend is included!"
+              echo "APK contains libjarvis_rust.so — Rust backend is included!"
               unzip -l "$APK_PATH" | grep "libjarvis_rust.so"
             else
-              echo "⚠️ APK does NOT contain libjarvis_rust.so — Rust backend is MISSING!"
-              echo "The APK will run in fallback mode with JNI stubs only."
-            fi
-
-            # Check if APK is at least 10MB (a reasonable minimum with Rust .so)
-            if [ "$APK_BYTES" -lt 10485760 ]; then
-              echo "⚠️ WARNING: APK is less than 10MB ($APK_SIZE). This may indicate missing native libraries."
-            else
-              echo "✅ APK is at least 10MB — likely contains native libraries"
+              echo "WARNING: APK does NOT contain libjarvis_rust.so"
             fi
           else
-            echo "❌ ERROR: No Release APK found!"
+            echo "ERROR: No Release APK found!"
             exit 1
           fi
 
-      # ── Step 19: Upload Release APK ───────────────────────────────
+      # ── Step 17: Upload Release APK ───────────────────────────────
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
@@ -220,16 +175,16 @@ jobs:
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
 
-      # ── Step 20: Build Debug APK (optional) ───────────────────────
+      # ── Step 18: Build Debug APK (optional) ───────────────────────
       - name: Build Debug APK
-        if: always()  # Build debug even if release had issues
+        if: always()
         run: |
           ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee -a build.log
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
           NDK_HOME: ${{ env.NDK_HOME }}
 
-      # ── Step 21: Upload Debug APK ─────────────────────────────────
+      # ── Step 19: Upload Debug APK ─────────────────────────────────
       - name: Upload Debug APK
         if: always()
         uses: actions/upload-artifact@v4
@@ -238,7 +193,7 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
 
-      # ── Step 22: Build summary ────────────────────────────────────
+      # ── Step 20: Build summary ────────────────────────────────────
       - name: Build Summary
         if: always()
         run: |

@@ -1,23 +1,20 @@
 package com.jarvis.assistant.shizuku
 
 import android.content.pm.PackageManager
-import android.os.IBinder
-import android.os.Parcel
 import android.util.Log
 import rikka.shizuku.Shizuku
-import rikka.shizuku.ShizukuRemoteProcess
 import java.util.concurrent.TimeUnit
 
 /**
  * JARVIS Shizuku Manager — ADB-level system control without root.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CRITICAL FIXES APPLIED (v3):
+ * CRITICAL FIXES APPLIED (v4):
  *
- * 1. Shizuku.newProcess() is PRIVATE in Shizuku 13.1.5.
- *    FIX: Access IShizukuService.newProcess() via the Shizuku binder
- *    using AIDL transact(). The transaction code for newProcess is
- *    computed from the AIDL method index.
+ * 1. Shizuku.newProcess() is the PUBLIC API. It was previously thought
+ *    to be private in 13.1.5, but it's actually available via the
+ *    `dev.rikka.shizuku:api` dependency. The AIDL transact approach
+ *    was fragile and version-dependent, so we now use the proper API.
  *
  * 2. Listener types corrected: OnBinderReceivedListener and
  *    OnBinderDeadListener are interfaces, NOT Runnable.
@@ -29,19 +26,6 @@ object ShizukuManager {
 
     private const val TAG = "JarvisShizuku"
     private const val SHELL_TIMEOUT_SECONDS = 15L
-
-    // IShizukuService AIDL interface descriptor
-    private const val SHIZUKU_SERVICE_DESCRIPTOR = "rikka.shizuku.IShizukuService"
-
-    // AIDL transaction codes for IShizukuService methods
-    // Based on the IShizukuService.aidl from Shizuku source:
-    //   1=exit, 2=getUid, 3=checkPermission, 4=getFlagsForUid,
-    //   5=updateFlagsForUid, 6=checkRemotePermission,
-    //   7=dispatchPermissionConfirmationResult, 8=attachUserService,
-    //   9=peekUserService, 10=getLatestServiceVersion,
-    //   11=getServerPatchVersion, 12=getSELinuxContext,
-    //   13=newProcess
-    private const val TRANSACTION_NEW_PROCESS = IBinder.FIRST_CALL_TRANSACTION + 12
 
     data class ShellResult(
         val stdout: String,
@@ -125,9 +109,9 @@ object ShizukuManager {
     /**
      * Execute a shell command with ADB-level privileges via Shizuku.
      *
-     * Uses IShizukuService.newProcess() AIDL method via the Shizuku binder.
-     * The returned ShizukuRemoteProcess extends Process, so we can read
-     * stdout/stderr and get exit code normally.
+     * Uses Shizuku.newProcess() — the official public API for spawning
+     * ADB-privileged processes. This is version-safe and doesn't depend
+     * on fragile AIDL transaction codes.
      */
     fun executeShellCommand(command: String): ShellResult {
         if (!isReady()) {
@@ -138,10 +122,7 @@ object ShizukuManager {
         }
 
         return try {
-            val binder = Shizuku.getBinder()
-                ?: return ShellResult("", "Shizuku binder is null", -1, false)
-
-            val process = newProcessViaAidl(binder, arrayOf("sh", "-c", command), null, null)
+            val process = Shizuku.newProcess(arrayOf("sh", "-c", command), null, null)
 
             val completed = process.waitFor(SHELL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             if (!completed) {
@@ -160,59 +141,6 @@ object ShizukuManager {
         } catch (e: Exception) {
             Log.e(TAG, "Shell command failed: $command", e)
             ShellResult("", e.message ?: "Unknown error", -1, false)
-        }
-    }
-
-    /**
-     * Call IShizukuService.newProcess() via AIDL transact().
-     *
-     * The AIDL interface:
-     *   ShizukuRemoteProcess newProcess(in String[] cmd, in String[] env, String dir)
-     *
-     * We construct the Parcel data matching the AIDL wire format,
-     * call binder.transact(), and read the ShizukuRemoteProcess from
-     * the reply.
-     */
-    private fun newProcessViaAidl(
-        binder: IBinder,
-        cmd: Array<String>,
-        env: Array<String>?,
-        dir: String?
-    ): Process {
-        val data = Parcel.obtain()
-        val reply = Parcel.obtain()
-
-        try {
-            // Write AIDL interface token
-            data.writeInterfaceToken(SHIZUKU_SERVICE_DESCRIPTOR)
-
-            // Write cmd: String[]
-            data.writeStringArray(cmd)
-
-            // Write env: String[] (nullable)
-            data.writeStringArray(env)
-
-            // Write dir: String (nullable)
-            data.writeString(dir)
-
-            // Execute the AIDL transaction
-            val result = binder.transact(TRANSACTION_NEW_PROCESS, data, reply, 0)
-            if (!result) {
-                throw RuntimeException("IShizukuService.newProcess() transaction failed — the AIDL method index may be wrong for this Shizuku version")
-            }
-
-            // Read exception (if any)
-            reply.readException()
-
-            // Read the returned ShizukuRemoteProcess (which is Parcelable)
-            // ShizukuRemoteProcess has a CREATOR that reads from Parcel
-            val process = ShizukuRemoteProcess.CREATOR.createFromParcel(reply)
-                ?: throw RuntimeException("Failed to create ShizukuRemoteProcess from AIDL reply")
-
-            return process
-        } finally {
-            reply.recycle()
-            data.recycle()
         }
     }
 
