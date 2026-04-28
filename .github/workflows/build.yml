@@ -67,7 +67,10 @@ jobs:
             armv7-linux-androideabi
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk
+        run: |
+          cargo install cargo-ndk
+          # Ensure cargo-ndk is in PATH for subsequent steps
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       # ─── Environment ──────────────────────────────────────────
       - name: Set NDK environment variables
@@ -76,6 +79,8 @@ jobs:
           echo "NDK_HOME=${NDK_PATH}" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=${NDK_PATH}" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=${NDK_PATH}" >> "$GITHUB_ENV"
+          # Also add cargo to PATH for Gradle's onlyIf check
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       # ─── Caches ───────────────────────────────────────────────
       - name: Cache Gradle packages

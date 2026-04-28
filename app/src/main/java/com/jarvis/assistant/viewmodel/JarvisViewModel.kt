@@ -76,7 +76,9 @@ class JarvisViewModel(
         private const val MAX_HISTORY_ENTRIES = 10
         private const val TTS_TIMEOUT_MS = 30_000L
         private const val SHIZUKU_CHECK_INTERVAL_MS = 5_000L
-        private const val GEMINI_MODEL = "gemini-2.0-flash"
+        // CRITICAL FIX: gemini-2.0-flash does NOT support audio input.
+        // Must use gemini-1.5-flash which supports audio/video/images/text.
+        private const val GEMINI_MODEL = "gemini-1.5-flash"
 
         /** JARVIS system prompt for Gemini direct queries. */
         private const val JARVIS_SYSTEM_PROMPT = """You are JARVIS, Tony Stark's AI assistant. \
@@ -248,19 +250,42 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // PERSISTED SETTINGS
     // ═══════════════════════════════════════════════════════════════════════
 
+    // FIX: loadPersistedSettings now runs ONCE at startup and does NOT
+    // overwrite keys that were already set by saveAndApplyApiKeys.
+    // The old code had a race condition: if saveAndApplyApiKeys ran while
+    // loadPersistedSettings was still in-flight, the old persisted values
+    // would overwrite the freshly-saved ones.
+    @Volatile
+    private var settingsLoaded = false
+
     private fun loadPersistedSettings() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                _geminiApiKey.value        = settingsRepository.getGeminiApiKey()
-                _elevenLabsApiKey.value    = settingsRepository.getElevenLabsApiKey()
-                _ttsVoiceId.value          = settingsRepository.getTtsVoiceId()
-                _isWakeWordEnabled.value   = settingsRepository.isWakeWordEnabled()
-                _mqttBrokerUrl.value       = settingsRepository.getMqttBrokerUrl()
-                _mqttUsername.value        = settingsRepository.getMqttUsername()
-                _mqttPassword.value        = settingsRepository.getMqttPassword()
-                _homeAssistantUrl.value    = settingsRepository.getHomeAssistantUrl()
-                _homeAssistantToken.value  = settingsRepository.getHomeAssistantToken()
-                _isKeepAliveEnabled.value  = settingsRepository.isKeepAliveEnabled()
+                val loadedGemini      = settingsRepository.getGeminiApiKey()
+                val loadedElevenLabs  = settingsRepository.getElevenLabsApiKey()
+                val loadedTtsVoiceId  = settingsRepository.getTtsVoiceId()
+                val loadedWakeWord    = settingsRepository.isWakeWordEnabled()
+                val loadedMqttBroker  = settingsRepository.getMqttBrokerUrl()
+                val loadedMqttUser    = settingsRepository.getMqttUsername()
+                val loadedMqttPass    = settingsRepository.getMqttPassword()
+                val loadedHaUrl       = settingsRepository.getHomeAssistantUrl()
+                val loadedHaToken     = settingsRepository.getHomeAssistantToken()
+                val loadedKeepAlive   = settingsRepository.isKeepAliveEnabled()
+
+                // Only write to StateFlows if the user hasn't already changed them
+                // (check: if the current value is still the default empty string)
+                if (_geminiApiKey.value.isEmpty()) _geminiApiKey.value = loadedGemini
+                if (_elevenLabsApiKey.value.isEmpty()) _elevenLabsApiKey.value = loadedElevenLabs
+                _ttsVoiceId.value = loadedTtsVoiceId
+                _isWakeWordEnabled.value = loadedWakeWord
+                _mqttBrokerUrl.value = loadedMqttBroker
+                _mqttUsername.value = loadedMqttUser
+                _mqttPassword.value = loadedMqttPass
+                _homeAssistantUrl.value = loadedHaUrl
+                _homeAssistantToken.value = loadedHaToken
+                _isKeepAliveEnabled.value = loadedKeepAlive
+                settingsLoaded = true
+
                 Log.i(TAG, "Settings loaded — geminiKey=${_geminiApiKey.value.take(4)}..., elevenLabsKey=${_elevenLabsApiKey.value.take(4)}...")
 
                 if (_geminiApiKey.value.isNotEmpty() && RustBridge.isNativeReady()) {
@@ -291,12 +316,19 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     fun saveAndApplyApiKeys(geminiKey: String, elevenLabsKey: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                settingsRepository.setGeminiApiKey(geminiKey)
-                settingsRepository.setElevenLabsApiKey(elevenLabsKey)
+                // STEP 1: Force-update in-memory StateFlows IMMEDIATELY
+                // This ensures all API calls use the new keys right away,
+                // even before DataStore write completes.
                 _geminiApiKey.value     = geminiKey
                 _elevenLabsApiKey.value = elevenLabsKey
+                Log.i(TAG, "API keys FORCE-UPDATED in memory — gemini=${geminiKey.take(4)}... (${geminiKey.length} chars), elevenLabs=${elevenLabsKey.take(4)}... (${elevenLabsKey.length} chars)")
 
-                // Only place that should call RustBridge.initialize()
+                // STEP 2: Persist to DataStore (survives app restart)
+                settingsRepository.setGeminiApiKey(geminiKey)
+                settingsRepository.setElevenLabsApiKey(elevenLabsKey)
+                Log.i(TAG, "API keys persisted to DataStore")
+
+                // STEP 3: Hot-swap into Rust backend (if available)
                 if (RustBridge.isNativeReady()) {
                     try {
                         val ok = RustBridge.initialize(geminiKey, elevenLabsKey)
@@ -307,14 +339,19 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                         Log.w(TAG, "RustBridge.initialize threw (keys still saved): ${e.message}")
                     }
                 } else {
-                    Log.w(TAG, "Rust native not loaded — keys saved to DataStore only")
+                    Log.w(TAG, "Rust native not loaded — keys saved to DataStore + memory only")
+                    // Kotlin HTTP fallback uses _geminiApiKey.value directly,
+                    // so the in-memory update above is sufficient.
+                    _isRustReady.value = false
+                    updateEngineStatusText()
                 }
 
                 _apiKeySaveResult.value = ApiKeySaveResult.SUCCESS
+                Log.i(TAG, "API keys save & apply COMPLETE — all layers updated")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.e(TAG, "saveAndApplyApiKeys DataStore write failed: ${e.message}")
+                Log.e(TAG, "saveAndApplyApiKeys FAILED: ${e.message}")
                 _apiKeySaveResult.value = ApiKeySaveResult.FAILURE
             }
         }

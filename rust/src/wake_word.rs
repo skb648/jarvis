@@ -41,15 +41,16 @@ struct WakeWordConfig {
 impl Default for WakeWordConfig {
     fn default() -> Self {
         Self {
-            // v7: Raised from 0.02 to 0.04 — filters out background noise better
-            energy_threshold: 0.04,
-            // v7: Raised from 3 to 5 — requires more sustained speech
-            min_speech_frames: 5,
-            // v7: New — if speech goes on too long, it's not a wake word
-            // At 44100Hz with 2048-sample frames ≈ 46ms/frame, 43 frames ≈ 2s
-            max_speech_frames: 43,
-            // v7: New — 3 second cooldown between triggers
-            cooldown_ms: 3000,
+            // v8: Raised from 0.04 to 0.06 — much stricter noise rejection
+            energy_threshold: 0.06,
+            // v8: Raised from 5 to 8 — requires more sustained speech frames
+            // "Jarvis" is ~500ms, at 46ms/frame that's ~11 frames. Require 8+.
+            min_speech_frames: 8,
+            // v8: Lowered from 43 to 25 — "Jarvis" is short, not a sentence
+            // 25 frames × 46ms = ~1.15 seconds max
+            max_speech_frames: 25,
+            // v8: Raised from 3s to 5s cooldown between triggers
+            cooldown_ms: 5000,
             keyword: "jarvis".to_string(),
         }
     }
@@ -154,42 +155,38 @@ pub fn detect(audio_data: &[u8], sample_rate: u32) -> bool {
     let energy: f64 = samples.iter().map(|s| s * s).sum::<f64>() / samples.len() as f64;
     let rms = energy.sqrt();
 
-    // v7: Raised threshold from 0.02 to 0.04
-    if rms < 0.04 {
+    // v8: Raised from 0.04 to 0.06 — stricter noise rejection
+    if rms < 0.06 {
         return false;
     }
 
     // Layer 2: Spectral analysis — check for speech-like frequency distribution
     let spectral_centroid = compute_spectral_centroid(&samples, sample_rate as f64);
 
-    // v7: Narrowed range — human speech fundamentals are 85-300Hz for male,
-    // 165-255Hz for female, with harmonics up to ~4kHz.
-    // Spectral centroid for speech is typically 300-3500 Hz
-    if spectral_centroid < 200.0 || spectral_centroid > 4500.0 {
+    // v8: Tightened range for "Jarvis" specifically — male/female speech fundamentals
+    // "Jarvis" has strong energy in 300-3000Hz range
+    if spectral_centroid < 300.0 || spectral_centroid > 3500.0 {
         return false;
     }
 
-    // Layer 3: Zero-crossing rate — speech has moderate ZCR (not too low like tonal,
-    // not too high like noise)
+    // Layer 3: Zero-crossing rate — speech has moderate ZCR
     let zcr = compute_zero_crossing_rate(&samples);
 
-    // v7: Narrowed ZCR range for speech
-    if zcr < 0.08 || zcr > 0.35 {
+    // v8: Narrowed ZCR range for clearer speech
+    if zcr < 0.10 || zcr > 0.30 {
         return false;
     }
 
-    // Layer 4: Duration gating — the audio buffer should represent a short utterance
-    // At 44100Hz with 2048 samples, one frame ≈ 46ms
-    // A wake word "Jarvis" is typically 300-800ms
+    // Layer 4: Duration gating — "Jarvis" is typically 400-800ms
     let duration_ms = (samples.len() as f64 / sample_rate as f64) * 1000.0;
-    if duration_ms < 50.0 || duration_ms > 3000.0 {
+    if duration_ms < 200.0 || duration_ms > 1500.0 {
         return false;
     }
 
-    // Layer 5: Cooldown check
+    // Layer 5: Cooldown check — 5 second cooldown
     let now = now_ms();
     let last = LAST_TRIGGER_MS.load(Ordering::Relaxed);
-    if now > last && now - last < 3000 {
+    if now > last && now - last < 5000 {
         return false;
     }
 

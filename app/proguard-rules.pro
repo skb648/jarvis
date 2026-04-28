@@ -3,10 +3,12 @@
 # ─── JNI / Rust Bridge ──────────────────────────────────────────
 # Keep all classes with native methods — the Rust JNI functions
 # depend on exact class+method names matching the JNI naming convention.
+# CRITICAL: This prevents R8 from stripping JNI methods in release builds.
 -keepclassmembers class com.jarvis.assistant.jni.RustBridge {
     native <methods>;
 }
 -keep class com.jarvis.assistant.jni.RustBridge { *; }
+-keep class com.jarvis.assistant.jni.RustBridge$* { *; }
 
 # ─── Shizuku ────────────────────────────────────────────────────
 -keep class rikka.shizuku.** { *; }
