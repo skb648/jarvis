@@ -61,6 +61,12 @@ class AudioEngine(
         private const val AR_ERROR_BAD_VALUE        = -2
         private const val AR_ERROR_DEAD_OBJECT      = -6
         private const val AR_ERROR                  = -1
+
+        // Software wake word detection constants
+        private const val SW_WAKE_MIN_FRAMES_ABOVE = 5       // Minimum consecutive frames above speech threshold
+        private const val SW_WAKE_MAX_FRAMES_WINDOW = 30     // Maximum window for the utterance
+        private const val SW_WAKE_SPEECH_THRESHOLD = 0.04f   // Lower than normal speech threshold for better sensitivity
+        private const val SW_WAKE_COOLDOWN_FRAMES = 150      // ~3 seconds cooldown after a detection to prevent re-trigger
     }
 
     enum class VadState { IDLE, SPEECH_DETECTED, SILENCE_AFTER_SPEECH }
@@ -412,15 +418,6 @@ class AudioEngine(
     private var swWakeTotalFrames = 0
     private var swWakeTriggered = false
     private var swWakeCooldownFrames = 0
-
-    // These thresholds are tuned for a "Jarvis"-like short utterance:
-    // - The user says "Jarvis" which takes about 0.5-0.8 seconds
-    // - At 44100Hz with 2048 samples/frame, that's ~10-17 frames
-    // - At 16000Hz with 2048 samples/frame, that's ~4-6 frames
-    private const val SW_WAKE_MIN_FRAMES_ABOVE = 5       // Minimum consecutive frames above speech threshold
-    private const val SW_WAKE_MAX_FRAMES_WINDOW = 30     // Maximum window for the utterance
-    private const val SW_WAKE_SPEECH_THRESHOLD = 0.04f   // Lower than normal speech threshold for better sensitivity
-    private const val SW_WAKE_COOLDOWN_FRAMES = 150      // ~3 seconds cooldown after a detection to prevent re-trigger
 
     private fun detectWakeWordSoftware(rawAmp: Float, smoothedAmp: Float): Boolean {
         if (swWakeTriggered) {
