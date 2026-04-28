@@ -1513,7 +1513,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 val connected = MqttManager.connect(
                     context = context,
                     broker = brokerUrl,
-                    username = _mqttUsername.value,
+                    user = _mqttUsername.value,
                     pass = _mqttPassword.value
                 )
                 _isMqttConnected.value = connected
