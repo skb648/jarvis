@@ -138,6 +138,13 @@ jobs:
       - name: Build Release APK
         run: |
           ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
+          # Check if the build actually succeeded by looking for the APK
+          if ! find app/build/outputs/apk -name "*.apk" -type f | head -1 | grep -q .; then
+            echo "ERROR: Gradle reported success but no APK was produced!"
+            echo "=== Checking for Gradle errors ==="
+            grep -i "FAIL\|ERROR\|exception" build.log | head -30 || true
+            exit 1
+          fi
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
           NDK_HOME: ${{ env.NDK_HOME }}
@@ -145,7 +152,14 @@ jobs:
       # ── Step 12: Verify Release APK ───────────────────────────────
       - name: Verify Release APK
         run: |
-          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          echo "=== Searching for APK files ==="
+          find app/build/outputs -name "*.apk" -type f 2>/dev/null || echo "No APK files found"
+          echo ""
+          echo "=== APK directory listing ==="
+          ls -laR app/build/outputs/apk/ 2>/dev/null || echo "APK directory not found"
+          echo ""
+
+          APK_PATH=$(find app/build/outputs -name "*.apk" -type f | head -1)
           if [ -n "$APK_PATH" ]; then
             APK_SIZE=$(du -h "$APK_PATH" | cut -f1)
             echo "APK: $APK_PATH"
@@ -164,7 +178,12 @@ jobs:
               echo "✅ APK contains libjarvis_jni_bridge.so"
             fi
           else
-            echo "❌ No Release APK found!"
+            echo "❌ No APK found anywhere in build/outputs!"
+            echo "Checking if Gradle build actually succeeded..."
+            if [ -f "build.log" ]; then
+              echo "=== Last 50 lines of build log ==="
+              tail -50 build.log
+            fi
             exit 1
           fi
 
@@ -173,7 +192,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: jarvis-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
           retention-days: 30
 
       # ── Step 14: Build Debug APK ──────────────────────────────────
