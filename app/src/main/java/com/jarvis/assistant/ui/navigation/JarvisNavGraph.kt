@@ -209,8 +209,7 @@ fun JarvisNavGraph(
                     lastResponse = lastResponse,
                     emotion = emotion,
                     isListening = isListening,
-                    onToggleListening = onToggleListening,
-                    onShowOverlay = onShowOverlay
+                    onToggleListening = onToggleListening
                 )
             }
             composable("chat") {

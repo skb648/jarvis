@@ -606,7 +606,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
             if (!audioEmotion.isNullOrBlank()) {
                 try {
-                    val emotionRegex = Regex(""""emotion"\s*:\s*"(\w+)""")")
+                    val emotionRegex = Regex(""""emotion"\s*:\s*"(\w+)"""")
                     val match = emotionRegex.find(audioEmotion)
                     if (match != null) {
                         val detected = match.groupValues[1].lowercase()
