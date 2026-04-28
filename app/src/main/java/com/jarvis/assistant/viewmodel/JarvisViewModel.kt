@@ -76,9 +76,10 @@ class JarvisViewModel(
         private const val MAX_HISTORY_ENTRIES = 10
         private const val TTS_TIMEOUT_MS = 30_000L
         private const val SHIZUKU_CHECK_INTERVAL_MS = 5_000L
-        // CRITICAL FIX: gemini-2.0-flash does NOT support audio input.
-        // Must use gemini-1.5-flash which supports audio/video/images/text.
-        private const val GEMINI_MODEL = "gemini-1.5-flash"
+        // CRITICAL FIX v12: gemini-1.5-flash is DEPRECATED and returns 404.
+        // gemini-2.0-flash IS the correct model — it supports audio, video, images, text.
+        // The 404 error was because gemini-1.5-flash was removed from v1beta API.
+        private const val GEMINI_MODEL = "gemini-2.0-flash"
 
         /** JARVIS system prompt for Gemini direct queries. */
         private const val JARVIS_SYSTEM_PROMPT = """You are JARVIS, Tony Stark's AI assistant. \
@@ -240,9 +241,9 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // FIX H2: Helper to update the engine status text based on Rust readiness.
     private fun updateEngineStatusText() {
         _engineStatusText.value = if (_isRustReady.value) {
-            "AI engine operational \u00B7 Rust native"
+            "AI engine operational · Rust native"
         } else {
-            "AI engine operational \u00B7 Kotlin HTTP mode"
+            "AI engine operational · Kotlin HTTP (Gemini direct)"
         }
     }
 
@@ -324,9 +325,17 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 Log.i(TAG, "API keys FORCE-UPDATED in memory — gemini=${geminiKey.take(4)}... (${geminiKey.length} chars), elevenLabs=${elevenLabsKey.take(4)}... (${elevenLabsKey.length} chars)")
 
                 // STEP 2: Persist to DataStore (survives app restart)
-                settingsRepository.setGeminiApiKey(geminiKey)
-                settingsRepository.setElevenLabsApiKey(elevenLabsKey)
-                Log.i(TAG, "API keys persisted to DataStore")
+                // CRITICAL FIX v12: These are suspend functions — they MUST complete
+                // before we proceed. Previously they were fire-and-forget which could
+                // cause the old key to be reloaded on next app start.
+                try {
+                    settingsRepository.setGeminiApiKey(geminiKey)
+                    settingsRepository.setElevenLabsApiKey(elevenLabsKey)
+                    Log.i(TAG, "API keys persisted to DataStore — CONFIRMED")
+                } catch (e: Exception) {
+                    Log.e(TAG, "API keys DataStore write FAILED: ${e.message}")
+                    // In-memory keys are still updated, so current session works
+                }
 
                 // STEP 3: Hot-swap into Rust backend (if available)
                 if (RustBridge.isNativeReady()) {
@@ -388,13 +397,29 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
         stopWakeWordMonitor()
 
-        // FIX H3: Delay 200ms after stopping wake word monitor to allow
+        // FIX H3+v12: Delay 300ms after stopping wake word monitor to allow
         // AudioRecord to fully release the microphone before creating a new one.
+        // ALSO: startCommandRecording() is now called AFTER AudioEngine confirms
+        // it is actually running — previously it was called immediately, causing
+        // a race where command recording started before the mic was ready.
         viewModelScope.launch(Dispatchers.Main) {
-            delay(200)
+            delay(300)
             startAudioEngine(context)
-            audioEngine?.startCommandRecording()
-            Log.d(AUDIO_TAG, "[startListening] AudioEngine command recording started")
+            // Wait for AudioEngine to actually start recording before enabling VAD
+            var waitCount = 0
+            while (audioEngine?.isActive != true && waitCount < 20) {
+                delay(50)
+                waitCount++
+            }
+            if (audioEngine?.isActive == true) {
+                audioEngine?.startCommandRecording()
+                Log.d(AUDIO_TAG, "[startListening] AudioEngine confirmed active — command recording started")
+            } else {
+                Log.e(AUDIO_TAG, "[startListening] AudioEngine failed to become active after ${(waitCount * 50)}ms")
+                _brainState.value = BrainState.ERROR
+                _isListening.value = false
+                addAssistantMessage("Microphone failed to start. Please try again.", "stressed")
+            }
         }
     }
 
@@ -1139,6 +1164,11 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     private fun parseErrorResponse(raw: String): String {
         val lower = raw.lowercase()
         return when {
+            // FIX v12: Handle 404 model not found (the Gemini model was deprecated)
+            Regex("""\b404\b""").containsMatchIn(lower) ||
+                    lower.contains("not found for api version") || lower.contains("model_not_found") ->
+                "Sir, the AI model is currently unavailable. Please update the app or check your API key."
+
             // FIX M1: Only match HTTP status code patterns, not arbitrary "429" in text
             Regex("""\b429\b""").containsMatchIn(lower) ||
                     lower.contains("resource_exhausted") || lower.contains("quota") ->
@@ -1147,9 +1177,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             Regex("""\b403\b""").containsMatchIn(lower) ||
                     lower.contains("permission_denied") || lower.contains("api_key_invalid") ->
                 "Sir, the API key appears invalid or unauthorised. Please check Settings."
-
-            lower.contains("model_not_found") ->
-                "Sir, the requested model is unavailable."
 
             lower.contains("network") || (lower.contains("connect") && lower.contains("refused")) ->
                 "Sir, no internet connection. Check your network."

@@ -27,7 +27,12 @@ JNIEXPORT jboolean JNICALL
 Java_com_jarvis_assistant_jni_RustBridge_nativeInitialize(
     JNIEnv *env, jclass clazz, jstring geminiKey, jstring elevenLabsKey) {
     LOGI("STUB: nativeInitialize called — Rust core not available, using Kotlin fallback");
-    return JNI_TRUE;
+    // FIX v12: Return JNI_FALSE so the app knows Rust is NOT actually available.
+    // Previously returned JNI_TRUE which caused the app to think Rust was loaded,
+    // leading to failed native calls and confusing error messages.
+    // The Kotlin HTTP fallback path is used when RustBridge.isNativeReady() is false,
+    // so we must be honest that the stub doesn't actually implement AI functionality.
+    return JNI_FALSE;
 }
 
 JNIEXPORT jstring JNICALL

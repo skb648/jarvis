@@ -14,8 +14,8 @@ android {
         applicationId = "com.jarvis.assistant"
         minSdk = 26
         targetSdk = 35
-        versionCode = 500
-        versionName = "5.0.0"
+        versionCode = 512
+        versionName = "5.1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {

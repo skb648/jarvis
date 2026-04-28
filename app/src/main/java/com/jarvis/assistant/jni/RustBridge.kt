@@ -32,15 +32,20 @@ object RustBridge {
             // Primary: load the Rust shared library directly.
             System.loadLibrary("jarvis_rust")
             nativeLoaded = true
-            android.util.Log.i("RustBridge", "✅ Rust native library loaded successfully")
+            android.util.Log.i("RustBridge", "Rust native library loaded successfully")
         } catch (e: UnsatisfiedLinkError) {
             android.util.Log.w("RustBridge", "libjarvis_rust.so not found, trying JNI bridge stub...")
             try {
                 // Fallback: load the CMake bridge (which links Rust .so if it exists,
                 // or provides a stub with safe default implementations).
                 System.loadLibrary("jarvis_jni_bridge")
-                nativeLoaded = true
-                android.util.Log.i("RustBridge", "JNI bridge stub library loaded (Rust core not built)")
+                // FIX v12: Do NOT set nativeLoaded = true here. The stub library's
+                // nativeInitialize() returns FALSE, which tells us Rust is not really
+                // available. The nativeLoaded flag should only be true when the REAL
+                // Rust .so is loaded with actual AI functionality.
+                // This ensures the app correctly uses Kotlin HTTP fallback.
+                nativeLoaded = false
+                android.util.Log.i("RustBridge", "JNI bridge stub library loaded — Rust core NOT available, using Kotlin HTTP fallback")
             } catch (e2: UnsatisfiedLinkError) {
                 android.util.Log.e("RustBridge", "No native library available — using fallback mode. " +
                     "Build Rust core with: ./gradlew buildRustDebug")

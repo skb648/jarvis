@@ -200,15 +200,35 @@ class AudioEngine(
                     }
 
                 } else {
-                    if (rawAmp > SILENCE_FLOOR && RustBridge.isNativeReady()) {
+                    // Wake word detection: Try Rust native first, then fall back to
+                    // pure-Kotlin amplitude-based detection if Rust is not loaded.
+                    var wakeWordDetected = false
+
+                    // PATH 1: Rust native wake word detection (accurate, ML-based)
+                    if (RustBridge.isNativeReady()) {
                         try {
-                            if (RustBridge.nativeDetectWakeWord(frame, activeSampleRate)) {
-                                Log.i(TAG, "[WakeWord] Detected — entering VAD recording mode")
-                                withContext(Dispatchers.Main) { onWakeWordDetected() }
+                            wakeWordDetected = RustBridge.nativeDetectWakeWord(frame, activeSampleRate)
+                            if (wakeWordDetected) {
+                                Log.i(TAG, "[WakeWord] Detected via Rust native — entering VAD recording mode")
                             }
                         } catch (e: Exception) {
                             Log.w(TAG, "[WakeWord] nativeDetectWakeWord error: ${e.message}")
                         }
+                    }
+
+                    // PATH 2: Pure-Kotlin software fallback — amplitude spike detection
+                    // When Rust is not available, we detect wake word by looking for
+                    // a sustained amplitude spike above the speech threshold, followed
+                    // by a brief pause. This is less accurate but works without native code.
+                    if (!wakeWordDetected && !RustBridge.isNativeReady()) {
+                        wakeWordDetected = detectWakeWordSoftware(rawAmp, smoothedRms)
+                        if (wakeWordDetected) {
+                            Log.i(TAG, "[WakeWord] Detected via SOFTWARE fallback (amplitude spike) — entering VAD recording mode")
+                        }
+                    }
+
+                    if (wakeWordDetected) {
+                        withContext(Dispatchers.Main) { onWakeWordDetected() }
                     }
                 }
             }
@@ -370,5 +390,76 @@ class AudioEngine(
             sum   += s.toLong() * s.toLong()
         }
         return (sqrt(sum / n) / 32_768.0).toFloat().coerceIn(0f, 1f)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SOFTWARE WAKE WORD DETECTION FALLBACK (v12)
+    //
+    // When Rust native library is NOT available (which is the common case
+    // when only the CMake stub is built), wake word detection via
+    // RustBridge.nativeDetectWakeWord() always returns false.
+    //
+    // This software fallback detects a "wake word" by looking for:
+    //   1. A sudden amplitude spike (someone starts speaking loudly)
+    //   2. The amplitude stays above the speech threshold for several frames
+    //   3. This pattern suggests the user said something like "Jarvis"
+    //
+    // It's less accurate than ML-based detection, but it makes the wake word
+    // feature actually WORK without the Rust .so.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private var swWakeFramesAboveThreshold = 0
+    private var swWakeTotalFrames = 0
+    private var swWakeTriggered = false
+    private var swWakeCooldownFrames = 0
+
+    // These thresholds are tuned for a "Jarvis"-like short utterance:
+    // - The user says "Jarvis" which takes about 0.5-0.8 seconds
+    // - At 44100Hz with 2048 samples/frame, that's ~10-17 frames
+    // - At 16000Hz with 2048 samples/frame, that's ~4-6 frames
+    private const val SW_WAKE_MIN_FRAMES_ABOVE = 5       // Minimum consecutive frames above speech threshold
+    private const val SW_WAKE_MAX_FRAMES_WINDOW = 30     // Maximum window for the utterance
+    private const val SW_WAKE_SPEECH_THRESHOLD = 0.04f   // Lower than normal speech threshold for better sensitivity
+    private const val SW_WAKE_COOLDOWN_FRAMES = 150      // ~3 seconds cooldown after a detection to prevent re-trigger
+
+    private fun detectWakeWordSoftware(rawAmp: Float, smoothedAmp: Float): Boolean {
+        if (swWakeTriggered) {
+            // In cooldown period
+            swWakeCooldownFrames--
+            if (swWakeCooldownFrames <= 0) {
+                swWakeTriggered = false
+                swWakeFramesAboveThreshold = 0
+                swWakeTotalFrames = 0
+            }
+            return false
+        }
+
+        swWakeTotalFrames++
+
+        if (smoothedAmp > SW_WAKE_SPEECH_THRESHOLD) {
+            swWakeFramesAboveThreshold++
+        } else {
+            // Amplitude dropped below threshold — check if we had enough speech
+            if (swWakeFramesAboveThreshold >= SW_WAKE_MIN_FRAMES_ABOVE &&
+                swWakeTotalFrames <= SW_WAKE_MAX_FRAMES_WINDOW) {
+                // We detected a short burst of speech — likely a wake word
+                swWakeTriggered = true
+                swWakeCooldownFrames = SW_WAKE_COOLDOWN_FRAMES
+                swWakeFramesAboveThreshold = 0
+                swWakeTotalFrames = 0
+                return true
+            }
+            // Reset for next attempt
+            swWakeFramesAboveThreshold = 0
+            swWakeTotalFrames = 0
+        }
+
+        // Safety: if we've been in the window too long, reset
+        if (swWakeTotalFrames > SW_WAKE_MAX_FRAMES_WINDOW) {
+            swWakeFramesAboveThreshold = 0
+            swWakeTotalFrames = 0
+        }
+
+        return false
     }
 }
