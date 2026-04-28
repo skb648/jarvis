@@ -51,8 +51,8 @@ else()
     # System.loadLibrary("jarvis_jni_bridge") works in both cases.
     # The stub implements ALL JNI methods with safe default returns,
     # preventing UnsatisfiedLinkError crashes.
-    message(WARNING "⚠️ Rust JNI library NOT found at ${RUST_LIB_DIR}/libjarvis_rust.so")
-    message(WARNING "Building stub library with JNI stubs. Run 'rust/build.sh' first to compile Rust.")
+    message(STATUS "⚠️ Rust JNI library NOT found at ${RUST_LIB_DIR}/libjarvis_rust.so")
+    message(STATUS "Building stub library with JNI stubs. Run 'rust/build.sh' first to compile Rust.")
 
     add_library(jarvis_jni_bridge SHARED
         jni_bridge_stub.c
