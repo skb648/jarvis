@@ -80,6 +80,7 @@ fun JarvisNavGraph(
     onToggleDevice: (String, Boolean) -> Unit,
     onRefreshDevices: () -> Unit,
     onQuickAction: (String) -> Unit,
+    onShowOverlay: () -> Unit = {},
     onGeminiApiKeyChange: (String) -> Unit,
     onElevenLabsApiKeyChange: (String) -> Unit,
     onTtsVoiceChange: (String) -> Unit,
@@ -208,7 +209,8 @@ fun JarvisNavGraph(
                     lastResponse = lastResponse,
                     emotion = emotion,
                     isListening = isListening,
-                    onToggleListening = onToggleListening
+                    onToggleListening = onToggleListening,
+                    onShowOverlay = onShowOverlay
                 )
             }
             composable("chat") {

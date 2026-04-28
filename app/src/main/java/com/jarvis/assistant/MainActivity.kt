@@ -162,6 +162,7 @@ class MainActivity : ComponentActivity() {
             // Previously: viewModel.toggleVoiceMode() — just flipped a flag, mic stayed dead
             // Now: viewModel.toggleVoiceMode(context) — actually starts AudioEngine
             onToggleVoice = { viewModel.toggleVoiceMode(context) },
+            onShowOverlay = { viewModel.showOverlay(context) },
             onToggleDevice = { id, state -> viewModel.toggleDevice(id, state) },
             onRefreshDevices = { viewModel.refreshDevices() },
             onQuickAction = { action ->

@@ -1381,7 +1381,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 initNativeTts(context)
             }
             if (ttsInitialized) {
-                textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis_tts_${System.currentTimeMillis()}")
+                textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, android.os.Bundle(), "jarvis_tts_${System.currentTimeMillis()}")
                 Log.i(AUDIO_TAG, "[fallbackToNativeTts] Speaking via Android TTS: \"${text.take(40)}...\"")
                 // Android TTS doesn't give us amplitude data, so just show IDLE after a delay
                 viewModelScope.launch {
