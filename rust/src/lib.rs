@@ -213,8 +213,9 @@ pub extern "system" fn Java_com_jarvis_assistant_jni_RustBridge_nativeSynthesize
     match result {
         Ok(audio_base64) => jni_helpers::string_to_jstring(&mut env, &audio_base64).into_raw(),
         Err(e) => {
-            log::error!("TTS synthesis failed: {}", e);
-            jni_helpers::string_to_jstring(&mut env, "").into_raw()
+            let err_msg = format!("ERROR: {}", e);
+            log::error!("TTS synthesis failed: {}", err_msg);
+            jni_helpers::string_to_jstring(&mut env, &err_msg).into_raw()
         }
     }
 }

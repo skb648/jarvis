@@ -92,8 +92,8 @@ fn get_elevenlabs_key() -> Result<String> {
 // MODEL VERSION — HARDCODED
 // ═══════════════════════════════════════════════════════════════
 
-/// The Gemini model to use. Hardcoded to `gemini-2.5-flash` per spec.
-const GEMINI_MODEL: &str = "gemini-2.5-flash";
+/// The Gemini model to use. Updated to `gemini-2.0-flash` for maximum compatibility.
+const GEMINI_MODEL: &str = "gemini-2.0-flash";
 
 // ═══════════════════════════════════════════════════════════════
 // GEMINI API TYPES
@@ -432,7 +432,7 @@ pub async fn synthesize_speech(
 
     let request = TtsRequest {
         text: text.to_string(),
-        model_id: "eleven_monolingual_v1".to_string(),
+        model_id: "eleven_turbo_v2".to_string(),
         voice_settings: VoiceSettings {
             stability,
             similarity_boost,

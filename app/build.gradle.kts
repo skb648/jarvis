@@ -1,3 +1,5 @@
+import java.io.File
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -31,6 +33,35 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            // Production signing — CI/CD will inject actual keystore values
+            // Use environment variables or gradle.properties for real builds
+            val keystorePath = System.getenv("RELEASE_KEYSTORE_PATH")
+                ?: project.findProperty("RELEASE_KEYSTORE_PATH")?.toString()
+                ?: ""
+            val keystorePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+                ?: project.findProperty("RELEASE_KEYSTORE_PASSWORD")?.toString()
+                ?: ""
+            val keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                ?: project.findProperty("RELEASE_KEY_ALIAS")?.toString()
+                ?: ""
+            val keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+                ?: project.findProperty("RELEASE_KEY_PASSWORD")?.toString()
+                ?: ""
+
+            if (keystorePath.isNotEmpty() && File(keystorePath).exists()) {
+                storeFile = file(keystorePath)
+                storePassword = keystorePassword
+                this.keyAlias = keyAlias
+                this.keyPassword = keyPassword
+                logger.lifecycle("Release signing configured with keystore: $keystorePath")
+            } else {
+                logger.lifecycle("No release keystore found — falling back to debug signing")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
@@ -48,7 +79,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (signingConfigs.findByName("release")?.storeFile?.exists() == true) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
@@ -272,5 +307,4 @@ dependencies {
     implementation(libs.paho.mqtt.service)
 
     implementation(libs.gson)
-    implementation(libs.media3.exoplayer)
 }
