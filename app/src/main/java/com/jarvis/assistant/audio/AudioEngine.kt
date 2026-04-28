@@ -12,7 +12,7 @@ import androidx.annotation.RequiresPermission
 import com.jarvis.assistant.jni.RustBridge
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withMutex
+import kotlinx.coroutines.sync.withLock
 import java.util.Collections
 import kotlin.math.sqrt
 
@@ -363,16 +363,16 @@ class AudioEngine(
      * is a no-op after the first has already flushed.
      */
     private suspend fun flushCommandBuffer() {
-        flushMutex.withMutex {
+        flushMutex.withLock {
             // If another invocation already flushed, skip — prevents double delivery
-            if (!isRecordingCommand) return@withMutex
+            if (!isRecordingCommand) return@withLock
 
             isRecordingCommand = false
             vadState = VadState.IDLE
             val frames = commandFrames.toList()
             commandFrames.clear()
             cmdFrameCount = 0
-            if (frames.isEmpty()) return@withMutex
+            if (frames.isEmpty()) return@withLock
 
             val out = ByteArray(frames.sumOf { it.size })
             var off = 0
