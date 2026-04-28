@@ -1,238 +1,123 @@
-# ─── JARVIS Android APK — CI Build Workflow ────────────────────────
-# Triggers on every push to main/master and on pull requests.
-# Builds both debug and release APKs, with optional Rust JNI.
-# The Rust build is best-effort: if cargo-ndk fails, the CMake
-# stub provides a fallback so the APK still builds.
-# ──────────────────────────────────────────────────────────────────
-
-name: Build APK
+name: Build Production APK
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, develop]
+    tags: ['v*']
   pull_request:
     branches: [main, master]
-
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_dispatch:
 
 env:
-  JAVA_VERSION: "17"
-  JAVA_DISTRIBUTION: "temurin"
-  ANDROID_API_LEVEL: 35
-  ANDROID_BUILD_TOOLS: "35.0.1"
-  NDK_VERSION: "28.0.13004108"
-  CMAKE_VERSION: "3.22.1"
-  RUST_TOOLCHAIN: stable
+  JAVA_VERSION: '21'
+  GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8"
 
 jobs:
   build:
-    name: Build Debug & Release APK
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
 
     steps:
-      # ─── Checkout ──────────────────────────────────────────────
+      # ═══════════════════════════════════════════════════════════════
+      # 1. Checkout
+      # ═══════════════════════════════════════════════════════════════
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # ─── JDK ───────────────────────────────────────────────────
-      - name: Set up JDK ${{ env.JAVA_VERSION }}
+      # ═══════════════════════════════════════════════════════════════
+      # 2. Java 21 + Android SDK
+      # ═══════════════════════════════════════════════════════════════
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
+          distribution: 'temurin'
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: ${{ env.JAVA_DISTRIBUTION }}
 
-      # ─── Android SDK ──────────────────────────────────────────
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
 
-      - name: Install Android SDK components
-        run: |
-          sdkmanager --install \
-            "platform-tools" \
-            "build-tools;${{ env.ANDROID_BUILD_TOOLS }}" \
-            "platforms;android-${{ env.ANDROID_API_LEVEL }}" \
-            "ndk;${{ env.NDK_VERSION }}" \
-            "cmake;${{ env.CMAKE_VERSION }}"
-
-      # ─── Rust Toolchain ───────────────────────────────────────
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: |
-            aarch64-linux-android
-            armv7-linux-androideabi
-
-      - name: Install cargo-ndk
-        run: |
-          cargo install cargo-ndk
-          # Ensure cargo-ndk is in PATH for subsequent steps
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      # ─── Environment ──────────────────────────────────────────
-      - name: Set NDK environment variables
-        run: |
-          NDK_PATH="${ANDROID_HOME}/ndk/${{ env.NDK_VERSION }}"
-          echo "NDK_HOME=${NDK_PATH}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=${NDK_PATH}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=${NDK_PATH}" >> "$GITHUB_ENV"
-          # Also add cargo to PATH for Gradle's onlyIf check
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      # ─── Caches ───────────────────────────────────────────────
-      - name: Cache Gradle packages
+      # ═══════════════════════════════════════════════════════════════
+      # 3. Gradle cache (accelerates builds)
+      # ═══════════════════════════════════════════════════════════════
+      - name: Cache Gradle dependencies
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'gradle/libs.versions.toml', 'gradle/wrapper/gradle-wrapper.properties') }}
+            ~/.android/build-cache
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
-            gradle-${{ runner.os }}-
+            ${{ runner.os }}-gradle-
 
-      - name: Cache Rust target
-        uses: actions/cache@v4
-        with:
-          path: |
-            rust/target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock') }}
-          restore-keys: |
-            rust-${{ runner.os }}-
+      # ═══════════════════════════════════════════════════════════════
+      # 4. Setup Android SDK
+      # ═══════════════════════════════════════════════════════════════
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Cache Android SDK
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.ANDROID_HOME }}/ndk
-            ${{ env.ANDROID_HOME }}/cmake
-          key: android-sdk-${{ runner.os }}-${{ env.NDK_VERSION }}-${{ env.CMAKE_VERSION }}
-          restore-keys: |
-            android-sdk-${{ runner.os }}-
+      # ═══════════════════════════════════════════════════════════════
+      # 5. Install NDK + CMake (required for JNI stub native library)
+      # ═══════════════════════════════════════════════════════════════
+      - name: Install Android NDK and CMake
+        run: |
+          sdkmanager "ndk;28.0.13004108" "cmake;3.22.1" "build-tools;35.0.0"
+        shell: bash
 
-      # ─── Gradle Build (Debug) ─────────────────────────────────
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+      # ═══════════════════════════════════════════════════════════════
+      # 6. Build Rust native library (BEST EFFORT — non-blocking)
+      #    If this fails, the CMake stub still provides JNI stubs so
+      #    the app loads and falls back to Kotlin HTTP mode.
+      # ═══════════════════════════════════════════════════════════════
+      - name: Build Rust shared libraries via cargo-ndk
+        continue-on-error: true
+        run: |
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.0.13004108
+          cargo install cargo-ndk
+          cd rust
+          cargo ndk -t armeabi-v7a -t arm64-v8a -t x86 -t x86_64 -o ../app/src/main/jniLibs build --release
+        shell: bash
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug
-        env:
-          NDK_HOME: ${{ env.NDK_HOME }}
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
+      # ═══════════════════════════════════════════════════════════════
+      # 7. Build debug APK (smoke test)
+      # ═══════════════════════════════════════════════════════════════
+      - name: Build Debug APK
+        run: |
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.0.13004108
+          ./gradlew :app:assembleDebug --stacktrace
+        shell: bash
 
-      # ─── Gradle Build (Release) ───────────────────────────────
-      - name: Build release APK (debug-signed)
-        run: ./gradlew assembleRelease
-        env:
-          NDK_HOME: ${{ env.NDK_HOME }}
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
+      # ═══════════════════════════════════════════════════════════════
+      # 8. Build release APK (unsigned — for distribution)
+      # ═══════════════════════════════════════════════════════════════
+      - name: Build Release APK
+        run: |
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.0.13004108
+          ./gradlew :app:assembleRelease --stacktrace
+        shell: bash
 
-      # ─── Upload Artifacts ─────────────────────────────────────
-      - name: Upload debug APK
+      # ═══════════════════════════════════════════════════════════════
+      # 9. Upload artifacts
+      # ═══════════════════════════════════════════════════════════════
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: jarvis-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 14
-
-      - name: Upload release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: jarvis-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          name: jarvis-apk-${{ github.run_number }}
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
           retention-days: 30
 
-      # ─── Build Summary ────────────────────────────────────────
-      - name: Print build summary
+      # ═══════════════════════════════════════════════════════════════
+      # 10. Summary
+      # ═══════════════════════════════════════════════════════════════
+      - name: Build Summary
         run: |
-          echo "## Build Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
-          RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
-
-          if [ -f "$DEBUG_APK" ]; then
-            DEBUG_SIZE=$(du -h "$DEBUG_APK" | cut -f1)
-            echo "- Debug APK: \`$DEBUG_SIZE\`" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- Debug APK: **NOT FOUND**" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          if [ -f "$RELEASE_APK" ]; then
-            RELEASE_SIZE=$(du -h "$RELEASE_APK" | cut -f1)
-            echo "- Release APK: \`$RELEASE_SIZE\`" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- Release APK: **NOT FOUND**" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          # Check Rust .so status
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Native Libraries" >> "$GITHUB_STEP_SUMMARY"
-          for abi in arm64-v8a armeabi-v7a; do
-            SO_PATH="app/src/main/jniLibs/${abi}/libjarvis_rust.so"
-            if [ -f "$SO_PATH" ]; then
-              SO_SIZE=$(du -h "$SO_PATH" | cut -f1)
-              SO_BYTES=$(stat --printf='%s' "$SO_PATH" 2>/dev/null || stat -f '%z' "$SO_PATH" 2>/dev/null || echo '0')
-              echo "- ${abi}: \`libjarvis_rust.so\` (${SO_SIZE})" >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo "- ${abi}: CMake stub (Rust .so not built)" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
-
-          # Rust debug .so size check
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Debug APK Rust .so Size Check" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f "$DEBUG_APK" ]; then
-            RUST_SO_DEBUG=$(unzip -l "$DEBUG_APK" '*/libjarvis_rust.so' 2>/dev/null | tail -1 | awk '{print $1, $4}')
-            if [ -n "$RUST_SO_DEBUG" ]; then
-              RUST_SO_BYTES=$(echo "$RUST_SO_DEBUG" | awk '{print $1}')
-              RUST_SO_PATH=$(echo "$RUST_SO_DEBUG" | awk '{print $2}')
-              if [ "$RUST_SO_BYTES" -gt 0 ] 2>/dev/null; then
-                RUST_SO_HUMAN=$(numfmt --to=iec "$RUST_SO_BYTES")
-                echo "- \`${RUST_SO_PATH}\`: ${RUST_SO_HUMAN} (${RUST_SO_BYTES} bytes)" >> "$GITHUB_STEP_SUMMARY"
-              else
-                echo "- \`${RUST_SO_PATH}\`: present but size unknown" >> "$GITHUB_STEP_SUMMARY"
-              fi
-            else
-              echo "- libjarvis_rust.so: **NOT FOUND** in debug APK" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          else
-            echo "- Debug APK not available for inspection" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      # ─── APK Verification ─────────────────────────────────────
-      - name: Verify APK contents
-        run: |
-          echo "## APK Contents Verification" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          for APK_LABEL in "debug" "release"; do
-            if [ "$APK_LABEL" = "debug" ]; then
-              APK="app/build/outputs/apk/debug/app-debug.apk"
-            else
-              APK="app/build/outputs/apk/release/app-release.apk"
-            fi
-
-            echo "### ${APK_LABEL^} APK" >> "$GITHUB_STEP_SUMMARY"
-            if [ -f "$APK" ]; then
-              RUST_SO=$(unzip -l "$APK" 2>/dev/null | grep 'libjarvis_rust\.so' || true)
-              if [ -n "$RUST_SO" ]; then
-                echo '```' >> "$GITHUB_STEP_SUMMARY"
-                echo "$RUST_SO" >> "$GITHUB_STEP_SUMMARY"
-                echo '```' >> "$GITHUB_STEP_SUMMARY"
-                SO_COUNT=$(echo "$RUST_SO" | wc -l)
-                echo "- ✅ Found ${SO_COUNT} libjarvis_rust.so file(s)" >> "$GITHUB_STEP_SUMMARY"
-              else
-                echo "- ⚠️ libjarvis_rust.so not found in ${APK_LABEL} APK" >> "$GITHUB_STEP_SUMMARY"
-              fi
-            else
-              echo "- ${APK_LABEL^} APK not found" >> "$GITHUB_STEP_SUMMARY"
-            fi
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-          done
+          echo "═══════════════════════════════════════════════════════"
+          echo "  JARVIS BUILD COMPLETE"
+          echo "═══════════════════════════════════════════════════════"
+          ls -lh app/build/outputs/apk/debug/*.apk 2>/dev/null || echo "No debug APK"
+          ls -lh app/build/outputs/apk/release/*.apk 2>/dev/null || echo "No release APK"
+          echo "═══════════════════════════════════════════════════════"

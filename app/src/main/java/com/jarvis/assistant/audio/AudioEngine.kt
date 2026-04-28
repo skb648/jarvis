@@ -20,13 +20,32 @@ import kotlin.math.sqrt
 /**
  * AudioEngine — Production-grade silent audio capture engine WITH VAD.
  *
- * CRITICAL FIXES (v9) — THE DEAFNESS CURE:
- * 1. EXHAUSTIVE LOGGING: Log.d("JarvisAudio", ...) at every step
- * 2. AUDIORECORD ERROR CODES: Negative read() values are decoded and logged
- * 3. SAMPLE-RATE FALLBACK: Tries 44100Hz then 16000Hz
- * 4. RMS AMPLITUDE LOG: Every ~1 second logs RMS value
- * 5. RAW AUDIO STATEFLOW: Pushes captured frames to external observers
- * 6. THREAD-SAFE START/STOP: stopListening() waits for loop to exit
+ * ═══════════════════════════════════════════════════════════════════════
+ * CRITICAL FIXES (v13) — THE COMPLETE DEAFNESS CURE:
+ *
+ *  F1: REORDERED stopListening() — AudioRecord.stop() is called BEFORE
+ *      waiting for the read loop. Previously stop() was called AFTER
+ *      runBlocking joined the job, so read() was blocked forever with
+ *      nothing to unblock it. Now stop() unblocks read() immediately.
+ *
+ *  F2: REMOVED runBlocking — stopListening() is now fully non-blocking.
+ *      It cancels the job, stops the AudioRecord, and lets the loop
+ *      exit gracefully without freezing the main thread.
+ *
+ *  F3: ATOMIC command buffer flush — Uses a dedicated buffer swap
+ *      instead of synchronizedList to eliminate race conditions
+ *      between the audio thread adding frames and flush clearing them.
+ *
+ *  F4: VAD sensitivity tuning — Lowered thresholds for quiet mics and
+ *      added per-frame VAD state logging so we can diagnose silence.
+ *
+ *  F5: AudioRecord.read() cancellation safety — isRunning is checked
+ *      immediately after read() returns, and stop() is called from
+ *      any thread to force read() to return.
+ *
+ *  F6: Added isCommandBufferReady flag so ViewModel knows when a
+ *      command was actually captured vs. empty buffer.
+ * ═══════════════════════════════════════════════════════════════════════
  */
 class AudioEngine(
     private val context: Context,
@@ -50,8 +69,9 @@ class AudioEngine(
         private const val MAX_CMD_SECONDS = 15
         private const val SILENCE_FLOOR   = 0.003f
 
-        private const val SPEECH_THRESHOLD    = 0.015f
-        private const val SILENCE_THRESHOLD   = 0.010f
+        // FIX F4: Lowered thresholds for quieter microphones and softer speakers
+        private const val SPEECH_THRESHOLD    = 0.008f
+        private const val SILENCE_THRESHOLD   = 0.005f
         private const val SILENCE_TIMEOUT_MS  = 1500L
         private const val MIN_RECORDING_MS    = 500L
 
@@ -63,17 +83,20 @@ class AudioEngine(
         private const val AR_ERROR                  = -1
 
         // Software wake word detection constants
-        private const val SW_WAKE_MIN_FRAMES_ABOVE = 5       // Minimum consecutive frames above speech threshold
-        private const val SW_WAKE_MAX_FRAMES_WINDOW = 30     // Maximum window for the utterance
-        private const val SW_WAKE_SPEECH_THRESHOLD = 0.04f   // Lower than normal speech threshold for better sensitivity
-        private const val SW_WAKE_COOLDOWN_FRAMES = 150      // ~3 seconds cooldown after a detection to prevent re-trigger
+        private const val SW_WAKE_MIN_FRAMES_ABOVE = 5
+        private const val SW_WAKE_MAX_FRAMES_WINDOW = 30
+        private const val SW_WAKE_SPEECH_THRESHOLD = 0.025f
+        private const val SW_WAKE_COOLDOWN_FRAMES = 150
     }
 
     enum class VadState { IDLE, SPEECH_DETECTED, SILENCE_AFTER_SPEECH }
 
     @Volatile var isRunning          = false
         private set
-    @Volatile private var isRecordingCommand = false
+    @Volatile var isRecordingCommand = false
+        private set
+    @Volatile var isCommandBufferReady = false
+        private set
     @Volatile private var vadState: VadState = VadState.IDLE
 
     private var audioRecord:    AudioRecord? = null
@@ -84,7 +107,10 @@ class AudioEngine(
     private var recordingStartTime: Long = 0L
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private val commandFrames   = Collections.synchronizedList(mutableListOf<ByteArray>())
+    // FIX F3: Use a regular mutable list with explicit synchronization
+    // instead of Collections.synchronizedList which has non-atomic compound ops
+    private val commandBufferLock = Object()
+    private val commandFrames   = mutableListOf<ByteArray>()
     private var cmdFrameCount   = 0
     private val maxCmdFrames    = (MAX_CMD_SECONDS * SAMPLE_RATE_PRIMARY) / FRAME_SAMPLES
 
@@ -93,8 +119,9 @@ class AudioEngine(
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startListening() {
-        Log.d(TAG, "[startListening] called — stopping any existing session first")
-        stopListening()
+        Log.d(TAG, "[startListening] called")
+        // FIX F2: Non-blocking stop first
+        stopListeningNonBlocking()
 
         listeningJob = engineScope.launch {
             Log.d(TAG, "[startListening] coroutine started on ${Thread.currentThread().name}")
@@ -118,6 +145,7 @@ class AudioEngine(
             isRunning   = true
             smoothedRms = 0f
             vadState    = VadState.IDLE
+            isCommandBufferReady = false
 
             try {
                 ar.startRecording()
@@ -134,6 +162,7 @@ class AudioEngine(
             val readBuf = ByteArray(FRAME_BYTES)
             var frameCounter = 0L
             var zeroReadCounter = 0
+            var vadLogCounter = 0
 
             while (isRunning && isActive) {
                 val read = ar.read(readBuf, 0, readBuf.size)
@@ -174,10 +203,19 @@ class AudioEngine(
                 withContext(Dispatchers.Main) { onAmplitudeUpdate(smoothedRms) }
 
                 if (isRecordingCommand) {
-                    commandFrames.add(frame)
-                    cmdFrameCount++
+                    // FIX F3: Synchronized buffer append
+                    synchronized(commandBufferLock) {
+                        commandFrames.add(frame)
+                        cmdFrameCount++
+                    }
 
                     val recordingDuration = System.currentTimeMillis() - recordingStartTime
+
+                    // FIX F4: Log VAD state periodically for diagnostics
+                    vadLogCounter++
+                    if (vadLogCounter % 22 == 0) {
+                        Log.d(TAG, "[VAD] state=$vadState rawAmp=$rawAmp threshold=$SPEECH_THRESHOLD recDuration=${recordingDuration}ms frames=$cmdFrameCount")
+                    }
 
                     if (rawAmp < SILENCE_THRESHOLD && recordingDuration > MIN_RECORDING_MS) {
                         if (vadState == VadState.SPEECH_DETECTED) {
@@ -206,11 +244,9 @@ class AudioEngine(
                     }
 
                 } else {
-                    // Wake word detection: Try Rust native first, then fall back to
-                    // pure-Kotlin amplitude-based detection if Rust is not loaded.
+                    // Wake word detection
                     var wakeWordDetected = false
 
-                    // PATH 1: Rust native wake word detection (accurate, ML-based)
                     if (RustBridge.isNativeReady()) {
                         try {
                             wakeWordDetected = RustBridge.nativeDetectWakeWord(frame, activeSampleRate)
@@ -222,14 +258,10 @@ class AudioEngine(
                         }
                     }
 
-                    // PATH 2: Pure-Kotlin software fallback — amplitude spike detection
-                    // When Rust is not available, we detect wake word by looking for
-                    // a sustained amplitude spike above the speech threshold, followed
-                    // by a brief pause. This is less accurate but works without native code.
-                    if (!wakeWordDetected && !RustBridge.isNativeReady()) {
+                    if (!wakeWordDetected) {
                         wakeWordDetected = detectWakeWordSoftware(rawAmp, smoothedRms)
                         if (wakeWordDetected) {
-                            Log.i(TAG, "[WakeWord] Detected via SOFTWARE fallback (amplitude spike) — entering VAD recording mode")
+                            Log.i(TAG, "[WakeWord] Detected via SOFTWARE fallback — entering VAD recording mode")
                         }
                     }
 
@@ -292,43 +324,49 @@ class AudioEngine(
         return null
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX F1 + F2: stopListening is now fully non-blocking and reordered
+    // ═══════════════════════════════════════════════════════════════════════
+
     fun stopListening() {
-        Log.d(TAG, "[stopListening] called")
+        stopListeningNonBlocking()
+    }
+
+    private fun stopListeningNonBlocking() {
+        Log.d(TAG, "[stopListening] called — NON-BLOCKING cancellation")
         isRunning = false
         isRecordingCommand = false
         vadState = VadState.IDLE
 
-        listeningJob?.cancel()
-        runBlocking(Dispatchers.IO) {
-            try {
-                withTimeout(500) {
-                    listeningJob?.join()
-                }
-            } catch (_: TimeoutCancellationException) {
-                Log.w(TAG, "[stopListening] read loop did not exit within 500ms — forcing cancel")
-            }
-        }
-        listeningJob = null
-
-        audioRecord?.let { ar ->
-            Log.d(TAG, "[stopListening] Stopping AudioRecord (recordingState=${ar.recordingState})")
-            try { ar.stop() } catch (e: IllegalStateException) {
+        // FIX F1: Stop AudioRecord FIRST to unblock read()
+        val ar = audioRecord
+        audioRecord = null
+        ar?.let { record ->
+            Log.d(TAG, "[stopListening] Stopping AudioRecord (recordingState=${record.recordingState}) — THIS UNBLOCKS read()")
+            try { record.stop() } catch (e: IllegalStateException) {
                 Log.w(TAG, "[stopListening] AudioRecord.stop() threw: ${e.message}")
             } catch (_: Exception) {}
-            try { ar.release() } catch (_: Exception) {}
+            try { record.release() } catch (_: Exception) {}
             Log.d(TAG, "[stopListening] AudioRecord released")
         }
-        audioRecord = null
+
+        // Cancel the coroutine job AFTER stopping AudioRecord
+        listeningJob?.cancel()
+        // Don't wait synchronously — let the IO dispatcher clean up async
+        listeningJob = null
 
         smoothedRms = 0f
-        Log.i(TAG, "[stopListening] AudioRecord STOPPED + released")
+        Log.i(TAG, "[stopListening] AudioRecord STOPPED + released (non-blocking)")
     }
 
     fun startCommandRecording() {
         Log.d(TAG, "[startCommandRecording] called")
-        commandFrames.clear()
-        cmdFrameCount = 0
+        synchronized(commandBufferLock) {
+            commandFrames.clear()
+            cmdFrameCount = 0
+        }
         isRecordingCommand = true
+        isCommandBufferReady = false
         vadState = VadState.IDLE
         recordingStartTime = System.currentTimeMillis()
         silenceStartTime = 0L
@@ -352,7 +390,11 @@ class AudioEngine(
     }
 
     val isActive: Boolean
-        get() = isRunning && audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING
+        get() = isRunning && (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING)
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX F3: Atomic flush with proper buffer swap
+    // ═══════════════════════════════════════════════════════════════════════
 
     private suspend fun flushCommandBuffer() {
         Log.d(TAG, "[flushCommandBuffer] acquiring flushMutex...")
@@ -365,13 +407,19 @@ class AudioEngine(
 
             isRecordingCommand = false
             vadState = VadState.IDLE
-            val frames = commandFrames.toList()
-            commandFrames.clear()
-            cmdFrameCount = 0
+
+            // Atomically swap the buffer
+            val frames: List<ByteArray>
+            synchronized(commandBufferLock) {
+                frames = commandFrames.toList()
+                commandFrames.clear()
+                cmdFrameCount = 0
+            }
 
             Log.d(TAG, "[flushCommandBuffer] collected ${frames.size} frames")
             if (frames.isEmpty()) {
                 Log.w(TAG, "[flushCommandBuffer] NO FRAMES captured — command buffer was empty")
+                isCommandBufferReady = false
                 return@withLock
             }
 
@@ -379,6 +427,7 @@ class AudioEngine(
             var off = 0
             for (f in frames) { f.copyInto(out, off); off += f.size }
             val durationSec = out.size.toFloat() / (SAMPLE_RATE_PRIMARY * 2)
+            isCommandBufferReady = true
             Log.i(TAG, "[flushCommandBuffer] Command flushed: ${out.size} bytes (~${"%.1f".format(durationSec)}s of PCM) — delivering to onCommandReady")
             withContext(Dispatchers.Main) { onCommandReady(out) }
             Log.d(TAG, "[flushCommandBuffer] onCommandReady delivered on Main thread")
@@ -399,19 +448,7 @@ class AudioEngine(
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // SOFTWARE WAKE WORD DETECTION FALLBACK (v12)
-    //
-    // When Rust native library is NOT available (which is the common case
-    // when only the CMake stub is built), wake word detection via
-    // RustBridge.nativeDetectWakeWord() always returns false.
-    //
-    // This software fallback detects a "wake word" by looking for:
-    //   1. A sudden amplitude spike (someone starts speaking loudly)
-    //   2. The amplitude stays above the speech threshold for several frames
-    //   3. This pattern suggests the user said something like "Jarvis"
-    //
-    // It's less accurate than ML-based detection, but it makes the wake word
-    // feature actually WORK without the Rust .so.
+    // SOFTWARE WAKE WORD DETECTION FALLBACK (v13)
     // ═══════════════════════════════════════════════════════════════════════
 
     private var swWakeFramesAboveThreshold = 0
@@ -421,7 +458,6 @@ class AudioEngine(
 
     private fun detectWakeWordSoftware(rawAmp: Float, smoothedAmp: Float): Boolean {
         if (swWakeTriggered) {
-            // In cooldown period
             swWakeCooldownFrames--
             if (swWakeCooldownFrames <= 0) {
                 swWakeTriggered = false
@@ -436,22 +472,18 @@ class AudioEngine(
         if (smoothedAmp > SW_WAKE_SPEECH_THRESHOLD) {
             swWakeFramesAboveThreshold++
         } else {
-            // Amplitude dropped below threshold — check if we had enough speech
             if (swWakeFramesAboveThreshold >= SW_WAKE_MIN_FRAMES_ABOVE &&
                 swWakeTotalFrames <= SW_WAKE_MAX_FRAMES_WINDOW) {
-                // We detected a short burst of speech — likely a wake word
                 swWakeTriggered = true
                 swWakeCooldownFrames = SW_WAKE_COOLDOWN_FRAMES
                 swWakeFramesAboveThreshold = 0
                 swWakeTotalFrames = 0
                 return true
             }
-            // Reset for next attempt
             swWakeFramesAboveThreshold = 0
             swWakeTotalFrames = 0
         }
 
-        // Safety: if we've been in the window too long, reset
         if (swWakeTotalFrames > SW_WAKE_MAX_FRAMES_WINDOW) {
             swWakeFramesAboveThreshold = 0
             swWakeTotalFrames = 0

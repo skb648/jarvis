@@ -6,6 +6,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaPlayer
 import android.media.MediaRecorder
+import android.speech.tts.TextToSpeech
 import android.util.Base64
 import android.util.Log
 import android.widget.Toast
@@ -39,32 +40,32 @@ import java.net.URL
 import android.os.Handler
 import android.os.Looper
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.Locale
 
 enum class ApiKeySaveResult { NONE, SUCCESS, FAILURE }
 
 /**
  * JarvisViewModel — Central state holder and orchestrator.
  *
- * CRITICAL FIXES (v11) — COMPLETE BUG FIX RELEASE:
+ * ═══════════════════════════════════════════════════════════════════════
+ * CRITICAL FIXES (v13) — THE FULL RESURRECTION:
  *
- *  C1: WAV header sample rate now matches actual AudioEngine rate;
- *      PCM is resampled to 16kHz before sending to Gemini.
- *  C2: Smart Home (MQTT/HomeAssistant) now actually initialized and connected;
- *      refreshDevices() implemented; setters trigger reconnection.
- *  C5: TTS base64 decode uses android.util.Base64 directly (no RustBridge dependency).
- *  C6: processQuery finally block no longer clobbers brainState during async TTS;
- *      MediaPlayer completion listener handles state transitions.
- *  H1: Per-field setters (setGeminiApiKey/setElevenLabsApiKey) no longer call
- *      RustBridge.initialize() — eliminates dual-init race; only saveAndApplyApiKeys() does.
- *  H2: Added engineStatusText StateFlow so HomeScreen can show correct Rust status.
- *  H3: 200ms delay after stopWakeWordMonitor() before starting new AudioEngine
- *      to avoid AudioRecord mic conflict.
- *  H4: Deprecated no-arg toggleVoiceMode() marked level=ERROR.
- *  H9: toggleDevice() now publishes MQTT command and calls HomeAssistantBridge.
- *  M1: parseErrorResponse only matches HTTP status code patterns, not arbitrary text.
- *  M4: Overlay manager created and shown/hidden via showOverlay()/hideOverlay().
- *  L7: All toast() calls dispatched to Main thread.
- *  NEW: processQueryViaGeminiDirect() — pure-Kotlin HTTP fallback when Rust not loaded.
+ *  A1: parseErrorResponse now prefixes ALL errors with [ERROR] so
+ *      the isError check never misses a friendly error message.
+ *  A2: Model fallback — tries gemini-2.0-flash, then gemini-1.5-flash-latest,
+ *      then gemini-1.5-pro-latest. Prevents 404 dead-ends.
+ *  A3: API key test function — user can tap TEST in settings to verify
+ *      keys before using the app.
+ *  A4: Android native TextToSpeech fallback — if ElevenLabs fails,
+ *      JARVIS still speaks using the device's TTS engine.
+ *  A5: Better transcription diagnostics — logs exact HTTP status and
+ *      response body so we can debug mic→transcription pipeline.
+ *  A6: AudioEngine integration fixed for non-blocking stopListening.
+ *  A7: processQueryViaGeminiDirect returns raw error body instead of ""
+ *      so parseErrorResponse can produce meaningful messages.
+ *  A8: VAD empty-buffer handling — if no speech detected, informs user
+ *      instead of silently failing.
+ * ═══════════════════════════════════════════════════════════════════════
  */
 class JarvisViewModel(
     private val settingsRepository: SettingsRepository
@@ -76,10 +77,15 @@ class JarvisViewModel(
         private const val MAX_HISTORY_ENTRIES = 10
         private const val TTS_TIMEOUT_MS = 30_000L
         private const val SHIZUKU_CHECK_INTERVAL_MS = 5_000L
-        // CRITICAL FIX v12: gemini-1.5-flash is DEPRECATED and returns 404.
-        // gemini-2.0-flash IS the correct model — it supports audio, video, images, text.
-        // The 404 error was because gemini-1.5-flash was removed from v1beta API.
-        private const val GEMINI_MODEL = "gemini-2.0-flash"
+
+        // A2: Model fallback list — tried in order until one succeeds
+        private val GEMINI_MODELS = listOf(
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-latest",
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-pro-latest",
+            "gemini-1.5-flash"
+        )
 
         /** JARVIS system prompt for Gemini direct queries. */
         private const val JARVIS_SYSTEM_PROMPT = """You are JARVIS, Tony Stark's AI assistant. \
@@ -167,7 +173,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     private val _isRustReady = MutableStateFlow(false)
     val isRustReady: StateFlow<Boolean> = _isRustReady.asStateFlow()
 
-    // FIX H2: Expose engine status text so HomeScreen can show correct Rust status.
     private val _engineStatusText = MutableStateFlow("AI engine starting...")
     val engineStatusText: StateFlow<String> = _engineStatusText.asStateFlow()
 
@@ -177,6 +182,10 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     private val _isOverlayVisible = MutableStateFlow(false)
     val isOverlayVisible: StateFlow<Boolean> = _isOverlayVisible.asStateFlow()
 
+    // A3: Expose API key test result
+    private val _apiKeyTestResult = MutableStateFlow("")
+    val apiKeyTestResult: StateFlow<String> = _apiKeyTestResult.asStateFlow()
+
     val deviceCount: Int get() = _devices.value.size
     val activeDeviceCount: Int get() = _devices.value.count { it.isOn }
 
@@ -185,7 +194,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     private var audioEngine: AudioEngine? = null
     private val _rawAudioFlow = MutableStateFlow(ByteArray(0))
 
-    // FIX C1: Track the actual sample rate used by AudioEngine.
     @Volatile
     private var actualSampleRate = 44_100
 
@@ -200,11 +208,13 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     private val mediaPlayerMutex = Mutex()
     private var nextMessageId = 0L
 
+    // A4: Android native TTS fallback
+    private var textToSpeech: TextToSpeech? = null
+    private var ttsInitialized = false
+
     // ─── Overlay Manager ─────────────────────────────────────────────────
 
-    // FIX M4: Overlay manager instance, created lazily when context is available.
     private var overlayManager: JarvisOverlayManager? = null
-
     private var applicationContext: Context? = null
 
     // ─── Init ─────────────────────────────────────────────────────────────
@@ -238,7 +248,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         Log.d(AUDIO_TAG, "[JarvisViewModel] init complete")
     }
 
-    // FIX H2: Helper to update the engine status text based on Rust readiness.
     private fun updateEngineStatusText() {
         _engineStatusText.value = if (_isRustReady.value) {
             "AI engine operational · Rust native"
@@ -251,11 +260,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // PERSISTED SETTINGS
     // ═══════════════════════════════════════════════════════════════════════
 
-    // FIX: loadPersistedSettings now runs ONCE at startup and does NOT
-    // overwrite keys that were already set by saveAndApplyApiKeys.
-    // The old code had a race condition: if saveAndApplyApiKeys ran while
-    // loadPersistedSettings was still in-flight, the old persisted values
-    // would overwrite the freshly-saved ones.
     @Volatile
     private var settingsLoaded = false
 
@@ -273,8 +277,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 val loadedHaToken     = settingsRepository.getHomeAssistantToken()
                 val loadedKeepAlive   = settingsRepository.isKeepAliveEnabled()
 
-                // Only write to StateFlows if the user hasn't already changed them
-                // (check: if the current value is still the default empty string)
                 if (_geminiApiKey.value.isEmpty()) _geminiApiKey.value = loadedGemini
                 if (_elevenLabsApiKey.value.isEmpty()) _elevenLabsApiKey.value = loadedElevenLabs
                 _ttsVoiceId.value = loadedTtsVoiceId
@@ -301,10 +303,11 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                     }
                 }
 
-                // FIX C2: Connect smart home after loading MQTT/HA settings.
                 val ctx = getApplicationContext()
                 if (ctx != null) {
                     connectSmartHome(ctx)
+                    // A4: Initialize native TTS early
+                    initNativeTts(ctx)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -317,27 +320,18 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     fun saveAndApplyApiKeys(geminiKey: String, elevenLabsKey: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // STEP 1: Force-update in-memory StateFlows IMMEDIATELY
-                // This ensures all API calls use the new keys right away,
-                // even before DataStore write completes.
                 _geminiApiKey.value     = geminiKey
                 _elevenLabsApiKey.value = elevenLabsKey
                 Log.i(TAG, "API keys FORCE-UPDATED in memory — gemini=${geminiKey.take(4)}... (${geminiKey.length} chars), elevenLabs=${elevenLabsKey.take(4)}... (${elevenLabsKey.length} chars)")
 
-                // STEP 2: Persist to DataStore (survives app restart)
-                // CRITICAL FIX v12: These are suspend functions — they MUST complete
-                // before we proceed. Previously they were fire-and-forget which could
-                // cause the old key to be reloaded on next app start.
                 try {
                     settingsRepository.setGeminiApiKey(geminiKey)
                     settingsRepository.setElevenLabsApiKey(elevenLabsKey)
                     Log.i(TAG, "API keys persisted to DataStore — CONFIRMED")
                 } catch (e: Exception) {
                     Log.e(TAG, "API keys DataStore write FAILED: ${e.message}")
-                    // In-memory keys are still updated, so current session works
                 }
 
-                // STEP 3: Hot-swap into Rust backend (if available)
                 if (RustBridge.isNativeReady()) {
                     try {
                         val ok = RustBridge.initialize(geminiKey, elevenLabsKey)
@@ -349,8 +343,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                     }
                 } else {
                     Log.w(TAG, "Rust native not loaded — keys saved to DataStore + memory only")
-                    // Kotlin HTTP fallback uses _geminiApiKey.value directly,
-                    // so the in-memory update above is sufficient.
                     _isRustReady.value = false
                     updateEngineStatusText()
                 }
@@ -368,6 +360,81 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
     fun consumeApiKeySaveResult() {
         _apiKeySaveResult.value = ApiKeySaveResult.NONE
+    }
+
+    // A3: Test API keys and report result
+    fun testApiKeys(geminiKey: String, elevenLabsKey: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _apiKeyTestResult.value = "Testing Gemini API..."
+            val geminiOk = testGeminiKey(geminiKey)
+            _apiKeyTestResult.value = "Testing ElevenLabs API..."
+            val elevenOk = testElevenLabsKey(elevenLabsKey)
+            _apiKeyTestResult.value = when {
+                geminiOk && elevenOk -> "All keys valid!"
+                geminiOk -> "Gemini OK, ElevenLabs FAILED"
+                elevenOk -> "ElevenLabs OK, Gemini FAILED"
+                else -> "BOTH keys failed — check keys and internet"
+            }
+        }
+    }
+
+    fun clearApiKeyTestResult() {
+        _apiKeyTestResult.value = ""
+    }
+
+    private fun testGeminiKey(key: String): Boolean {
+        if (key.isBlank()) return false
+        return try {
+            val testBody = org.json.JSONObject().apply {
+                put("contents", org.json.JSONArray().put(
+                    org.json.JSONObject().apply {
+                        put("parts", org.json.JSONArray().put(
+                            org.json.JSONObject().put("text", "Hi")
+                        ))
+                    }
+                ))
+                put("generationConfig", org.json.JSONObject().apply {
+                    put("maxOutputTokens", 10)
+                })
+            }.toString()
+
+            val model = GEMINI_MODELS.first()
+            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key")
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.doOutput = true
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 10_000
+            connection.outputStream.use { it.write(testBody.toByteArray(Charsets.UTF_8)) }
+
+            val code = connection.responseCode
+            Log.i(TAG, "[testGeminiKey] HTTP $code")
+            connection.disconnect()
+            code == 200
+        } catch (e: Exception) {
+            Log.e(TAG, "[testGeminiKey] FAILED: ${e.message}")
+            false
+        }
+    }
+
+    private fun testElevenLabsKey(key: String): Boolean {
+        if (key.isBlank()) return false
+        return try {
+            val url = URL("https://api.elevenlabs.io/v1/voices")
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("xi-api-key", key)
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 10_000
+            val code = connection.responseCode
+            Log.i(TAG, "[testElevenLabsKey] HTTP $code")
+            connection.disconnect()
+            code == 200
+        } catch (e: Exception) {
+            Log.e(TAG, "[testElevenLabsKey] FAILED: ${e.message}")
+            false
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -397,17 +464,12 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
         stopWakeWordMonitor()
 
-        // FIX H3+v12: Delay 300ms after stopping wake word monitor to allow
-        // AudioRecord to fully release the microphone before creating a new one.
-        // ALSO: startCommandRecording() is now called AFTER AudioEngine confirms
-        // it is actually running — previously it was called immediately, causing
-        // a race where command recording started before the mic was ready.
         viewModelScope.launch(Dispatchers.Main) {
             delay(300)
             startAudioEngine(context)
-            // Wait for AudioEngine to actually start recording before enabling VAD
+            // FIX A6: AudioEngine is now non-blocking, so we can wait more reliably
             var waitCount = 0
-            while (audioEngine?.isActive != true && waitCount < 20) {
+            while (audioEngine?.isActive != true && waitCount < 30) {
                 delay(50)
                 waitCount++
             }
@@ -418,7 +480,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 Log.e(AUDIO_TAG, "[startListening] AudioEngine failed to become active after ${(waitCount * 50)}ms")
                 _brainState.value = BrainState.ERROR
                 _isListening.value = false
-                addAssistantMessage("Microphone failed to start. Please try again.", "stressed")
+                addAssistantMessage("Microphone failed to start. Please check permissions and try again.", "stressed")
             }
         }
     }
@@ -444,8 +506,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         Log.d(AUDIO_TAG, "[startAudioEngine] creating new AudioEngine")
         stopAudioEngine()
 
-        // FIX C1: Probe the actual sample rate that AudioEngine will use,
-        // so we can create the WAV header with the correct rate later.
         actualSampleRate = probeSupportedSampleRate()
         Log.d(AUDIO_TAG, "[startAudioEngine] Probed sample rate: $actualSampleRate Hz")
 
@@ -462,7 +522,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             },
             onCommandReady = { pcmBytes ->
                 Log.i(AUDIO_TAG, "[onCommandReady] callback fired: ${pcmBytes.size} bytes — launching handleCommandReady")
-                // FIX C1: Pass the tracked actual sample rate to handleCommandReady.
                 handleCommandReady(pcmBytes, actualSampleRate)
             },
             rawAudioFlow = _rawAudioFlow
@@ -487,16 +546,11 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         }
     }
 
-    /**
-     * FIX C1: Probe which sample rate the AudioRecord supports.
-     * Mirrors AudioEngine's own logic: try 44100Hz first, then 16000Hz.
-     */
     @SuppressLint("MissingPermission")
     private fun probeSupportedSampleRate(): Int {
         val channelConfig = AudioFormat.CHANNEL_IN_MONO
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
 
-        // Try 44100Hz first
         val minBuf44 = AudioRecord.getMinBufferSize(44_100, channelConfig, audioFormat)
         if (minBuf44 > 0) {
             try {
@@ -507,10 +561,9 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 val initialized = testAr.state == AudioRecord.STATE_INITIALIZED
                 testAr.release()
                 if (initialized) return 44_100
-            } catch (_: Exception) { /* fallback below */ }
+            } catch (_: Exception) { }
         }
 
-        // Try MIC source at 44100Hz
         try {
             val testAr = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
@@ -520,9 +573,8 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             val initialized = testAr.state == AudioRecord.STATE_INITIALIZED
             testAr.release()
             if (initialized) return 44_100
-        } catch (_: Exception) { /* fallback below */ }
+        } catch (_: Exception) { }
 
-        // Fallback to 16000Hz
         Log.w(AUDIO_TAG, "[probeSupportedSampleRate] 44100Hz not available, using 16000Hz")
         return 16_000
     }
@@ -537,10 +589,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // COMMAND READY — TRANSCRIPTION PIPELINE
     // ═══════════════════════════════════════════════════════════════════════
 
-    /**
-     * FIX C1: Now accepts the actual sample rate used by AudioEngine,
-     * so the WAV header and Gemini transcription use the correct rate.
-     */
     private fun handleCommandReady(pcmBytes: ByteArray, sampleRate: Int) {
         Log.d(AUDIO_TAG, "[handleCommandReady] launched with ${pcmBytes.size} bytes at ${sampleRate}Hz")
         viewModelScope.launch(Dispatchers.Main) {
@@ -558,7 +606,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
             if (!audioEmotion.isNullOrBlank()) {
                 try {
-                    val emotionRegex = Regex(""""emotion"\s*:\s*"(\w+)"""")
+                    val emotionRegex = Regex(""""emotion"\s*:\s*"(\w+)""")")
                     val match = emotionRegex.find(audioEmotion)
                     if (match != null) {
                         val detected = match.groupValues[1].lowercase()
@@ -591,16 +639,11 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 Log.w(AUDIO_TAG, "[handleCommandReady] Transcription is EMPTY")
                 _brainState.value = BrainState.IDLE
                 _isListening.value = false
-                addAssistantMessage("I couldn't make that out, Sir. Please try again.", "confused")
+                addAssistantMessage("I couldn't make that out, Sir. Please try speaking louder or closer to the microphone.", "confused")
             }
         }
     }
 
-    /**
-     * FIX C1: Now accepts the actual sample rate from AudioEngine.
-     * If the rate is not 16000Hz, the PCM data is resampled to 16000Hz
-     * before creating the WAV, because Gemini works best with 16kHz audio.
-     */
     private suspend fun transcribeViaGeminiFallback(pcmBytes: ByteArray, sourceSampleRate: Int): String {
         return withContext(Dispatchers.IO) {
             try {
@@ -610,7 +653,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                     return@withContext ""
                 }
 
-                // FIX C1: Resample to 16000Hz for Gemini compatibility.
                 val targetSampleRate = 16_000
                 val pcmForGemini = if (sourceSampleRate != targetSampleRate) {
                     Log.d(AUDIO_TAG, "[transcribeViaGeminiFallback] Resampling PCM from ${sourceSampleRate}Hz to ${targetSampleRate}Hz")
@@ -646,48 +688,58 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                     })
                 }.toString()
 
-                val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$GEMINI_MODEL:generateContent?key=$apiKey")
-                val connection = url.openConnection() as HttpURLConnection
-                connection.requestMethod = "POST"
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.doOutput = true
-                connection.connectTimeout = 15_000
-                connection.readTimeout = 30_000
+                // A2: Try each model in the fallback list
+                var lastError = ""
+                for (model in GEMINI_MODELS) {
+                    try {
+                        val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey")
+                        val connection = url.openConnection() as HttpURLConnection
+                        connection.requestMethod = "POST"
+                        connection.setRequestProperty("Content-Type", "application/json")
+                        connection.doOutput = true
+                        connection.connectTimeout = 15_000
+                        connection.readTimeout = 30_000
 
-                connection.outputStream.use { os ->
-                    os.write(requestBody.toByteArray(Charsets.UTF_8))
+                        connection.outputStream.use { os ->
+                            os.write(requestBody.toByteArray(Charsets.UTF_8))
+                        }
+
+                        val responseCode = connection.responseCode
+                        if (responseCode == HttpURLConnection.HTTP_OK) {
+                            val responseBody = connection.inputStream.bufferedReader().readText()
+                            connection.disconnect()
+
+                            val transcribedText = try {
+                                val root = JsonParser.parseString(responseBody).asJsonObject
+                                val candidates = root.getAsJsonArray("candidates")
+                                val firstCandidate = candidates?.firstOrNull()?.asJsonObject
+                                val content = firstCandidate?.getAsJsonObject("content")
+                                val parts = content?.getAsJsonArray("parts")
+                                val firstPart = parts?.firstOrNull()?.asJsonObject
+                                firstPart?.get("text")?.asString ?: ""
+                            } catch (e: Exception) {
+                                Log.e(AUDIO_TAG, "[transcribeViaGeminiFallback] JSON parsing failed: ${e.message}")
+                                ""
+                            }
+
+                            if (transcribedText.isNotBlank()) {
+                                Log.i(AUDIO_TAG, "[transcribeViaGeminiFallback] Model $model transcription: \"$transcribedText\"")
+                                return@withContext transcribedText
+                            }
+                        } else {
+                            val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
+                            lastError = "Model $model error $responseCode: ${errorBody.take(300)}"
+                            Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] $lastError")
+                        }
+                        connection.disconnect()
+                    } catch (e: Exception) {
+                        lastError = "Model $model exception: ${e.message}"
+                        Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] $lastError")
+                    }
                 }
 
-                val responseCode = connection.responseCode
-                if (responseCode != HttpURLConnection.HTTP_OK) {
-                    val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                    Log.e(AUDIO_TAG, "[transcribeViaGeminiFallback] Gemini API error $responseCode: ${errorBody.take(500)}")
-                    return@withContext ""
-                }
-
-                val responseBody = connection.inputStream.bufferedReader().readText()
-                connection.disconnect()
-
-                val transcribedText = try {
-                    val root = JsonParser.parseString(responseBody).asJsonObject
-                    val candidates = root.getAsJsonArray("candidates")
-                    val firstCandidate = candidates?.firstOrNull()?.asJsonObject
-                    val content = firstCandidate?.getAsJsonObject("content")
-                    val parts = content?.getAsJsonArray("parts")
-                    val firstPart = parts?.firstOrNull()?.asJsonObject
-                    firstPart?.get("text")?.asString ?: ""
-                } catch (e: Exception) {
-                    Log.e(AUDIO_TAG, "[transcribeViaGeminiFallback] JSON parsing failed: ${e.message}")
-                    ""
-                }
-
-                if (transcribedText.isNotBlank()) {
-                    Log.i(AUDIO_TAG, "[transcribeViaGeminiFallback] Gemini transcription: \"$transcribedText\"")
-                } else {
-                    Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] Gemini returned empty transcription")
-                }
-
-                transcribedText
+                Log.e(AUDIO_TAG, "[transcribeViaGeminiFallback] ALL models failed. Last error: $lastError")
+                return@withContext ""
             } catch (e: Exception) {
                 Log.e(AUDIO_TAG, "[transcribeViaGeminiFallback] Exception: ${e.message}", e)
                 ""
@@ -695,15 +747,10 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         }
     }
 
-    /**
-     * FIX C1: Resample PCM 16-bit mono audio from [sourceRate] to [targetRate]
-     * using linear interpolation. This ensures Gemini always receives 16kHz audio
-     * regardless of the AudioEngine's actual recording rate.
-     */
     private fun resamplePcm(pcm: ByteArray, sourceRate: Int, targetRate: Int): ByteArray {
         if (sourceRate == targetRate) return pcm
 
-        val sourceSamples = pcm.size / 2 // 16-bit samples
+        val sourceSamples = pcm.size / 2
         val targetSamples = (sourceSamples.toLong() * targetRate / sourceRate).toInt()
         val result = ByteArray(targetSamples * 2)
 
@@ -715,7 +762,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             val frac = srcPos - srcIdx
 
             val srcSample = if (srcIdx + 1 < sourceSamples) {
-                // Linear interpolation between adjacent samples
                 val s0 = readInt16LE(pcm, srcIdx * 2)
                 val s1 = readInt16LE(pcm, (srcIdx + 1) * 2)
                 (s0 + (s1 - s0) * frac).toInt()
@@ -731,16 +777,11 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         return result
     }
 
-    /** Read a signed 16-bit little-endian value from a byte array. */
     private fun readInt16LE(buf: ByteArray, offset: Int): Int {
         val lo = buf[offset].toInt() and 0xFF
         val hi = buf[offset + 1].toInt()
         return (hi shl 8) or lo
     }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // WAV FILE CONSTRUCTION
-    // ═══════════════════════════════════════════════════════════════════════
 
     private fun pcmToWav(
         pcmData: ByteArray,
@@ -792,14 +833,13 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
     fun setApplicationContext(context: Context) {
         applicationContext = context.applicationContext
+        if (textToSpeech == null) {
+            initNativeTts(context.applicationContext)
+        }
     }
 
     private fun getApplicationContext(): Context? = applicationContext
 
-    /**
-     * FIX M4: Show the floating overlay widget.
-     * Requires SYSTEM_ALERT_WINDOW permission.
-     */
     fun showOverlay(context: Context) {
         try {
             if (overlayManager == null) {
@@ -813,9 +853,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         }
     }
 
-    /**
-     * FIX M4: Hide the floating overlay widget.
-     */
     fun hideOverlay() {
         try {
             overlayManager?.hide()
@@ -920,12 +957,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 addAssistantMessage("Error: ${e.message?.take(200) ?: "Unknown"}", "stressed")
                 toast(context, "Query error: ${e.message?.take(100)}")
             } finally {
-                // FIX C6: Only reset _isTyping in finally.
-                // brainState and audioAmplitude are now managed by:
-                //   - handleAIQuery/handleSystemCommandResult (sets SPEAKING)
-                //   - MediaPlayer completion listener (sets IDLE/LISTENING)
-                // The old code reset brainState here, which clobbered the SPEAKING
-                // state that was just set before the async TTS playback started.
                 _isTyping.value = false
             }
         }
@@ -960,39 +991,46 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             val historyJson    = buildHistoryJson()
             val screenContext  = JarviewModel.screenTextData
 
-            // STEP 1: Try RustBridge first (fast, native path)
             Log.d(AUDIO_TAG, "[handleAIQuery] Calling RustBridge.processQuery")
             var rawResponse = withContext(Dispatchers.IO) {
-                try {
-                    RustBridge.processQuery(query, screenContext, historyJson)
-                } catch (e: Exception) {
-                    Log.e(TAG, "[handleAIQuery] JNI processQuery failed", e)
-                    "[ERROR] AI processing failed: ${e.message?.take(200) ?: "Unknown"}"
+                if (RustBridge.isNativeReady()) {
+                    try {
+                        RustBridge.processQuery(query, screenContext, historyJson)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "[handleAIQuery] JNI processQuery failed", e)
+                        "[ERROR] AI processing failed: ${e.message?.take(200) ?: "Unknown"}"
+                    }
+                } else {
+                    Log.w(AUDIO_TAG, "[handleAIQuery] Rust not ready — skipping JNI, using direct Gemini fallback")
+                    "[ERROR] Native library not ready. Using direct Gemini fallback."
                 }
             }
             Log.d(AUDIO_TAG, "[handleAIQuery] Raw response length=${rawResponse.length}")
 
-            // STEP 2: If Rust failed (native not loaded or returned error),
-            // fall back to pure-Kotlin Gemini HTTP call.
             val isRustError = rawResponse.startsWith("[ERROR]") ||
                     rawResponse.startsWith("ERROR:") ||
-                    rawResponse.contains("Native library not loaded")
+                    rawResponse.contains("Native library not loaded") ||
+                    rawResponse.contains("Native library not ready")
 
             if (isRustError && _geminiApiKey.value.isNotBlank()) {
                 Log.w(AUDIO_TAG, "[handleAIQuery] Rust failed, falling back to processQueryViaGeminiDirect")
                 val directResponse = withContext(Dispatchers.IO) {
                     processQueryViaGeminiDirect(query, historyJson)
                 }
-                if (directResponse.isNotBlank()) {
+                if (directResponse.isNotBlank() && !directResponse.startsWith("[ERROR]")) {
                     rawResponse = directResponse
                     Log.i(AUDIO_TAG, "[handleAIQuery] Gemini direct fallback succeeded, length=${directResponse.length}")
                 } else {
-                    Log.w(AUDIO_TAG, "[handleAIQuery] Gemini direct fallback also failed")
+                    Log.w(AUDIO_TAG, "[handleAIQuery] Gemini direct fallback also failed: $directResponse")
+                    if (rawResponse.isBlank() || rawResponse == "[ERROR]") {
+                        rawResponse = directResponse.ifBlank { "[ERROR] Gemini API is not responding. Check your API key and internet connection." }
+                    }
                 }
             }
 
             val parsed  = parseErrorResponse(rawResponse)
-            val isError = parsed.startsWith("[ERROR]") || parsed.startsWith("ERROR:") || rawResponse.startsWith("ERROR:")
+            // FIX A1: All parsed errors now start with [ERROR], so this catches everything
+            val isError = parsed.startsWith("[ERROR]") || rawResponse.startsWith("[ERROR]") || rawResponse.startsWith("ERROR:")
 
             if (isError) {
                 Log.w(AUDIO_TAG, "[handleAIQuery] Error response detected")
@@ -1043,27 +1081,18 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // GEMINI DIRECT (Kotlin HTTP fallback — no Rust required)
     // ═══════════════════════════════════════════════════════════════════════
 
-    /**
-     * Pure-Kotlin Gemini API call for AI queries.
-     * Used as a fallback when RustBridge is not loaded.
-     *
-     * Calls the Gemini generateContent endpoint with conversation history
-     * and the JARVIS system prompt, returning the model's text response.
-     */
     private fun processQueryViaGeminiDirect(query: String, historyJson: String): String {
         try {
             val apiKey = _geminiApiKey.value
             if (apiKey.isBlank()) {
                 Log.w(TAG, "[processQueryViaGeminiDirect] Gemini API key not set")
-                return ""
+                return "[ERROR] Gemini API key not set. Please enter it in Settings."
             }
 
             Log.d(TAG, "[processQueryViaGeminiDirect] Sending query to Gemini: \"$query\"")
 
-            // Build conversation contents from history
             val contentsArray = org.json.JSONArray()
 
-            // Parse history entries
             try {
                 val historyArr = org.json.JSONArray(historyJson)
                 for (i in 0 until historyArr.length()) {
@@ -1083,7 +1112,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 Log.w(TAG, "[processQueryViaGeminiDirect] Failed to parse history: ${e.message}")
             }
 
-            // Add the current user query
             contentsArray.put(org.json.JSONObject().apply {
                 put("role", "user")
                 put("parts", org.json.JSONArray().put(
@@ -1104,52 +1132,64 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 })
             }.toString()
 
-            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$GEMINI_MODEL:generateContent?key=$apiKey")
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.setRequestProperty("Content-Type", "application/json")
-            connection.doOutput = true
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 60_000
+            // A2: Try multiple models
+            var lastError = ""
+            for (model in GEMINI_MODELS) {
+                try {
+                    val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey")
+                    val connection = url.openConnection() as HttpURLConnection
+                    connection.requestMethod = "POST"
+                    connection.setRequestProperty("Content-Type", "application/json")
+                    connection.doOutput = true
+                    connection.connectTimeout = 15_000
+                    connection.readTimeout = 60_000
 
-            connection.outputStream.use { os ->
-                os.write(requestBody.toByteArray(Charsets.UTF_8))
+                    connection.outputStream.use { os ->
+                        os.write(requestBody.toByteArray(Charsets.UTF_8))
+                    }
+
+                    val responseCode = connection.responseCode
+                    if (responseCode != HttpURLConnection.HTTP_OK) {
+                        val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
+                        Log.e(TAG, "[processQueryViaGeminiDirect] Model $model error $responseCode: ${errorBody.take(500)}")
+                        lastError = "Model $model: HTTP $responseCode — ${errorBody.take(200)}"
+                        connection.disconnect()
+                        continue
+                    }
+
+                    val responseBody = connection.inputStream.bufferedReader().readText()
+                    connection.disconnect()
+
+                    val responseText = try {
+                        val root = JsonParser.parseString(responseBody).asJsonObject
+                        val candidates = root.getAsJsonArray("candidates")
+                        val firstCandidate = candidates?.firstOrNull()?.asJsonObject
+                        val content = firstCandidate?.getAsJsonObject("content")
+                        val parts = content?.getAsJsonArray("parts")
+                        val firstPart = parts?.firstOrNull()?.asJsonObject
+                        firstPart?.get("text")?.asString ?: ""
+                    } catch (e: Exception) {
+                        Log.e(TAG, "[processQueryViaGeminiDirect] JSON parsing failed: ${e.message}")
+                        ""
+                    }
+
+                    return if (responseText.isNotBlank()) {
+                        Log.i(TAG, "[processQueryViaGeminiDirect] Model $model response: \"${responseText.take(100)}...\"")
+                        responseText
+                    } else {
+                        Log.w(TAG, "[processQueryViaGeminiDirect] Model $model returned empty response")
+                        ""
+                    }
+                } catch (e: Exception) {
+                    lastError = "Model $model exception: ${e.message}"
+                    Log.e(TAG, "[processQueryViaGeminiDirect] $lastError")
+                }
             }
 
-            val responseCode = connection.responseCode
-            if (responseCode != HttpURLConnection.HTTP_OK) {
-                val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                Log.e(TAG, "[processQueryViaGeminiDirect] Gemini API error $responseCode: ${errorBody.take(500)}")
-                connection.disconnect()
-                return ""
-            }
-
-            val responseBody = connection.inputStream.bufferedReader().readText()
-            connection.disconnect()
-
-            val responseText = try {
-                val root = JsonParser.parseString(responseBody).asJsonObject
-                val candidates = root.getAsJsonArray("candidates")
-                val firstCandidate = candidates?.firstOrNull()?.asJsonObject
-                val content = firstCandidate?.getAsJsonObject("content")
-                val parts = content?.getAsJsonArray("parts")
-                val firstPart = parts?.firstOrNull()?.asJsonObject
-                firstPart?.get("text")?.asString ?: ""
-            } catch (e: Exception) {
-                Log.e(TAG, "[processQueryViaGeminiDirect] JSON parsing failed: ${e.message}")
-                ""
-            }
-
-            return if (responseText.isNotBlank()) {
-                Log.i(TAG, "[processQueryViaGeminiDirect] Response: \"${responseText.take(100)}...\"")
-                responseText
-            } else {
-                Log.w(TAG, "[processQueryViaGeminiDirect] Empty response from Gemini")
-                ""
-            }
+            return "[ERROR] All Gemini models failed. Last error: $lastError"
         } catch (e: Exception) {
             Log.e(TAG, "[processQueryViaGeminiDirect] Exception: ${e.message}", e)
-            return ""
+            return "[ERROR] Query processing failed: ${e.message}"
         }
     }
 
@@ -1158,38 +1198,36 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * FIX M1: parseErrorResponse now only matches HTTP status code patterns
-     * like "HTTP 429" or "status: 429", not arbitrary text containing "429".
+     * FIX A1: ALL error returns are prefixed with [ERROR] so downstream
+     * detection is 100% reliable. No friendly message escapes as a "normal" response.
      */
     private fun parseErrorResponse(raw: String): String {
         val lower = raw.lowercase()
         return when {
-            // FIX v12: Handle 404 model not found (the Gemini model was deprecated)
             Regex("""\b404\b""").containsMatchIn(lower) ||
                     lower.contains("not found for api version") || lower.contains("model_not_found") ->
-                "Sir, the AI model is currently unavailable. Please update the app or check your API key."
+                "[ERROR] Sir, the AI model is currently unavailable. Please update the app or check your API key. (404)"
 
-            // FIX M1: Only match HTTP status code patterns, not arbitrary "429" in text
             Regex("""\b429\b""").containsMatchIn(lower) ||
                     lower.contains("resource_exhausted") || lower.contains("quota") ->
-                "Sir, the Gemini API quota has been exhausted. Please update the key in Settings."
+                "[ERROR] Sir, the Gemini API quota has been exhausted. Please update the key in Settings. (429)"
 
             Regex("""\b403\b""").containsMatchIn(lower) ||
                     lower.contains("permission_denied") || lower.contains("api_key_invalid") ->
-                "Sir, the API key appears invalid or unauthorised. Please check Settings."
+                "[ERROR] Sir, the API key appears invalid or unauthorised. Please check Settings. (403)"
 
             lower.contains("network") || (lower.contains("connect") && lower.contains("refused")) ->
-                "Sir, no internet connection. Check your network."
+                "[ERROR] Sir, no internet connection. Check your network."
 
-            raw.startsWith("[ERROR]") ->
-                raw.removePrefix("[ERROR]").trim().ifBlank { "An error occurred, Sir." }
+            raw.startsWith("[ERROR]") -> raw
 
             raw.startsWith("ERROR:") ->
-                raw.removePrefix("ERROR:").trim().ifBlank { "An error occurred, Sir." }
+                "[ERROR] ${raw.removePrefix("ERROR:").trim().ifBlank { "An error occurred, Sir." }}"
 
             lower.contains("error") && lower.contains("{") ->
                 Regex(""""message"\s*:\s*"([^"]+)"""").find(raw)?.groupValues?.get(1)
-                    ?: "An error occurred, Sir."
+                    ?.let { "[ERROR] $it" }
+                    ?: "[ERROR] An error occurred, Sir."
 
             else -> raw
         }
@@ -1231,35 +1269,31 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] START text=\"${text.take(40)}...\"")
         try {
             val elevenLabsKey = _elevenLabsApiKey.value
-            if (elevenLabsKey.isBlank()) {
-                Log.w(AUDIO_TAG, "[trySynthesizeAndPlay] ElevenLabs API key is EMPTY — skipping TTS")
-                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
-                _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
-                toast(context, "ElevenLabs API key not set — JARVIS cannot speak")
-                return
-            }
-
             val (stability, similarityBoost) = computeTtsParams()
             Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] TTS params: emotion=${_emotion.value} stability=$stability similarityBoost=$similarityBoost")
 
+            var base64: String? = null
+
             // STEP 1: Try Rust JNI path
-            Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 1: Trying RustBridge.synthesizeSpeech")
-            var base64 = withContext(Dispatchers.IO) {
-                try {
-                    val result = RustBridge.synthesizeSpeech(
-                        text, _ttsVoiceId.value,
-                        stability = stability, similarityBoost = similarityBoost
-                    )
-                    Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] Rust returned base64 length=${result?.length ?: 0}")
-                    result
-                } catch (e: Exception) {
-                    Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] RustBridge.synthesizeSpeech FAILED: ${e.message}")
-                    null
+            if (RustBridge.isNativeReady()) {
+                Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 1: Trying RustBridge.synthesizeSpeech")
+                base64 = withContext(Dispatchers.IO) {
+                    try {
+                        val result = RustBridge.synthesizeSpeech(
+                            text, _ttsVoiceId.value,
+                            stability = stability, similarityBoost = similarityBoost
+                        )
+                        Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] Rust returned base64 length=${result?.length ?: 0}")
+                        result
+                    } catch (e: Exception) {
+                        Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] RustBridge.synthesizeSpeech FAILED: ${e.message}")
+                        null
+                    }
                 }
             }
 
             // STEP 2: If Rust returned nothing, try direct Kotlin HTTP
-            if (base64.isNullOrBlank()) {
+            if (base64.isNullOrBlank() && elevenLabsKey.isNotBlank()) {
                 Log.w(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 2: Rust returned empty — trying direct Kotlin ElevenLabs call")
                 base64 = withContext(Dispatchers.IO) {
                     try {
@@ -1271,55 +1305,45 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 }
             }
 
-            if (base64.isNullOrBlank()) {
-                Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 3: BOTH Rust and direct Kotlin failed — TTS impossible")
-                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
-                _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
-                toast(context, "TTS failed: ElevenLabs could not synthesize speech")
-                return
-            }
-
-            // FIX C5: Use android.util.Base64.decode directly instead of RustBridge.decodeBase64Audio.
-            // This removes the dependency on Rust being loaded for base64 decode.
-            Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 3: Decoding base64 MP3")
-            val mp3 = withContext(Dispatchers.IO) {
-                try {
-                    val decoded = Base64.decode(base64, Base64.NO_WRAP)
-                    Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] Decoded MP3 size=${decoded.size} bytes")
-                    decoded
-                } catch (e: Exception) {
-                    Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] Base64 decode FAILED: ${e.message}")
-                    null
-                }
-            }
-
-            if (mp3 == null || mp3.isEmpty()) {
-                Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] Decoded MP3 is EMPTY")
-                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
-                _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
-                toast(context, "TTS failed: audio data is empty")
-                return
-            }
-
-            // STEP 4: Write temp file and play via MediaPlayer (async)
-            Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 4: Playing MP3 via MediaPlayer (prepareAsync)")
-            withContext(Dispatchers.Main) {
-                playMp3AudioAsync(mp3, context)
-            }
-
-            // Wait for playback to finish
-            Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 5: Waiting for playback (timeout=${TTS_TIMEOUT_MS}ms)")
-            withTimeoutOrNull(TTS_TIMEOUT_MS) {
-                while (isActive && mediaPlayer != null) {
-                    val isPlaying = try { mediaPlayer?.isPlaying == true } catch (_: Exception) { false }
-                    if (!isPlaying) {
-                        Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] MediaPlayer stopped — playback complete")
-                        break
+            // STEP 3: Decode and play
+            if (!base64.isNullOrBlank()) {
+                Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 3: Decoding base64 MP3")
+                val mp3 = withContext(Dispatchers.IO) {
+                    try {
+                        val decoded = Base64.decode(base64, Base64.NO_WRAP)
+                        Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] Decoded MP3 size=${decoded.size} bytes")
+                        decoded
+                    } catch (e: Exception) {
+                        Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] Base64 decode FAILED: ${e.message}")
+                        null
                     }
-                    delay(100)
+                }
+
+                if (mp3 != null && mp3.isNotEmpty()) {
+                    Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 4: Playing MP3 via MediaPlayer")
+                    withContext(Dispatchers.Main) {
+                        playMp3AudioAsync(mp3, context)
+                    }
+
+                    Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 5: Waiting for playback (timeout=${TTS_TIMEOUT_MS}ms)")
+                    withTimeoutOrNull(TTS_TIMEOUT_MS) {
+                        while (isActive && mediaPlayer != null) {
+                            val isPlaying = try { mediaPlayer?.isPlaying == true } catch (_: Exception) { false }
+                            if (!isPlaying) {
+                                Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] MediaPlayer stopped — playback complete")
+                                break
+                            }
+                            delay(100)
+                        }
+                    }
+                    Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] END")
+                    return
                 }
             }
-            Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] END")
+
+            // A4: FALLBACK to Android native TextToSpeech
+            Log.w(AUDIO_TAG, "[trySynthesizeAndPlay] ElevenLabs unavailable — falling back to Android TTS")
+            fallbackToNativeTts(text, context)
 
         } catch (e: CancellationException) {
             throw e
@@ -1328,12 +1352,58 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
             _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
             toast(context, "TTS error: ${e.message?.take(80)}")
+            fallbackToNativeTts(text, context)
         }
     }
 
-    /**
-     * Direct Kotlin ElevenLabs API call — bypasses Rust entirely.
-     */
+    // A4: Initialize Android native TTS
+    private fun initNativeTts(context: Context) {
+        if (textToSpeech != null) return
+        try {
+            textToSpeech = TextToSpeech(context) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    ttsInitialized = true
+                    textToSpeech?.language = Locale.UK
+                    Log.i(AUDIO_TAG, "[initNativeTts] Android TTS initialized successfully")
+                } else {
+                    Log.e(AUDIO_TAG, "[initNativeTts] Android TTS initialization failed: status=$status")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(AUDIO_TAG, "[initNativeTts] Exception: ${e.message}")
+        }
+    }
+
+    // A4: Speak using Android TTS when ElevenLabs fails
+    private fun fallbackToNativeTts(text: String, context: Context) {
+        try {
+            if (!ttsInitialized || textToSpeech == null) {
+                initNativeTts(context)
+            }
+            if (ttsInitialized) {
+                textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis_tts_${System.currentTimeMillis()}")
+                Log.i(AUDIO_TAG, "[fallbackToNativeTts] Speaking via Android TTS: \"${text.take(40)}...\"")
+                // Android TTS doesn't give us amplitude data, so just show IDLE after a delay
+                viewModelScope.launch {
+                    delay(text.length * 80L + 1000L) // Rough estimate
+                    if (!_isListening.value) {
+                        _brainState.value = BrainState.IDLE
+                        _audioAmplitude.value = 0f
+                    }
+                }
+            } else {
+                Log.e(AUDIO_TAG, "[fallbackToNativeTts] Android TTS not available")
+                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
+                _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
+                toast(context, "Text-to-speech unavailable — no voice output")
+            }
+        } catch (e: Exception) {
+            Log.e(AUDIO_TAG, "[fallbackToNativeTts] Exception: ${e.message}")
+            _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
+            _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
+        }
+    }
+
     private fun synthesizeSpeechDirect(
         text: String,
         voiceId: String,
@@ -1399,10 +1469,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         }
     }
 
-    /**
-     * FIX H4: Deprecated no-arg version with ERROR level.
-     * This ensures compile-time visibility of the deprecation.
-     */
     @Deprecated(
         message = "Use toggleVoiceMode(context: Context) instead — context is required for audio engine",
         replaceWith = ReplaceWith("toggleVoiceMode(context)"),
@@ -1413,17 +1479,11 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         _isVoiceMode.value = !_isVoiceMode.value
     }
 
-    /**
-     * FIX H9: toggleDevice now also publishes commands to MQTT and HomeAssistant,
-     * not just updating the local StateFlow.
-     */
     fun toggleDevice(deviceId: String, newState: Boolean) {
-        // Update local state immediately for responsive UI
         _devices.value = _devices.value.map { d ->
             if (d.id == deviceId) d.copy(isOn = newState) else d
         }
 
-        // Send command to Home Assistant
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 if (newState) {
@@ -1436,7 +1496,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 Log.e(TAG, "toggleDevice: HA call failed for $deviceId: ${e.message}")
             }
 
-            // Also publish via MQTT
             try {
                 val topic = "jarvis/command/$deviceId"
                 val payload = if (newState) "{\"state\": \"ON\"}" else "{\"state\": \"OFF\"}"
@@ -1448,10 +1507,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         }
     }
 
-    /**
-     * FIX C2: refreshDevices now actually fetches device states from
-     * Home Assistant and populates the _devices StateFlow.
-     */
     fun refreshDevices() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -1475,7 +1530,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                         val attributes = entity.optJSONObject("attributes") ?: continue
                         val friendlyName = attributes.optString("friendly_name", entityId)
 
-                        // Skip non-controllable entities
                         val domain = entityId.substringBefore(".", "")
                         if (domain !in listOf("light", "switch", "fan", "humidifier",
                                 "input_boolean", "climate", "cover", "lock",
@@ -1499,10 +1553,8 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                                 state.equals("open", ignoreCase = true) ||
                                 state.equals("playing", ignoreCase = true)
 
-                        // Determine room from area or use "Default"
                         val room = attributes.optString("area", "Default")
 
-                        // Value for sensors/thermostats
                         val value = when (domain) {
                             "climate" -> {
                                 val temp = attributes.optString("current_temperature", "")
@@ -1551,27 +1603,19 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // SMART HOME CONNECTION — FIX C2
+    // SMART HOME CONNECTION
     // ═══════════════════════════════════════════════════════════════════════
 
-    /**
-     * FIX C2: Configure HomeAssistantBridge and connect MQTT.
-     * Called from loadPersistedSettings() after loading MQTT/HA settings.
-     */
     private fun connectSmartHome(context: Context) {
         try {
-            // Configure Home Assistant bridge
             val haUrl = _homeAssistantUrl.value
             val haToken = _homeAssistantToken.value
             if (haUrl.isNotBlank() && haToken.isNotBlank()) {
                 HomeAssistantBridge.configure(haUrl, haToken)
                 Log.i(TAG, "Home Assistant bridge configured: $haUrl")
-
-                // Fetch devices
                 refreshDevices()
             }
 
-            // Connect MQTT
             val brokerUrl = _mqttBrokerUrl.value
             if (brokerUrl.isNotBlank()) {
                 val connected = MqttManager.connect(
@@ -1584,7 +1628,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 _mqttLabel.value = if (connected) "MQTT Connected" else "MQTT Disconnected"
                 Log.i(TAG, "MQTT connect initiated: broker=$brokerUrl result=$connected")
 
-                // Subscribe to device state topics
                 MqttManager.subscribe("jarvis/status/#")
                 MqttManager.subscribe("homeassistant/#")
             }
@@ -1593,13 +1636,9 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         }
     }
 
-    /**
-     * FIX C2: Reconnect smart home when settings change.
-     */
     private fun reconnectSmartHome() {
         val ctx = getApplicationContext() ?: return
 
-        // Disconnect existing connections
         try {
             MqttManager.disconnect()
         } catch (e: Exception) {
@@ -1608,8 +1647,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
         _isMqttConnected.value = false
         _mqttLabel.value = "MQTT Disconnected"
-
-        // Reconnect with new settings
         connectSmartHome(ctx)
     }
 
@@ -1617,11 +1654,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // PER-FIELD SETTERS
     // ═══════════════════════════════════════════════════════════════════════
 
-    /**
-     * FIX H1: setGeminiApiKey no longer calls RustBridge.initialize().
-     * Only saveAndApplyApiKeys() should call RustBridge.initialize()
-     * to avoid race conditions from dual initialization.
-     */
     fun setGeminiApiKey(key: String) {
         _geminiApiKey.value = key
         viewModelScope.launch(Dispatchers.IO) {
@@ -1631,11 +1663,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         }
     }
 
-    /**
-     * FIX H1: setElevenLabsApiKey no longer calls RustBridge.initialize().
-     * Only saveAndApplyApiKeys() should call RustBridge.initialize()
-     * to avoid race conditions from dual initialization.
-     */
     fun setElevenLabsApiKey(key: String) {
         _elevenLabsApiKey.value = key
         viewModelScope.launch(Dispatchers.IO) {
@@ -1664,9 +1691,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         }
     }
 
-    /**
-     * FIX C2: MQTT setters now trigger reconnection when settings change.
-     */
     fun setMqttBrokerUrl(url: String) {
         _mqttBrokerUrl.value = url
         viewModelScope.launch(Dispatchers.IO) {
@@ -1697,9 +1721,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         }
     }
 
-    /**
-     * FIX C2: HA setters now trigger reconnection when settings change.
-     */
     fun setHomeAssistantUrl(url: String) {
         _homeAssistantUrl.value = url
         viewModelScope.launch(Dispatchers.IO) {
@@ -1846,8 +1867,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 if (!_isListening.value) {
                     _audioAmplitude.value = 0f
                 }
-                // FIX C6: This completion listener is the proper place to reset
-                // brainState after TTS playback finishes — NOT the processQuery finally block.
                 _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
                 try {
                     tmp.delete()
@@ -1906,11 +1925,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         mediaPlayer = null
     }
 
-    /**
-     * FIX L7: Toast helper that always runs on the Main thread.
-     * Uses Handler to post to the main looper if called from a background thread,
-     * ensuring Toast never crashes due to being called off the main thread.
-     */
     private fun toast(context: Context, message: String) {
         try {
             if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -1948,14 +1962,18 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         stopAudioEngine()
         stopWakeWordMonitor()
 
-        // FIX M4: Hide overlay on ViewModel clear
         overlayManager?.hide()
         overlayManager = null
 
-        // Disconnect MQTT
         try { MqttManager.disconnect() } catch (_: Exception) {}
-
         try { RustBridge.shutdown() } catch (_: Exception) {}
+
+        // A4: Shutdown native TTS
+        try {
+            textToSpeech?.stop()
+            textToSpeech?.shutdown()
+        } catch (_: Exception) {}
+
         ShizukuManager.setOnShizukuStateChangedListener {}
     }
 

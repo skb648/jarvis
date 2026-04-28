@@ -125,6 +125,7 @@ class MainActivity : ComponentActivity() {
         val isRustReady by viewModel.isRustReady.collectAsState()
         val engineStatusText by viewModel.engineStatusText.collectAsState()
         val apiKeySaveResult by viewModel.apiKeySaveResult.collectAsState()
+        val apiKeyTestResult by viewModel.apiKeyTestResult.collectAsState()
 
         JarvisNavGraph(
             brainState = brainState,
@@ -194,7 +195,10 @@ class MainActivity : ComponentActivity() {
             },
             onShizukuRequestPermission = { viewModel.requestShizukuPermission(this@MainActivity) },
             apiKeySaveResult = apiKeySaveResult,
-            onConsumeApiKeySaveResult = { viewModel.consumeApiKeySaveResult() }
+            onConsumeApiKeySaveResult = { viewModel.consumeApiKeySaveResult() },
+            onTestApiKeys = { gemini, eleven -> viewModel.testApiKeys(gemini, eleven) },
+            apiKeyTestResult = apiKeyTestResult,
+            onClearApiKeyTestResult = { viewModel.clearApiKeyTestResult() }
         )
     }
 

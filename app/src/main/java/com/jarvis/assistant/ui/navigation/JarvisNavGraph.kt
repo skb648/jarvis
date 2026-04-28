@@ -96,7 +96,11 @@ fun JarvisNavGraph(
     onSaveAndApplyKeys: (String, String) -> Unit = { _, _ -> },
     onShizukuRequestPermission: () -> Unit = {},
     apiKeySaveResult: ApiKeySaveResult = ApiKeySaveResult.NONE,
-    onConsumeApiKeySaveResult: () -> Unit = {}
+    onConsumeApiKeySaveResult: () -> Unit = {},
+    // A3: API key test
+    onTestApiKeys: (String, String) -> Unit = { _, _ -> },
+    apiKeyTestResult: String = "",
+    onClearApiKeyTestResult: () -> Unit = {}
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -258,7 +262,10 @@ fun JarvisNavGraph(
                     onSaveAndApplyKeys = onSaveAndApplyKeys,
                     onShizukuRequestPermission = onShizukuRequestPermission,
                     apiKeySaveResult = apiKeySaveResult,
-                    onConsumeApiKeySaveResult = onConsumeApiKeySaveResult
+                    onConsumeApiKeySaveResult = onConsumeApiKeySaveResult,
+                    onTestApiKeys = onTestApiKeys,
+                    apiKeyTestResult = apiKeyTestResult,
+                    onClearApiKeyTestResult = onClearApiKeyTestResult
                 )
             }
         }

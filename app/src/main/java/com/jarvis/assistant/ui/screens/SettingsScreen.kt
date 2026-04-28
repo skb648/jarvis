@@ -80,6 +80,10 @@ fun SettingsScreen(
     onShizukuRequestPermission: () -> Unit = {},
     apiKeySaveResult: ApiKeySaveResult = ApiKeySaveResult.NONE,
     onConsumeApiKeySaveResult: () -> Unit = {},
+    // A3: API key test
+    onTestApiKeys: (gemini: String, elevenLabs: String) -> Unit = { _, _ -> },
+    apiKeyTestResult: String = "",
+    onClearApiKeyTestResult: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -169,6 +173,36 @@ fun SettingsScreen(
                     placeholder  = "…",
                     icon         = Icons.AutoMirrored.Filled.VolumeUp
                 )
+
+                // ══════════════════════════════════════════════════════════════
+                // TEST BUTTON — validates keys before saving
+                // ══════════════════════════════════════════════════════════════
+                OutlinedButton(
+                    onClick  = { onTestApiKeys(localGemini, localEleven) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors   = ButtonDefaults.outlinedButtonColors(contentColor = JarvisGreen),
+                    border   = ButtonDefaults.outlinedButtonBorder(enabled = true)
+                ) {
+                    Icon(Icons.Filled.Science, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("TEST API KEYS", fontFamily = FontFamily.Monospace, fontSize = 13.sp, letterSpacing = 2.sp)
+                }
+
+                // Test result display
+                if (apiKeyTestResult.isNotBlank()) {
+                    val isSuccess = apiKeyTestResult.contains("valid", ignoreCase = true) && apiKeyTestResult.contains("All", ignoreCase = true)
+                    Text(
+                        apiKeyTestResult,
+                        color = if (isSuccess) JarvisGreen else WarningAmber,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                    LaunchedEffect(apiKeyTestResult) {
+                        delay(5000)
+                        onClearApiKeyTestResult()
+                    }
+                }
 
                 // ══════════════════════════════════════════════════════════════
                 // SAVE & APPLY BUTTON — THE HOT-SWAP TRIGGER

@@ -39,7 +39,11 @@ JNIEXPORT jstring JNICALL
 Java_com_jarvis_assistant_jni_RustBridge_nativeProcessQuery(
     JNIEnv *env, jclass clazz, jstring query, jstring context, jstring historyJson) {
     LOGI("STUB: nativeProcessQuery called — Rust core not available, use Kotlin HTTP fallback");
-    return (*env)->NewStringUTF(env, "Please use the Kotlin HTTP fallback for AI queries. Rust core is not built.");
+    // FIX v13: Return [ERROR] prefix so Kotlin fallback logic is triggered.
+    // The ViewModel checks for [ERROR] to decide whether to fall back to
+    // direct Gemini HTTP calls. Without this prefix, the stub message would
+    // be treated as JARVIS's actual spoken response.
+    return (*env)->NewStringUTF(env, "[ERROR] Rust core not built. Using Kotlin HTTP fallback for AI queries.");
 }
 
 JNIEXPORT jstring JNICALL
