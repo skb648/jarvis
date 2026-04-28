@@ -93,26 +93,57 @@ object HomeAssistantBridge {
 
     /**
      * Toggle an entity — auto-detects domain from entity_id.
+     * Uses domain-specific toggle logic since not all domains support the "toggle" service.
      */
     fun toggleEntity(entityId: String): JSONObject? {
         val domain = getDomainFromEntityId(entityId)
-        return callService(domain, "toggle", entityId)
+        return when (domain) {
+            "climate" -> {
+                // Toggle between hvac modes
+                val state = getEntityState(entityId)
+                val currentMode = state?.optString("state", "off") ?: "off"
+                if (currentMode == "off") {
+                    callService(domain, "turn_on", entityId)
+                } else {
+                    callService(domain, "turn_off", entityId)
+                }
+            }
+            "cover" -> callService(domain, "toggle", entityId)
+            "lock" -> {
+                val state = getEntityState(entityId)
+                val currentLocked = state?.optString("state", "locked") ?: "locked"
+                if (currentLocked == "locked") callService(domain, "unlock", entityId)
+                else callService(domain, "lock", entityId)
+            }
+            "media_player" -> callService(domain, "media_play_pause", entityId)
+            else -> callService(domain, "toggle", entityId)
+        }
     }
 
     /**
-     * Turn on an entity.
+     * Turn on an entity — uses domain-specific service where needed.
      */
     fun turnOn(entityId: String): JSONObject? {
         val domain = getDomainFromEntityId(entityId)
-        return callService(domain, "turn_on", entityId)
+        return when (domain) {
+            "lock" -> callService(domain, "lock", entityId)
+            "cover" -> callService(domain, "open_cover", entityId)
+            "media_player" -> callService(domain, "media_play", entityId)
+            else -> callService(domain, "turn_on", entityId)
+        }
     }
 
     /**
-     * Turn off an entity.
+     * Turn off an entity — uses domain-specific service where needed.
      */
     fun turnOff(entityId: String): JSONObject? {
         val domain = getDomainFromEntityId(entityId)
-        return callService(domain, "turn_off", entityId)
+        return when (domain) {
+            "lock" -> callService(domain, "unlock", entityId)
+            "cover" -> callService(domain, "close_cover", entityId)
+            "media_player" -> callService(domain, "media_pause", entityId)
+            else -> callService(domain, "turn_off", entityId)
+        }
     }
 
     /**

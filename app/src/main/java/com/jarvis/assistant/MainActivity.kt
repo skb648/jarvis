@@ -123,6 +123,7 @@ class MainActivity : ComponentActivity() {
         val isBatteryOptimized by viewModel.isBatteryOptimized.collectAsState()
         val isShizukuAvailable by viewModel.isShizukuAvailable.collectAsState()
         val isRustReady by viewModel.isRustReady.collectAsState()
+        val engineStatusText by viewModel.engineStatusText.collectAsState()
         val apiKeySaveResult by viewModel.apiKeySaveResult.collectAsState()
 
         JarvisNavGraph(
@@ -153,6 +154,7 @@ class MainActivity : ComponentActivity() {
             isBatteryOptimized = isBatteryOptimized,
             isShizukuAvailable = isShizukuAvailable,
             isRustReady = isRustReady,
+            engineStatusText = engineStatusText,
             onToggleListening = { viewModel.toggleListening(context) },
             onSendMessage = { viewModel.sendMessage(it, context) },
             // ═══ CRITICAL FIX: Chat screen voice button now starts/stops mic ═══

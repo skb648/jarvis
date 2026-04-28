@@ -16,8 +16,6 @@ import android.content.pm.ServiceInfo
 import android.util.Log
 import com.jarvis.assistant.MainActivity
 import com.jarvis.assistant.channels.JarviewModel
-import com.jarvis.assistant.services.JarvisSensoryService
-import com.jarvis.assistant.services.JarvisSpeechService
 import java.util.Timer
 import java.util.TimerTask
 
@@ -152,43 +150,10 @@ class JarvisKeepAliveService : Service() {
 
         var activeServices = mutableListOf<String>()
 
-        // Check and restart Speech service
-        if (!JarviewModel.speechServiceRunning) {
-            Log.w(TAG, "Speech service not running — restarting")
-            try {
-                val intent = Intent(this, JarvisSpeechService::class.java).apply {
-                    action = JarvisSpeechService.ACTION_START
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(intent)
-                } else {
-                    startService(intent)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to restart speech service", e)
-            }
-        } else {
-            activeServices.add("Voice")
-        }
-
-        // Check and restart Sensory service
-        if (!JarviewModel.sensoryServiceRunning) {
-            Log.w(TAG, "Sensory service not running — restarting")
-            try {
-                val intent = Intent(this, JarvisSensoryService::class.java).apply {
-                    action = JarvisSensoryService.ACTION_START
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(intent)
-                } else {
-                    startService(intent)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to restart sensory service", e)
-            }
-        } else {
-            activeServices.add("Sensors")
-        }
+        // NOTE: SpeechService and SensoryService are no longer auto-restarted here.
+        // These legacy services created their own AudioRecord instances that
+        // conflicted with the AudioEngine used by the ViewModel for voice commands.
+        // AudioEngine now handles all audio I/O through the ViewModel directly.
 
         // Check Accessibility service
         if (JarviewModel.accessibilityService?.get() != null) {

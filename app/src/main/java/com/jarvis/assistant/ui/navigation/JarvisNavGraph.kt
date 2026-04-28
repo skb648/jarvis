@@ -72,6 +72,7 @@ fun JarvisNavGraph(
     isBatteryOptimized: Boolean,
     isShizukuAvailable: Boolean,
     isRustReady: Boolean = false,
+    engineStatusText: String = "AI engine starting...",
     // Callbacks
     onToggleListening: () -> Unit,
     onSendMessage: (String) -> Unit,
@@ -190,7 +191,9 @@ fun JarvisNavGraph(
                     audioAmplitude = audioAmplitude,
                     deviceCount = deviceCount,
                     activeDeviceCount = activeDeviceCount,
-                    onQuickAction = handleQuickAction
+                    onQuickAction = handleQuickAction,
+                    isRustReady = isRustReady,
+                    engineStatusText = engineStatusText
                 )
             }
             composable("assistant") {

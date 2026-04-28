@@ -2,7 +2,10 @@ package com.jarvis.assistant.viewmodel
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.MediaPlayer
+import android.media.MediaRecorder
 import android.util.Base64
 import android.util.Log
 import android.widget.Toast
@@ -16,10 +19,14 @@ import com.jarvis.assistant.audio.AudioEngine
 import com.jarvis.assistant.channels.JarviewModel
 import com.jarvis.assistant.data.SettingsRepository
 import com.jarvis.assistant.jni.RustBridge
+import com.jarvis.assistant.overlay.JarvisOverlayManager
 import com.jarvis.assistant.router.CommandRouter
 import com.jarvis.assistant.shizuku.ShizukuManager
+import com.jarvis.assistant.smarthome.HomeAssistantBridge
+import com.jarvis.assistant.smarthome.MqttManager
 import com.jarvis.assistant.ui.orb.BrainState
 import com.jarvis.assistant.ui.screens.ChatMessage
+import com.jarvis.assistant.ui.screens.DeviceType
 import com.jarvis.assistant.ui.screens.SmartDevice
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -29,6 +36,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import android.os.Handler
+import android.os.Looper
 import java.util.concurrent.atomic.AtomicBoolean
 
 enum class ApiKeySaveResult { NONE, SUCCESS, FAILURE }
@@ -36,13 +45,26 @@ enum class ApiKeySaveResult { NONE, SUCCESS, FAILURE }
 /**
  * JarvisViewModel — Central state holder and orchestrator.
  *
- * CRITICAL FIXES (v10) — THE MUTE & DEAFNESS CURE:
- * 1. EXHAUSTIVE LOGGING: Log.d("JarvisAudio", ...) at every TTS and mic step
- * 2. TTS ASYNC: MediaPlayer uses prepareAsync() + OnPreparedListener (no ANR)
- * 3. DIRECT KOTLIN ELEVENLABS FALLBACK: If Rust returns empty, pure Kotlin HTTP call
- * 4. PROPER JSON TRANSCRIPTION: Gson parses Gemini response (no regex)
- * 5. ALL FILE I/O OFF MAIN THREAD: Temp MP3 write on Dispatchers.IO
- * 6. TOAST FEEDBACK: Visible errors so user knows what failed
+ * CRITICAL FIXES (v11) — COMPLETE BUG FIX RELEASE:
+ *
+ *  C1: WAV header sample rate now matches actual AudioEngine rate;
+ *      PCM is resampled to 16kHz before sending to Gemini.
+ *  C2: Smart Home (MQTT/HomeAssistant) now actually initialized and connected;
+ *      refreshDevices() implemented; setters trigger reconnection.
+ *  C5: TTS base64 decode uses android.util.Base64 directly (no RustBridge dependency).
+ *  C6: processQuery finally block no longer clobbers brainState during async TTS;
+ *      MediaPlayer completion listener handles state transitions.
+ *  H1: Per-field setters (setGeminiApiKey/setElevenLabsApiKey) no longer call
+ *      RustBridge.initialize() — eliminates dual-init race; only saveAndApplyApiKeys() does.
+ *  H2: Added engineStatusText StateFlow so HomeScreen can show correct Rust status.
+ *  H3: 200ms delay after stopWakeWordMonitor() before starting new AudioEngine
+ *      to avoid AudioRecord mic conflict.
+ *  H4: Deprecated no-arg toggleVoiceMode() marked level=ERROR.
+ *  H9: toggleDevice() now publishes MQTT command and calls HomeAssistantBridge.
+ *  M1: parseErrorResponse only matches HTTP status code patterns, not arbitrary text.
+ *  M4: Overlay manager created and shown/hidden via showOverlay()/hideOverlay().
+ *  L7: All toast() calls dispatched to Main thread.
+ *  NEW: processQueryViaGeminiDirect() — pure-Kotlin HTTP fallback when Rust not loaded.
  */
 class JarvisViewModel(
     private val settingsRepository: SettingsRepository
@@ -54,7 +76,18 @@ class JarvisViewModel(
         private const val MAX_HISTORY_ENTRIES = 10
         private const val TTS_TIMEOUT_MS = 30_000L
         private const val SHIZUKU_CHECK_INTERVAL_MS = 5_000L
+        private const val GEMINI_MODEL = "gemini-2.0-flash"
+
+        /** JARVIS system prompt for Gemini direct queries. */
+        private const val JARVIS_SYSTEM_PROMPT = """You are JARVIS, Tony Stark's AI assistant. \
+You are sophisticated, witty, and always helpful. You speak concisely and with British elegance. \
+You address the user as "Sir" or "Ma'am". You can control smart home devices, answer questions, \
+and assist with any task. Keep responses brief but informative. If you detect an emotion in the \
+user's query, prefix your response with [EMOTION:emotion] where emotion is one of: \
+neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful."""
     }
+
+    // ─── State Flows ──────────────────────────────────────────────────────
 
     private val _brainState = MutableStateFlow(BrainState.IDLE)
     val brainState: StateFlow<BrainState> = _brainState.asStateFlow()
@@ -131,17 +164,32 @@ class JarvisViewModel(
     private val _isRustReady = MutableStateFlow(false)
     val isRustReady: StateFlow<Boolean> = _isRustReady.asStateFlow()
 
+    // FIX H2: Expose engine status text so HomeScreen can show correct Rust status.
+    private val _engineStatusText = MutableStateFlow("AI engine starting...")
+    val engineStatusText: StateFlow<String> = _engineStatusText.asStateFlow()
+
     private val _apiKeySaveResult = MutableStateFlow(ApiKeySaveResult.NONE)
     val apiKeySaveResult: StateFlow<ApiKeySaveResult> = _apiKeySaveResult.asStateFlow()
+
+    private val _isOverlayVisible = MutableStateFlow(false)
+    val isOverlayVisible: StateFlow<Boolean> = _isOverlayVisible.asStateFlow()
 
     val deviceCount: Int get() = _devices.value.size
     val activeDeviceCount: Int get() = _devices.value.count { it.isOn }
 
+    // ─── Audio Engine Fields ──────────────────────────────────────────────
+
     private var audioEngine: AudioEngine? = null
     private val _rawAudioFlow = MutableStateFlow(ByteArray(0))
 
+    // FIX C1: Track the actual sample rate used by AudioEngine.
+    @Volatile
+    private var actualSampleRate = 44_100
+
     private var wakeWordEngine: AudioEngine? = null
     @Volatile private var isWakeWordMonitoring = false
+
+    // ─── Media Player / TTS Fields ────────────────────────────────────────
 
     private var mediaPlayer: MediaPlayer? = null
     @Volatile private var currentTtsTempPath: String? = null
@@ -149,12 +197,20 @@ class JarvisViewModel(
     private val mediaPlayerMutex = Mutex()
     private var nextMessageId = 0L
 
+    // ─── Overlay Manager ─────────────────────────────────────────────────
+
+    // FIX M4: Overlay manager instance, created lazily when context is available.
+    private var overlayManager: JarvisOverlayManager? = null
+
     private var applicationContext: Context? = null
+
+    // ─── Init ─────────────────────────────────────────────────────────────
 
     init {
         Log.d(AUDIO_TAG, "[JarvisViewModel] init started")
         loadPersistedSettings()
         _isRustReady.value = RustBridge.isNativeReady()
+        updateEngineStatusText()
         Log.d(AUDIO_TAG, "[JarvisViewModel] Rust native ready = ${_isRustReady.value}")
 
         ShizukuManager.setOnShizukuStateChangedListener { available ->
@@ -179,6 +235,19 @@ class JarvisViewModel(
         Log.d(AUDIO_TAG, "[JarvisViewModel] init complete")
     }
 
+    // FIX H2: Helper to update the engine status text based on Rust readiness.
+    private fun updateEngineStatusText() {
+        _engineStatusText.value = if (_isRustReady.value) {
+            "AI engine operational \u00B7 Rust native"
+        } else {
+            "AI engine operational \u00B7 Kotlin HTTP mode"
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PERSISTED SETTINGS
+    // ═══════════════════════════════════════════════════════════════════════
+
     private fun loadPersistedSettings() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -199,10 +268,17 @@ class JarvisViewModel(
                         _isRustReady.value = RustBridge.initialize(
                             _geminiApiKey.value, _elevenLabsApiKey.value
                         )
+                        updateEngineStatusText()
                         Log.i(TAG, "Rust initialized with persisted keys on startup")
                     } catch (e: Exception) {
                         Log.e(TAG, "Rust init on load failed: ${e.message}")
                     }
+                }
+
+                // FIX C2: Connect smart home after loading MQTT/HA settings.
+                val ctx = getApplicationContext()
+                if (ctx != null) {
+                    connectSmartHome(ctx)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -220,10 +296,12 @@ class JarvisViewModel(
                 _geminiApiKey.value     = geminiKey
                 _elevenLabsApiKey.value = elevenLabsKey
 
+                // Only place that should call RustBridge.initialize()
                 if (RustBridge.isNativeReady()) {
                     try {
                         val ok = RustBridge.initialize(geminiKey, elevenLabsKey)
                         _isRustReady.value = ok
+                        updateEngineStatusText()
                         Log.i(TAG, "Hot-swap RustBridge.initialize -> $ok")
                     } catch (e: Exception) {
                         Log.w(TAG, "RustBridge.initialize threw (keys still saved): ${e.message}")
@@ -245,6 +323,10 @@ class JarvisViewModel(
     fun consumeApiKeySaveResult() {
         _apiKeySaveResult.value = ApiKeySaveResult.NONE
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // LISTENING / AUDIO ENGINE
+    // ═══════════════════════════════════════════════════════════════════════
 
     fun toggleListening(context: Context) {
         Log.d(AUDIO_TAG, "[toggleListening] isListening=${_isListening.value}")
@@ -268,9 +350,15 @@ class JarvisViewModel(
         Log.d(AUDIO_TAG, "[startListening] UI state set to LISTENING")
 
         stopWakeWordMonitor()
-        startAudioEngine(context)
-        audioEngine?.startCommandRecording()
-        Log.d(AUDIO_TAG, "[startListening] AudioEngine command recording started")
+
+        // FIX H3: Delay 200ms after stopping wake word monitor to allow
+        // AudioRecord to fully release the microphone before creating a new one.
+        viewModelScope.launch(Dispatchers.Main) {
+            delay(200)
+            startAudioEngine(context)
+            audioEngine?.startCommandRecording()
+            Log.d(AUDIO_TAG, "[startListening] AudioEngine command recording started")
+        }
     }
 
     fun stopListening() {
@@ -294,6 +382,11 @@ class JarvisViewModel(
         Log.d(AUDIO_TAG, "[startAudioEngine] creating new AudioEngine")
         stopAudioEngine()
 
+        // FIX C1: Probe the actual sample rate that AudioEngine will use,
+        // so we can create the WAV header with the correct rate later.
+        actualSampleRate = probeSupportedSampleRate()
+        Log.d(AUDIO_TAG, "[startAudioEngine] Probed sample rate: $actualSampleRate Hz")
+
         audioEngine = AudioEngine(
             context = context,
             onAmplitudeUpdate = { amp ->
@@ -307,7 +400,8 @@ class JarvisViewModel(
             },
             onCommandReady = { pcmBytes ->
                 Log.i(AUDIO_TAG, "[onCommandReady] callback fired: ${pcmBytes.size} bytes — launching handleCommandReady")
-                handleCommandReady(pcmBytes)
+                // FIX C1: Pass the tracked actual sample rate to handleCommandReady.
+                handleCommandReady(pcmBytes, actualSampleRate)
             },
             rawAudioFlow = _rawAudioFlow
         )
@@ -331,21 +425,69 @@ class JarvisViewModel(
         }
     }
 
+    /**
+     * FIX C1: Probe which sample rate the AudioRecord supports.
+     * Mirrors AudioEngine's own logic: try 44100Hz first, then 16000Hz.
+     */
+    @SuppressLint("MissingPermission")
+    private fun probeSupportedSampleRate(): Int {
+        val channelConfig = AudioFormat.CHANNEL_IN_MONO
+        val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+
+        // Try 44100Hz first
+        val minBuf44 = AudioRecord.getMinBufferSize(44_100, channelConfig, audioFormat)
+        if (minBuf44 > 0) {
+            try {
+                val testAr = AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    44_100, channelConfig, audioFormat, minBuf44
+                )
+                val initialized = testAr.state == AudioRecord.STATE_INITIALIZED
+                testAr.release()
+                if (initialized) return 44_100
+            } catch (_: Exception) { /* fallback below */ }
+        }
+
+        // Try MIC source at 44100Hz
+        try {
+            val testAr = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                44_100, channelConfig, audioFormat,
+                AudioRecord.getMinBufferSize(44_100, channelConfig, audioFormat)
+            )
+            val initialized = testAr.state == AudioRecord.STATE_INITIALIZED
+            testAr.release()
+            if (initialized) return 44_100
+        } catch (_: Exception) { /* fallback below */ }
+
+        // Fallback to 16000Hz
+        Log.w(AUDIO_TAG, "[probeSupportedSampleRate] 44100Hz not available, using 16000Hz")
+        return 16_000
+    }
+
     private fun stopAudioEngine() {
         Log.d(AUDIO_TAG, "[stopAudioEngine] called")
         audioEngine?.stopListening()
         audioEngine = null
     }
 
-    private fun handleCommandReady(pcmBytes: ByteArray) {
-        Log.d(AUDIO_TAG, "[handleCommandReady] launched with ${pcmBytes.size} bytes")
+    // ═══════════════════════════════════════════════════════════════════════
+    // COMMAND READY — TRANSCRIPTION PIPELINE
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * FIX C1: Now accepts the actual sample rate used by AudioEngine,
+     * so the WAV header and Gemini transcription use the correct rate.
+     */
+    private fun handleCommandReady(pcmBytes: ByteArray, sampleRate: Int) {
+        Log.d(AUDIO_TAG, "[handleCommandReady] launched with ${pcmBytes.size} bytes at ${sampleRate}Hz")
         viewModelScope.launch(Dispatchers.Main) {
             _brainState.value = BrainState.THINKING
 
             val audioEmotion = try {
                 withContext(Dispatchers.IO) {
-                    Log.d(AUDIO_TAG, "[handleCommandReady] calling RustBridge.analyzeAudio")
-                    RustBridge.analyzeAudio(pcmBytes, 44_100)
+                    Log.d(AUDIO_TAG, "[handleCommandReady] calling RustBridge.analyzeAudio at ${sampleRate}Hz")
+                    RustBridge.analyzeAudio(pcmBytes, sampleRate)
                 }
             } catch (e: Exception) {
                 Log.w(AUDIO_TAG, "[handleCommandReady] Audio emotion analysis failed: ${e.message}")
@@ -369,8 +511,8 @@ class JarvisViewModel(
                 }
             }
 
-            Log.d(AUDIO_TAG, "[handleCommandReady] Starting Gemini multimodal transcription")
-            var transcription = transcribeViaGeminiFallback(pcmBytes)
+            Log.d(AUDIO_TAG, "[handleCommandReady] Starting Gemini multimodal transcription at ${sampleRate}Hz")
+            val transcription = transcribeViaGeminiFallback(pcmBytes, sampleRate)
 
             if (transcription.isNotBlank()) {
                 _currentTranscription.value = transcription
@@ -392,7 +534,12 @@ class JarvisViewModel(
         }
     }
 
-    private suspend fun transcribeViaGeminiFallback(pcmBytes: ByteArray): String {
+    /**
+     * FIX C1: Now accepts the actual sample rate from AudioEngine.
+     * If the rate is not 16000Hz, the PCM data is resampled to 16000Hz
+     * before creating the WAV, because Gemini works best with 16kHz audio.
+     */
+    private suspend fun transcribeViaGeminiFallback(pcmBytes: ByteArray, sourceSampleRate: Int): String {
         return withContext(Dispatchers.IO) {
             try {
                 val apiKey = _geminiApiKey.value
@@ -401,10 +548,19 @@ class JarvisViewModel(
                     return@withContext ""
                 }
 
-                val wavBytes = pcmToWav(pcmBytes, sampleRate = 44100, channels = 1, bitsPerSample = 16)
+                // FIX C1: Resample to 16000Hz for Gemini compatibility.
+                val targetSampleRate = 16_000
+                val pcmForGemini = if (sourceSampleRate != targetSampleRate) {
+                    Log.d(AUDIO_TAG, "[transcribeViaGeminiFallback] Resampling PCM from ${sourceSampleRate}Hz to ${targetSampleRate}Hz")
+                    resamplePcm(pcmBytes, sourceSampleRate, targetSampleRate)
+                } else {
+                    pcmBytes
+                }
+
+                val wavBytes = pcmToWav(pcmForGemini, sampleRate = targetSampleRate, channels = 1, bitsPerSample = 16)
                 val base64Audio = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
 
-                Log.d(AUDIO_TAG, "[transcribeViaGeminiFallback] Sending ${wavBytes.size} bytes WAV to Gemini")
+                Log.d(AUDIO_TAG, "[transcribeViaGeminiFallback] Sending ${wavBytes.size} bytes WAV (${targetSampleRate}Hz) to Gemini")
 
                 val requestBody = org.json.JSONObject().apply {
                     put("contents", org.json.JSONArray().put(
@@ -428,7 +584,7 @@ class JarvisViewModel(
                     })
                 }.toString()
 
-                val url = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey")
+                val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$GEMINI_MODEL:generateContent?key=$apiKey")
                 val connection = url.openConnection() as HttpURLConnection
                 connection.requestMethod = "POST"
                 connection.setRequestProperty("Content-Type", "application/json")
@@ -477,6 +633,53 @@ class JarvisViewModel(
         }
     }
 
+    /**
+     * FIX C1: Resample PCM 16-bit mono audio from [sourceRate] to [targetRate]
+     * using linear interpolation. This ensures Gemini always receives 16kHz audio
+     * regardless of the AudioEngine's actual recording rate.
+     */
+    private fun resamplePcm(pcm: ByteArray, sourceRate: Int, targetRate: Int): ByteArray {
+        if (sourceRate == targetRate) return pcm
+
+        val sourceSamples = pcm.size / 2 // 16-bit samples
+        val targetSamples = (sourceSamples.toLong() * targetRate / sourceRate).toInt()
+        val result = ByteArray(targetSamples * 2)
+
+        val ratio = sourceSamples.toFloat() / targetSamples.toFloat()
+
+        for (i in 0 until targetSamples) {
+            val srcPos = i * ratio
+            val srcIdx = srcPos.toInt()
+            val frac = srcPos - srcIdx
+
+            val srcSample = if (srcIdx + 1 < sourceSamples) {
+                // Linear interpolation between adjacent samples
+                val s0 = readInt16LE(pcm, srcIdx * 2)
+                val s1 = readInt16LE(pcm, (srcIdx + 1) * 2)
+                (s0 + (s1 - s0) * frac).toInt()
+            } else if (srcIdx < sourceSamples) {
+                readInt16LE(pcm, srcIdx * 2)
+            } else {
+                0
+            }
+
+            writeInt16LE(result, i * 2, srcSample)
+        }
+
+        return result
+    }
+
+    /** Read a signed 16-bit little-endian value from a byte array. */
+    private fun readInt16LE(buf: ByteArray, offset: Int): Int {
+        val lo = buf[offset].toInt() and 0xFF
+        val hi = buf[offset + 1].toInt()
+        return (hi shl 8) or lo
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // WAV FILE CONSTRUCTION
+    // ═══════════════════════════════════════════════════════════════════════
+
     private fun pcmToWav(
         pcmData: ByteArray,
         sampleRate: Int = 44100,
@@ -521,11 +724,49 @@ class JarvisViewModel(
         buf[offset + 1] = ((value shr 8) and 0xFF).toByte()
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // CONTEXT / OVERLAY
+    // ═══════════════════════════════════════════════════════════════════════
+
     fun setApplicationContext(context: Context) {
         applicationContext = context.applicationContext
     }
 
     private fun getApplicationContext(): Context? = applicationContext
+
+    /**
+     * FIX M4: Show the floating overlay widget.
+     * Requires SYSTEM_ALERT_WINDOW permission.
+     */
+    fun showOverlay(context: Context) {
+        try {
+            if (overlayManager == null) {
+                overlayManager = JarvisOverlayManager(context.applicationContext)
+            }
+            overlayManager?.show()
+            _isOverlayVisible.value = true
+            Log.i(TAG, "Overlay shown")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to show overlay: ${e.message}")
+        }
+    }
+
+    /**
+     * FIX M4: Hide the floating overlay widget.
+     */
+    fun hideOverlay() {
+        try {
+            overlayManager?.hide()
+            _isOverlayVisible.value = false
+            Log.i(TAG, "Overlay hidden")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to hide overlay: ${e.message}")
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // WAKE WORD MONITORING
+    // ═══════════════════════════════════════════════════════════════════════
 
     @SuppressLint("MissingPermission")
     fun startWakeWordMonitor(context: Context) {
@@ -577,6 +818,10 @@ class JarvisViewModel(
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // QUERY PROCESSING PIPELINE
+    // ═══════════════════════════════════════════════════════════════════════
+
     fun processQuery(query: String, context: Context) {
         Log.d(AUDIO_TAG, "[processQuery] query=\"$query\"")
         if (_brainState.value == BrainState.THINKING || _brainState.value == BrainState.SPEAKING) {
@@ -613,9 +858,13 @@ class JarvisViewModel(
                 addAssistantMessage("Error: ${e.message?.take(200) ?: "Unknown"}", "stressed")
                 toast(context, "Query error: ${e.message?.take(100)}")
             } finally {
-                _brainState.value     = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
-                _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
-                _isTyping.value       = false
+                // FIX C6: Only reset _isTyping in finally.
+                // brainState and audioAmplitude are now managed by:
+                //   - handleAIQuery/handleSystemCommandResult (sets SPEAKING)
+                //   - MediaPlayer completion listener (sets IDLE/LISTENING)
+                // The old code reset brainState here, which clobbered the SPEAKING
+                // state that was just set before the async TTS playback started.
+                _isTyping.value = false
             }
         }
     }
@@ -649,8 +898,9 @@ class JarvisViewModel(
             val historyJson    = buildHistoryJson()
             val screenContext  = JarviewModel.screenTextData
 
+            // STEP 1: Try RustBridge first (fast, native path)
             Log.d(AUDIO_TAG, "[handleAIQuery] Calling RustBridge.processQuery")
-            val rawResponse = withContext(Dispatchers.IO) {
+            var rawResponse = withContext(Dispatchers.IO) {
                 try {
                     RustBridge.processQuery(query, screenContext, historyJson)
                 } catch (e: Exception) {
@@ -659,6 +909,25 @@ class JarvisViewModel(
                 }
             }
             Log.d(AUDIO_TAG, "[handleAIQuery] Raw response length=${rawResponse.length}")
+
+            // STEP 2: If Rust failed (native not loaded or returned error),
+            // fall back to pure-Kotlin Gemini HTTP call.
+            val isRustError = rawResponse.startsWith("[ERROR]") ||
+                    rawResponse.startsWith("ERROR:") ||
+                    rawResponse.contains("Native library not loaded")
+
+            if (isRustError && _geminiApiKey.value.isNotBlank()) {
+                Log.w(AUDIO_TAG, "[handleAIQuery] Rust failed, falling back to processQueryViaGeminiDirect")
+                val directResponse = withContext(Dispatchers.IO) {
+                    processQueryViaGeminiDirect(query, historyJson)
+                }
+                if (directResponse.isNotBlank()) {
+                    rawResponse = directResponse
+                    Log.i(AUDIO_TAG, "[handleAIQuery] Gemini direct fallback succeeded, length=${directResponse.length}")
+                } else {
+                    Log.w(AUDIO_TAG, "[handleAIQuery] Gemini direct fallback also failed")
+                }
+            }
 
             val parsed  = parseErrorResponse(rawResponse)
             val isError = parsed.startsWith("[ERROR]") || parsed.startsWith("ERROR:") || rawResponse.startsWith("ERROR:")
@@ -708,13 +977,138 @@ class JarvisViewModel(
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // GEMINI DIRECT (Kotlin HTTP fallback — no Rust required)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Pure-Kotlin Gemini API call for AI queries.
+     * Used as a fallback when RustBridge is not loaded.
+     *
+     * Calls the Gemini generateContent endpoint with conversation history
+     * and the JARVIS system prompt, returning the model's text response.
+     */
+    private fun processQueryViaGeminiDirect(query: String, historyJson: String): String {
+        try {
+            val apiKey = _geminiApiKey.value
+            if (apiKey.isBlank()) {
+                Log.w(TAG, "[processQueryViaGeminiDirect] Gemini API key not set")
+                return ""
+            }
+
+            Log.d(TAG, "[processQueryViaGeminiDirect] Sending query to Gemini: \"$query\"")
+
+            // Build conversation contents from history
+            val contentsArray = org.json.JSONArray()
+
+            // Parse history entries
+            try {
+                val historyArr = org.json.JSONArray(historyJson)
+                for (i in 0 until historyArr.length()) {
+                    val entry = historyArr.getJSONObject(i)
+                    val role = entry.optString("role", "user")
+                    val content = entry.optString("content", "")
+                    if (content.isNotBlank()) {
+                        contentsArray.put(org.json.JSONObject().apply {
+                            put("role", if (role == "model") "model" else "user")
+                            put("parts", org.json.JSONArray().put(
+                                org.json.JSONObject().put("text", content)
+                            ))
+                        })
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "[processQueryViaGeminiDirect] Failed to parse history: ${e.message}")
+            }
+
+            // Add the current user query
+            contentsArray.put(org.json.JSONObject().apply {
+                put("role", "user")
+                put("parts", org.json.JSONArray().put(
+                    org.json.JSONObject().put("text", query)
+                ))
+            })
+
+            val requestBody = org.json.JSONObject().apply {
+                put("contents", contentsArray)
+                put("systemInstruction", org.json.JSONObject().apply {
+                    put("parts", org.json.JSONArray().put(
+                        org.json.JSONObject().put("text", JARVIS_SYSTEM_PROMPT)
+                    ))
+                })
+                put("generationConfig", org.json.JSONObject().apply {
+                    put("temperature", 0.8)
+                    put("maxOutputTokens", 1024)
+                })
+            }.toString()
+
+            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$GEMINI_MODEL:generateContent?key=$apiKey")
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.doOutput = true
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 60_000
+
+            connection.outputStream.use { os ->
+                os.write(requestBody.toByteArray(Charsets.UTF_8))
+            }
+
+            val responseCode = connection.responseCode
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
+                Log.e(TAG, "[processQueryViaGeminiDirect] Gemini API error $responseCode: ${errorBody.take(500)}")
+                connection.disconnect()
+                return ""
+            }
+
+            val responseBody = connection.inputStream.bufferedReader().readText()
+            connection.disconnect()
+
+            val responseText = try {
+                val root = JsonParser.parseString(responseBody).asJsonObject
+                val candidates = root.getAsJsonArray("candidates")
+                val firstCandidate = candidates?.firstOrNull()?.asJsonObject
+                val content = firstCandidate?.getAsJsonObject("content")
+                val parts = content?.getAsJsonArray("parts")
+                val firstPart = parts?.firstOrNull()?.asJsonObject
+                firstPart?.get("text")?.asString ?: ""
+            } catch (e: Exception) {
+                Log.e(TAG, "[processQueryViaGeminiDirect] JSON parsing failed: ${e.message}")
+                ""
+            }
+
+            return if (responseText.isNotBlank()) {
+                Log.i(TAG, "[processQueryViaGeminiDirect] Response: \"${responseText.take(100)}...\"")
+                responseText
+            } else {
+                Log.w(TAG, "[processQueryViaGeminiDirect] Empty response from Gemini")
+                ""
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[processQueryViaGeminiDirect] Exception: ${e.message}", e)
+            return ""
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ERROR RESPONSE PARSING
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * FIX M1: parseErrorResponse now only matches HTTP status code patterns
+     * like "HTTP 429" or "status: 429", not arbitrary text containing "429".
+     */
     private fun parseErrorResponse(raw: String): String {
         val lower = raw.lowercase()
         return when {
-            lower.contains("429") || lower.contains("resource_exhausted") || lower.contains("quota") ->
+            // FIX M1: Only match HTTP status code patterns, not arbitrary "429" in text
+            Regex("""\b429\b""").containsMatchIn(lower) ||
+                    lower.contains("resource_exhausted") || lower.contains("quota") ->
                 "Sir, the Gemini API quota has been exhausted. Please update the key in Settings."
 
-            lower.contains("403") || lower.contains("permission_denied") || lower.contains("api_key_invalid") ->
+            Regex("""\b403\b""").containsMatchIn(lower) ||
+                    lower.contains("permission_denied") || lower.contains("api_key_invalid") ->
                 "Sir, the API key appears invalid or unauthorised. Please check Settings."
 
             lower.contains("model_not_found") ->
@@ -737,6 +1131,10 @@ class JarvisViewModel(
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // AUDIO CHUNK PROCESSING
+    // ═══════════════════════════════════════════════════════════════════════
+
     fun processAudioChunk(audioData: ByteArray, sampleRate: Int) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -746,6 +1144,10 @@ class JarvisViewModel(
             }
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // TTS PARAMS
+    // ═══════════════════════════════════════════════════════════════════════
 
     private fun computeTtsParams(): Pair<Float, Float> {
         val emotion = _emotion.value.lowercase()
@@ -813,10 +1215,12 @@ class JarvisViewModel(
                 return
             }
 
+            // FIX C5: Use android.util.Base64.decode directly instead of RustBridge.decodeBase64Audio.
+            // This removes the dependency on Rust being loaded for base64 decode.
             Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 3: Decoding base64 MP3")
             val mp3 = withContext(Dispatchers.IO) {
                 try {
-                    val decoded = RustBridge.decodeBase64Audio(base64)
+                    val decoded = Base64.decode(base64, Base64.NO_WRAP)
                     Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] Decoded MP3 size=${decoded.size} bytes")
                     decoded
                 } catch (e: Exception) {
@@ -914,7 +1318,9 @@ class JarvisViewModel(
         return base64
     }
 
-    // ── Public helpers ─────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════
+    // PUBLIC HELPERS
+    // ═══════════════════════════════════════════════════════════════════════
 
     fun sendMessage(text: String, context: Context) = processQuery(text, context)
 
@@ -929,22 +1335,140 @@ class JarvisViewModel(
         }
     }
 
+    /**
+     * FIX H4: Deprecated no-arg version with ERROR level.
+     * This ensures compile-time visibility of the deprecation.
+     */
     @Deprecated(
-        message = "Use toggleVoiceMode(context: Context) instead",
-        replaceWith = ReplaceWith("toggleVoiceMode(context)")
+        message = "Use toggleVoiceMode(context: Context) instead — context is required for audio engine",
+        replaceWith = ReplaceWith("toggleVoiceMode(context)"),
+        level = DeprecationLevel.ERROR
     )
     fun toggleVoiceMode() {
-        Log.w(AUDIO_TAG, "[toggleVoiceMode] DEPRECATED no-arg version called")
+        Log.w(AUDIO_TAG, "[toggleVoiceMode] DEPRECATED no-arg version called — no context available, toggling state only")
         _isVoiceMode.value = !_isVoiceMode.value
     }
 
+    /**
+     * FIX H9: toggleDevice now also publishes commands to MQTT and HomeAssistant,
+     * not just updating the local StateFlow.
+     */
     fun toggleDevice(deviceId: String, newState: Boolean) {
+        // Update local state immediately for responsive UI
         _devices.value = _devices.value.map { d ->
             if (d.id == deviceId) d.copy(isOn = newState) else d
         }
+
+        // Send command to Home Assistant
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (newState) {
+                    HomeAssistantBridge.turnOn(deviceId)
+                } else {
+                    HomeAssistantBridge.turnOff(deviceId)
+                }
+                Log.i(TAG, "toggleDevice: Sent ${if (newState) "ON" else "OFF"} to HA for $deviceId")
+            } catch (e: Exception) {
+                Log.e(TAG, "toggleDevice: HA call failed for $deviceId: ${e.message}")
+            }
+
+            // Also publish via MQTT
+            try {
+                val topic = "jarvis/command/$deviceId"
+                val payload = if (newState) "{\"state\": \"ON\"}" else "{\"state\": \"OFF\"}"
+                MqttManager.publish(topic, payload)
+                Log.i(TAG, "toggleDevice: Published MQTT command for $deviceId")
+            } catch (e: Exception) {
+                Log.e(TAG, "toggleDevice: MQTT publish failed for $deviceId: ${e.message}")
+            }
+        }
     }
 
-    fun refreshDevices() { viewModelScope.launch(Dispatchers.IO) { } }
+    /**
+     * FIX C2: refreshDevices now actually fetches device states from
+     * Home Assistant and populates the _devices StateFlow.
+     */
+    fun refreshDevices() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (!HomeAssistantBridge.isConfigured()) {
+                    Log.w(TAG, "[refreshDevices] HomeAssistant not configured — skipping")
+                    return@launch
+                }
+
+                val states = HomeAssistantBridge.getStates()
+                if (states == null) {
+                    Log.w(TAG, "[refreshDevices] HomeAssistantBridge.getStates() returned null")
+                    return@launch
+                }
+
+                val deviceList = mutableListOf<SmartDevice>()
+                for (i in 0 until states.length()) {
+                    try {
+                        val entity = states.getJSONObject(i)
+                        val entityId = entity.optString("entity_id", "")
+                        val state = entity.optString("state", "")
+                        val attributes = entity.optJSONObject("attributes") ?: continue
+                        val friendlyName = attributes.optString("friendly_name", entityId)
+
+                        // Skip non-controllable entities
+                        val domain = entityId.substringBefore(".", "")
+                        if (domain !in listOf("light", "switch", "fan", "humidifier",
+                                "input_boolean", "climate", "cover", "lock",
+                                "media_player", "automation", "script", "group")) {
+                            continue
+                        }
+
+                        val deviceType = when (domain) {
+                            "light" -> DeviceType.LIGHT
+                            "switch" -> DeviceType.SWITCH
+                            "fan" -> DeviceType.FAN
+                            "climate" -> DeviceType.THERMOSTAT
+                            "cover" -> DeviceType.CURTAIN
+                            "lock" -> DeviceType.LOCK
+                            "media_player" -> DeviceType.SPEAKER
+                            else -> DeviceType.SWITCH
+                        }
+
+                        val isOn = state.equals("on", ignoreCase = true) ||
+                                state.equals("locked", ignoreCase = true) ||
+                                state.equals("open", ignoreCase = true) ||
+                                state.equals("playing", ignoreCase = true)
+
+                        // Determine room from area or use "Default"
+                        val room = attributes.optString("area", "Default")
+
+                        // Value for sensors/thermostats
+                        val value = when (domain) {
+                            "climate" -> {
+                                val temp = attributes.optString("current_temperature", "")
+                                if (temp.isNotBlank()) "${temp}\u00B0C" else ""
+                            }
+                            "lock" -> if (isOn) "Locked" else "Unlocked"
+                            "cover" -> if (isOn) "Open" else "Closed"
+                            else -> ""
+                        }
+
+                        deviceList.add(SmartDevice(
+                            id = entityId,
+                            name = friendlyName,
+                            type = deviceType,
+                            room = room.ifBlank { "Default" },
+                            isOn = isOn,
+                            value = value
+                        ))
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[refreshDevices] Failed to parse entity: ${e.message}")
+                    }
+                }
+
+                _devices.value = deviceList
+                Log.i(TAG, "[refreshDevices] Loaded ${deviceList.size} devices from Home Assistant")
+            } catch (e: Exception) {
+                Log.e(TAG, "[refreshDevices] Failed: ${e.message}")
+            }
+        }
+    }
 
     fun updateAmplitude(amplitude: Float) {
         _audioAmplitude.value = amplitude.coerceIn(0f, 1f)
@@ -962,28 +1486,97 @@ class JarvisViewModel(
         }
     }
 
-    // ── Per-field setters ──────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════
+    // SMART HOME CONNECTION — FIX C2
+    // ═══════════════════════════════════════════════════════════════════════
 
+    /**
+     * FIX C2: Configure HomeAssistantBridge and connect MQTT.
+     * Called from loadPersistedSettings() after loading MQTT/HA settings.
+     */
+    private fun connectSmartHome(context: Context) {
+        try {
+            // Configure Home Assistant bridge
+            val haUrl = _homeAssistantUrl.value
+            val haToken = _homeAssistantToken.value
+            if (haUrl.isNotBlank() && haToken.isNotBlank()) {
+                HomeAssistantBridge.configure(haUrl, haToken)
+                Log.i(TAG, "Home Assistant bridge configured: $haUrl")
+
+                // Fetch devices
+                refreshDevices()
+            }
+
+            // Connect MQTT
+            val brokerUrl = _mqttBrokerUrl.value
+            if (brokerUrl.isNotBlank()) {
+                val connected = MqttManager.connect(
+                    context = context,
+                    broker = brokerUrl,
+                    username = _mqttUsername.value,
+                    pass = _mqttPassword.value
+                )
+                _isMqttConnected.value = connected
+                _mqttLabel.value = if (connected) "MQTT Connected" else "MQTT Disconnected"
+                Log.i(TAG, "MQTT connect initiated: broker=$brokerUrl result=$connected")
+
+                // Subscribe to device state topics
+                MqttManager.subscribe("jarvis/status/#")
+                MqttManager.subscribe("homeassistant/#")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "connectSmartHome failed: ${e.message}")
+        }
+    }
+
+    /**
+     * FIX C2: Reconnect smart home when settings change.
+     */
+    private fun reconnectSmartHome() {
+        val ctx = getApplicationContext() ?: return
+
+        // Disconnect existing connections
+        try {
+            MqttManager.disconnect()
+        } catch (e: Exception) {
+            Log.w(TAG, "MQTT disconnect error: ${e.message}")
+        }
+
+        _isMqttConnected.value = false
+        _mqttLabel.value = "MQTT Disconnected"
+
+        // Reconnect with new settings
+        connectSmartHome(ctx)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PER-FIELD SETTERS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * FIX H1: setGeminiApiKey no longer calls RustBridge.initialize().
+     * Only saveAndApplyApiKeys() should call RustBridge.initialize()
+     * to avoid race conditions from dual initialization.
+     */
     fun setGeminiApiKey(key: String) {
         _geminiApiKey.value = key
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 settingsRepository.setGeminiApiKey(key)
-                if (key.isNotEmpty() && RustBridge.isNativeReady()) {
-                    _isRustReady.value = RustBridge.initialize(key, _elevenLabsApiKey.value)
-                }
             } catch (e: Exception) { Log.e(TAG, "setGeminiApiKey: ${e.message}") }
         }
     }
 
+    /**
+     * FIX H1: setElevenLabsApiKey no longer calls RustBridge.initialize().
+     * Only saveAndApplyApiKeys() should call RustBridge.initialize()
+     * to avoid race conditions from dual initialization.
+     */
     fun setElevenLabsApiKey(key: String) {
         _elevenLabsApiKey.value = key
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 settingsRepository.setElevenLabsApiKey(key)
-                if (_geminiApiKey.value.isNotEmpty() && RustBridge.isNativeReady()) {
-                    _isRustReady.value = RustBridge.initialize(_geminiApiKey.value, key)
-                }
             } catch (e: Exception) { Log.e(TAG, "setElevenLabsApiKey: ${e.message}") }
         }
     }
@@ -1007,38 +1600,59 @@ class JarvisViewModel(
         }
     }
 
+    /**
+     * FIX C2: MQTT setters now trigger reconnection when settings change.
+     */
     fun setMqttBrokerUrl(url: String) {
         _mqttBrokerUrl.value = url
         viewModelScope.launch(Dispatchers.IO) {
-            try { settingsRepository.setMqttBrokerUrl(url) } catch (e: Exception) {}
+            try {
+                settingsRepository.setMqttBrokerUrl(url)
+                reconnectSmartHome()
+            } catch (e: Exception) {}
         }
     }
 
     fun setMqttUsername(u: String) {
         _mqttUsername.value = u
         viewModelScope.launch(Dispatchers.IO) {
-            try { settingsRepository.setMqttUsername(u) } catch (e: Exception) {}
+            try {
+                settingsRepository.setMqttUsername(u)
+                reconnectSmartHome()
+            } catch (e: Exception) {}
         }
     }
 
     fun setMqttPassword(p: String) {
         _mqttPassword.value = p
         viewModelScope.launch(Dispatchers.IO) {
-            try { settingsRepository.setMqttPassword(p) } catch (e: Exception) {}
+            try {
+                settingsRepository.setMqttPassword(p)
+                reconnectSmartHome()
+            } catch (e: Exception) {}
         }
     }
 
+    /**
+     * FIX C2: HA setters now trigger reconnection when settings change.
+     */
     fun setHomeAssistantUrl(url: String) {
         _homeAssistantUrl.value = url
         viewModelScope.launch(Dispatchers.IO) {
-            try { settingsRepository.setHomeAssistantUrl(url) } catch (e: Exception) {}
+            try {
+                settingsRepository.setHomeAssistantUrl(url)
+                reconnectSmartHome()
+            } catch (e: Exception) {}
         }
     }
 
     fun setHomeAssistantToken(token: String) {
         _homeAssistantToken.value = token
         viewModelScope.launch(Dispatchers.IO) {
-            try { settingsRepository.setHomeAssistantToken(token) } catch (e: Exception) {}
+            try {
+                settingsRepository.setHomeAssistantToken(token)
+                reconnectSmartHome()
+            } catch (e: Exception) {}
         }
     }
 
@@ -1052,6 +1666,10 @@ class JarvisViewModel(
     fun updateBatteryOptimized(v: Boolean) { _isBatteryOptimized.value = v }
     fun updateShizukuAvailable(v: Boolean) { _isShizukuAvailable.value = v }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // MESSAGE HELPERS
+    // ═══════════════════════════════════════════════════════════════════════
+
     private fun addUserMessage(text: String) {
         _messages.value += ChatMessage(id = nextMessageId++, content = text, isFromUser = true)
     }
@@ -1059,6 +1677,10 @@ class JarvisViewModel(
     private fun addAssistantMessage(text: String, emotion: String) {
         _messages.value += ChatMessage(id = nextMessageId++, content = text, isFromUser = false, emotion = emotion)
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // HISTORY / EMOTION HELPERS
+    // ═══════════════════════════════════════════════════════════════════════
 
     private val gson = Gson()
 
@@ -1160,6 +1782,8 @@ class JarvisViewModel(
                 if (!_isListening.value) {
                     _audioAmplitude.value = 0f
                 }
+                // FIX C6: This completion listener is the proper place to reset
+                // brainState after TTS playback finishes — NOT the processQuery finally block.
                 _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
                 try {
                     tmp.delete()
@@ -1218,11 +1842,28 @@ class JarvisViewModel(
         mediaPlayer = null
     }
 
+    /**
+     * FIX L7: Toast helper that always runs on the Main thread.
+     * Uses Handler to post to the main looper if called from a background thread,
+     * ensuring Toast never crashes due to being called off the main thread.
+     */
     private fun toast(context: Context, message: String) {
         try {
-            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            } else {
+                Handler(Looper.getMainLooper()).post {
+                    try {
+                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                    } catch (_: Exception) {}
+                }
+            }
         } catch (_: Exception) {}
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // LIFECYCLE
+    // ═══════════════════════════════════════════════════════════════════════
 
     override fun onCleared() {
         super.onCleared()
@@ -1242,6 +1883,14 @@ class JarvisViewModel(
 
         stopAudioEngine()
         stopWakeWordMonitor()
+
+        // FIX M4: Hide overlay on ViewModel clear
+        overlayManager?.hide()
+        overlayManager = null
+
+        // Disconnect MQTT
+        try { MqttManager.disconnect() } catch (_: Exception) {}
+
         try { RustBridge.shutdown() } catch (_: Exception) {}
         ShizukuManager.setOnShizukuStateChangedListener {}
     }

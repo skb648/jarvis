@@ -39,6 +39,8 @@ fun HomeScreen(
     deviceCount: Int,
     activeDeviceCount: Int,
     onQuickAction: (String) -> Unit,
+    isRustReady: Boolean = false,
+    engineStatusText: String = "AI engine starting...",
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -213,16 +215,16 @@ fun HomeScreen(
                         )
                     )
                     Text(
-                        text = "AI engine operational · Rust native",
+                        text = engineStatusText,
                         style = MaterialTheme.typography.bodySmall.copy(
-                            color = TextSecondary
+                            color = if (isRustReady) TextSecondary else WarningAmber
                         )
                     )
                 }
                 Icon(
-                    imageVector = Icons.Filled.CheckCircle,
-                    contentDescription = "Online",
-                    tint = SuccessGreen,
+                    imageVector = if (isRustReady) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+                    contentDescription = if (isRustReady) "Online" else "Limited",
+                    tint = if (isRustReady) SuccessGreen else WarningAmber,
                     modifier = Modifier.size(24.dp)
                 )
             }
