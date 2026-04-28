@@ -1,38 +1,41 @@
-# ─── Android ──────────────────────────────────────────
-*.apk
-*.aab
-*.ap_
-*.dex
-local.properties
-
-# ─── Build Outputs ────────────────────────────────────
-/build
-/app/build
-*.class
-
-# ─── Android Studio / IntelliJ ────────────────────────
-.idea/
-*.iml
+```
+# Dependencies
+node_modules/
+venv/
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+dist/
+build/
+target/
 .gradle/
+
+# Editors
+.vscode/
+.idea/
 *.swp
+*.swo
 
-# ─── CXX / CMake Cache ───────────────────────────────
-app/.cxx/
-
-# ─── Pre-built .so (must be rebuilt from Rust source) ─
-# Run ./rust/build.sh or ./gradlew buildRustDebug to build
-app/src/main/jniLibs/*/*.so
-
-# ─── Rust Build Artifacts ─────────────────────────────
-rust/target/
-
-# ─── OS Files ─────────────────────────────────────────
+# System
 .DS_Store
 Thumbs.db
+.env
+.env.local
+*.env.*
 
-# ─── Keystore ─────────────────────────────────────────
-*.jks
-*.keystore
-
-# ─── Logs ─────────────────────────────────────────────
+# Logs and temp files
 *.log
+*.tmp
+
+# Compiled files
+*.pyc
+*.class
+*.o
+*.exe
+*.dll
+*.so
+*.a
+*.obj
+*.out
+```
