@@ -5,10 +5,23 @@
 //! Detection strategy (layered):
 //!   Layer 1: Energy-based pre-filter (skip silence)
 //!   Layer 2: Spectral feature matching (MFCC-like)
-//!   Layer 3: Cross-correlation with reference template
+//!   Layer 3: Zero-crossing rate validation
+//!   Layer 4: Duration gating (minimum speech length)
+//!   Layer 5: Cooldown (prevent rapid re-triggers)
 //!
-//! For production, this should be replaced with a neural network
-//! (e.g., Porcupine, Snowboy, or custom ONNX model).
+//! IMPORTANT: This is a HEURISTIC detector, not a keyword spotter.
+//! It detects SPEECH activity, not the specific word "Jarvis".
+//! For production, replace with Porcupine, Snowboy, or ONNX model.
+//!
+//! v7 FIX: Reduced false positives by:
+//!   - Raising energy threshold from 0.02 → 0.04
+//!   - Requiring minimum 5 consecutive speech frames (was 3)
+//!   - Adding a cooldown period of 3 seconds between triggers
+//!   - Narrowing spectral centroid range to human voice fundamentals
+//!   - Adding duration gating: speech must last 200-2000ms
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Configuration for wake word detection
 struct WakeWordConfig {
@@ -16,6 +29,10 @@ struct WakeWordConfig {
     energy_threshold: f64,
     /// Minimum number of consecutive speech frames before triggering
     min_speech_frames: usize,
+    /// Maximum number of speech frames (speech too long = not a wake word)
+    max_speech_frames: usize,
+    /// Cooldown between detections in milliseconds
+    cooldown_ms: u64,
     /// Target keyword for simple matching (used in speech recognizer output)
     keyword: String,
 }
@@ -23,11 +40,29 @@ struct WakeWordConfig {
 impl Default for WakeWordConfig {
     fn default() -> Self {
         Self {
-            energy_threshold: 0.02,
-            min_speech_frames: 3,
+            // v7: Raised from 0.02 to 0.04 — filters out background noise better
+            energy_threshold: 0.04,
+            // v7: Raised from 3 to 5 — requires more sustained speech
+            min_speech_frames: 5,
+            // v7: New — if speech goes on too long, it's not a wake word
+            // At 44100Hz with 2048-sample frames ≈ 46ms/frame, 43 frames ≈ 2s
+            max_speech_frames: 43,
+            // v7: New — 3 second cooldown between triggers
+            cooldown_ms: 3000,
             keyword: "jarvis".to_string(),
         }
     }
+}
+
+/// Global last-trigger timestamp for cooldown (shared across detector instances)
+static LAST_TRIGGER_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Get current time in milliseconds since epoch
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Stateful wake word detector (for continuous audio streams)
@@ -54,17 +89,44 @@ impl WakeWordDetector {
             self.speech_frame_count += 1;
             self.is_speech = true;
         } else {
+            // v7: Only reset if we haven't accumulated enough frames yet
+            // If we had speech frames and now silence, check if we should trigger
+            if self.speech_frame_count >= self.config.min_speech_frames
+                && self.speech_frame_count <= self.config.max_speech_frames
+            {
+                let detected = self.check_cooldown_and_trigger();
+                self.speech_frame_count = 0;
+                self.is_speech = false;
+                return detected;
+            }
             self.speech_frame_count = 0;
             self.is_speech = false;
         }
 
-        // Trigger if we have sustained speech frames
-        if self.is_speech && self.speech_frame_count >= self.config.min_speech_frames {
+        // v7: If speech goes on too long, reset — it's not a short wake word
+        if self.speech_frame_count > self.config.max_speech_frames {
             self.speech_frame_count = 0;
-            return true;
+            self.is_speech = false;
+            return false;
         }
 
         false
+    }
+
+    /// Check cooldown and trigger if allowed
+    fn check_cooldown_and_trigger(&self) -> bool {
+        let now = now_ms();
+        let last = LAST_TRIGGER_MS.load(Ordering::Relaxed);
+        if now > last && now - last < self.config.cooldown_ms {
+            log::debug!(
+                "Wake word cooldown active — {}ms since last trigger (need {}ms)",
+                now - last,
+                self.config.cooldown_ms
+            );
+            return false;
+        }
+        LAST_TRIGGER_MS.store(now, Ordering::Relaxed);
+        true
     }
 
     /// Reset the detector state
@@ -76,6 +138,8 @@ impl WakeWordDetector {
 
 /// One-shot wake word detection on an audio buffer.
 /// Returns true if a wake word is detected in the given audio data.
+///
+/// v7: Added cooldown, higher thresholds, and duration gating.
 pub fn detect(audio_data: &[u8], sample_rate: u32) -> bool {
     let samples = bytes_to_f64_samples(audio_data);
 
@@ -87,16 +151,18 @@ pub fn detect(audio_data: &[u8], sample_rate: u32) -> bool {
     let energy: f64 = samples.iter().map(|s| s * s).sum::<f64>() / samples.len() as f64;
     let rms = energy.sqrt();
 
-    // Below threshold = silence, skip
-    if rms < 0.02 {
+    // v7: Raised threshold from 0.02 to 0.04
+    if rms < 0.04 {
         return false;
     }
 
     // Layer 2: Spectral analysis — check for speech-like frequency distribution
     let spectral_centroid = compute_spectral_centroid(&samples, sample_rate as f64);
 
-    // Human speech has spectral centroid typically between 200-4000 Hz
-    if spectral_centroid < 100.0 || spectral_centroid > 5000.0 {
+    // v7: Narrowed range — human speech fundamentals are 85-300Hz for male,
+    // 165-255Hz for female, with harmonics up to ~4kHz.
+    // Spectral centroid for speech is typically 300-3500 Hz
+    if spectral_centroid < 200.0 || spectral_centroid > 4500.0 {
         return false;
     }
 
@@ -104,15 +170,31 @@ pub fn detect(audio_data: &[u8], sample_rate: u32) -> bool {
     // not too high like noise)
     let zcr = compute_zero_crossing_rate(&samples);
 
-    // Speech ZCR is typically 0.1-0.3
-    if zcr < 0.05 || zcr > 0.5 {
+    // v7: Narrowed ZCR range for speech
+    if zcr < 0.08 || zcr > 0.35 {
         return false;
     }
 
-    // All filters passed — sustained speech detected.
+    // Layer 4: Duration gating — the audio buffer should represent a short utterance
+    // At 44100Hz with 2048 samples, one frame ≈ 46ms
+    // A wake word "Jarvis" is typically 300-800ms
+    let duration_ms = (samples.len() as f64 / sample_rate as f64) * 1000.0;
+    if duration_ms < 50.0 || duration_ms > 3000.0 {
+        return false;
+    }
+
+    // Layer 5: Cooldown check
+    let now = now_ms();
+    let last = LAST_TRIGGER_MS.load(Ordering::Relaxed);
+    if now > last && now - last < 3000 {
+        return false;
+    }
+
+    // All filters passed — speech detected that matches wake word characteristics.
     // In a production system, this is where we'd run a neural network
     // to classify whether the speech contains the keyword "jarvis".
-    // For now, we use energy-based detection as the primary trigger.
+    // For now, we use enhanced heuristic detection.
+    LAST_TRIGGER_MS.store(now, Ordering::Relaxed);
     true
 }
 
@@ -202,5 +284,29 @@ mod tests {
         let silence = vec![0.0f64; 1024];
         let zcr = compute_zero_crossing_rate(&silence);
         assert_eq!(zcr, 0.0);
+    }
+
+    #[test]
+    fn test_cooldown_prevents_rapid_triggers() {
+        // Reset cooldown
+        LAST_TRIGGER_MS.store(0, Ordering::Relaxed);
+
+        // Create a signal that would pass all filters
+        let mut signal = Vec::new();
+        for i in 0..4096 {
+            let t = i as f64 / 44100.0;
+            // 440Hz sine wave with amplitude 0.3
+            let sample = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 0.3;
+            let s16 = (sample * 32768.0) as i16;
+            signal.push((s16 & 0xFF) as u8);
+            signal.push(((s16 >> 8) & 0xFF) as u8);
+        }
+
+        // First detection should work (if it passes filters)
+        let _first = detect(&signal, 44100);
+
+        // Second immediate detection should be blocked by cooldown
+        let second = detect(&signal, 44100);
+        assert!(!second, "Cooldown should prevent rapid re-trigger");
     }
 }

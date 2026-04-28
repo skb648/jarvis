@@ -44,6 +44,15 @@
 
 # ─── Compose ────────────────────────────────────────────────────
 -dontwarn androidx.compose.**
+-keep class androidx.compose.runtime.** { *; }
+-keep class androidx.compose.ui.** { *; }
+-keep class androidx.compose.material3.** { *; }
+-keep class androidx.compose.foundation.** { *; }
+-keep class androidx.compose.animation.** { *; }
+-keep @androidx.compose.runtime.Composable class *
+-keepclassmembers class * {
+    @androidx.compose.runtime.Composable <methods>;
+}
 
 # ─── AndroidX ───────────────────────────────────────────────────
 -keep class androidx.work.** { *; }
@@ -55,6 +64,7 @@
 -keep class com.jarvis.assistant.ui.screens.ChatMessage { *; }
 -keep class com.jarvis.assistant.ui.screens.SmartDevice { *; }
 -keep class com.jarvis.assistant.automation.RoutineEngine$* { *; }
+-keep class com.jarvis.assistant.viewmodel.JarvisViewModel$HistoryEntry { *; }
 
 # ─── Action Handler (sealed class with JSON parsing) ────────────
 -keep class com.jarvis.assistant.actions.ActionHandler { *; }
@@ -72,5 +82,11 @@
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }
+
+# Don't strip any native methods — ensures JNI bridges are never removed
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+
 -dontwarn javax.annotation.**
 -dontwarn java.lang.invoke.StringConcatFactory

@@ -2,7 +2,15 @@ package com.jarvis.assistant.viewmodel
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.util.Base64
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -11,6 +19,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import com.google.gson.Gson
 import com.jarvis.assistant.actions.ActionHandler
 import com.jarvis.assistant.audio.AudioEngine
 import com.jarvis.assistant.channels.JarviewModel
@@ -25,6 +34,8 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.io.File
 import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 
 /** Result of a "Save & Apply" API key operation — consumed once for snackbar/toast. */
 enum class ApiKeySaveResult { NONE, SUCCESS, FAILURE }
@@ -50,11 +61,18 @@ enum class ApiKeySaveResult { NONE, SUCCESS, FAILURE }
  *    startListening()/stopListening(). The Chat screen voice button
  *    is no longer a dead toggle.
  *
- * 4. SPEECH-TO-TEXT VIA GEMINI:
- *    Instead of sending raw PCM audio analysis JSON to the AI,
- *    we now use Android's SpeechRecognizer to transcribe the voice
- *    command, then send the TEXT to Gemini. This fixes the "deaf app"
- *    bug where the AI received audio analysis JSON instead of words.
+ * 4. SPEECH-TO-TEXT VIA SpeechRecognizer (v7 FIX):
+ *    CRITICAL BUG FIX: The previous implementation was a HALLUCINATION
+ *    PIPELINE. It called RustBridge.analyzeAudio() which only returns
+ *    pitch/volume/emotion metadata, then sent that JSON to Gemini asking
+ *    "what did they likely say?" — Gemini would HALLUCINATE words from
+ *    audio analysis JSON, not transcribe actual speech.
+ *
+ *    FIX: We now run Android's SpeechRecognizer in PARALLEL with the
+ *    AudioEngine. When VAD detects end-of-speech, we use the actual
+ *    transcription from SpeechRecognizer. If SpeechRecognizer fails or
+ *    returns nothing, we fall back to Gemini's multimodal API by sending
+ *    the raw audio (as WAV base64) for transcription — NOT audio metadata.
  *
  * 5. BACKGROUND WAKE WORD MONITORING:
  *    When the app is in the foreground and wake word is enabled,
@@ -183,7 +201,22 @@ class JarvisViewModel(
     private var nextMessageId = 0L
 
     // ── Speech Recognition ──────────────────────────────────────────────────────
-    private var speechRecognizer: android.speech.SpeechRecognizer? = null
+    private var speechRecognizer: SpeechRecognizer? = null
+
+    /** Latest full transcription from SpeechRecognizer — updated in real-time. */
+    @Volatile
+    private var speechRecognizerResult: String = ""
+
+    /** Latest partial transcription from SpeechRecognizer — updated in real-time. */
+    @Volatile
+    private var speechRecognizerPartial: String = ""
+
+    /** Whether SpeechRecognizer is currently listening. */
+    @Volatile
+    private var isSpeechRecognizerActive: Boolean = false
+
+    /** Handler for SpeechRecognizer callbacks (must be on main thread). */
+    private val speechHandler: Handler by lazy { Handler(Looper.getMainLooper()) }
 
     init {
         loadPersistedSettings()
@@ -320,6 +353,11 @@ class JarvisViewModel(
 
         startAudioEngine(context)
 
+        // Start SpeechRecognizer in parallel for ACTUAL transcription
+        // AudioEngine handles VAD (detecting speech/silence boundaries),
+        // while SpeechRecognizer provides real-time speech-to-text.
+        startSpeechRecognizer(context)
+
         // Auto-start VAD command recording — the mic button means "I'm talking now"
         audioEngine?.startCommandRecording()
     }
@@ -330,6 +368,10 @@ class JarvisViewModel(
         // If we're in the middle of recording, flush the command first
         audioEngine?.stopCommandRecording()
         stopAudioEngine()
+
+        // Stop SpeechRecognizer — capture any pending results
+        stopSpeechRecognizer()
+
         _isListening.value       = false
         _brainState.value        = BrainState.IDLE
         _audioAmplitude.value    = 0f
@@ -382,69 +424,253 @@ class JarvisViewModel(
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // COMMAND READY HANDLER — TRANSCRIPTION PIPELINE
+    // SpeechRecognizer — PARALLEL LIVE TRANSCRIPTION
+    //
+    // Android's SpeechRecognizer captures audio from the microphone
+    // independently and transcribes it in real-time. We run it in
+    // parallel with AudioEngine's VAD so that when VAD detects
+    // end-of-speech, we already have a transcription ready.
+    //
+    // Flow:
+    //   startListening() → startSpeechRecognizer()
+    //   SpeechRecognizer captures partial/full results in callbacks
+    //   VAD fires onCommandReady → handleCommandReady()
+    //   handleCommandReady() uses SpeechRecognizer result
+    //   Fallback: Gemini multimodal API with WAV audio
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Lazily creates and configures the SpeechRecognizer.
+     * Must be called on the main thread (SpeechRecognizer requirement).
+     */
+    @SuppressLint("MissingPermission")
+    private fun ensureSpeechRecognizer(context: Context): Boolean {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            Log.w(TAG, "SpeechRecognizer not available on this device")
+            return false
+        }
+
+        // Destroy existing instance if any
+        speechRecognizer?.destroy()
+
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+            setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    Log.d(TAG, "SpeechRecognizer: ready for speech")
+                    isSpeechRecognizerActive = true
+                }
+
+                override fun onBeginningOfSpeech() {
+                    Log.d(TAG, "SpeechRecognizer: beginning of speech")
+                }
+
+                override fun onRmsChanged(rmsdB: Float) {
+                    // No-op — we get amplitude from AudioEngine
+                }
+
+                override fun onBufferReceived(buffer: ByteArray?) {
+                    // No-op — we don't use raw audio from SpeechRecognizer
+                }
+
+                override fun onEndOfSpeech() {
+                    Log.d(TAG, "SpeechRecognizer: end of speech")
+                    isSpeechRecognizerActive = false
+                }
+
+                override fun onError(error: Int) {
+                    val errMsg = when (error) {
+                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "network timeout"
+                        SpeechRecognizer.ERROR_NETWORK -> "network error"
+                        SpeechRecognizer.ERROR_AUDIO -> "audio error"
+                        SpeechRecognizer.ERROR_SERVER -> "server error"
+                        SpeechRecognizer.ERROR_CLIENT -> "client error"
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "no speech detected"
+                        SpeechRecognizer.ERROR_NO_MATCH -> "no match found"
+                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "recognizer busy"
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "insufficient permissions"
+                        else -> "unknown error ($error)"
+                    }
+                    Log.w(TAG, "SpeechRecognizer error: $errMsg")
+                    isSpeechRecognizerActive = false
+                }
+
+                override fun onResults(results: Bundle?) {
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    if (!matches.isNullOrEmpty()) {
+                        speechRecognizerResult = matches[0]
+                        Log.i(TAG, "SpeechRecognizer full result: \"$speechRecognizerResult\"")
+                    }
+                    isSpeechRecognizerActive = false
+                }
+
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    if (!matches.isNullOrEmpty()) {
+                        speechRecognizerPartial = matches[0]
+                        Log.d(TAG, "SpeechRecognizer partial: \"$speechRecognizerPartial\"")
+                    }
+                }
+
+                override fun onEvent(eventType: Int, params: Bundle?) {
+                    // No-op
+                }
+            })
+        }
+
+        return true
+    }
+
+    /**
+     * Start SpeechRecognizer listening in parallel with AudioEngine.
+     * Must be called on the main thread.
+     */
+    @SuppressLint("MissingPermission")
+    private fun startSpeechRecognizer(context: Context) {
+        // Reset state
+        speechRecognizerResult = ""
+        speechRecognizerPartial = ""
+
+        if (!ensureSpeechRecognizer(context)) {
+            Log.w(TAG, "SpeechRecognizer unavailable — will rely on Gemini fallback")
+            return
+        }
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            // Keep listening for up to 30 seconds
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 30000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 10000L)
+        }
+
+        try {
+            speechRecognizer?.startListening(intent)
+            isSpeechRecognizerActive = true
+            Log.i(TAG, "SpeechRecognizer started — listening in parallel with AudioEngine")
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SpeechRecognizer: RECORD_AUDIO permission denied: ${e.message}")
+            isSpeechRecognizerActive = false
+        } catch (e: Exception) {
+            Log.e(TAG, "SpeechRecognizer failed to start: ${e.message}")
+            isSpeechRecognizerActive = false
+        }
+    }
+
+    /**
+     * Stop SpeechRecognizer and return the best available transcription.
+     * Must be called on the main thread.
+     */
+    private fun stopSpeechRecognizer(): String {
+        try {
+            speechRecognizer?.stopListening()
+        } catch (e: Exception) {
+            Log.w(TAG, "SpeechRecognizer stopListening error: ${e.message}")
+        }
+        isSpeechRecognizerActive = false
+
+        // Prefer full result, fall back to partial
+        val result = speechRecognizerResult.ifBlank { speechRecognizerPartial }
+        Log.i(TAG, "SpeechRecognizer stopped — best result: \"$result\"")
+        return result
+    }
+
+    /**
+     * Completely destroy the SpeechRecognizer instance.
+     */
+    private fun destroySpeechRecognizer() {
+        try {
+            speechRecognizer?.destroy()
+        } catch (e: Exception) {
+            Log.w(TAG, "SpeechRecognizer destroy error: ${e.message}")
+        }
+        speechRecognizer = null
+        isSpeechRecognizerActive = false
+        speechRecognizerResult = ""
+        speechRecognizerPartial = ""
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // COMMAND READY HANDLER — REAL TRANSCRIPTION PIPELINE (v7)
     //
     // When VAD flushes a command (user finished speaking), we need to
-    // convert the PCM audio to text. We use Android's SpeechRecognizer
-    // as the primary method, with a fallback to sending the audio to
-    // Gemini's multimodal API for transcription.
+    // convert the speech to text. The pipeline is now:
+    //
+    //   1. Check SpeechRecognizer results (captured in parallel while
+    //      the user was speaking). This is REAL speech-to-text, not
+    //      hallucination.
+    //
+    //   2. If SpeechRecognizer returned nothing, fall back to Gemini's
+    //      multimodal API by sending the actual audio as WAV base64
+    //      for transcription. This is still real transcription, just
+    //      server-side.
+    //
+    //   3. If both fail, ask the user to repeat.
+    //
+    // We also run RustBridge.analyzeAudio() for emotion metadata (this
+    // is fine — it's for detecting the user's emotional tone, NOT for
+    // transcription).
     // ═══════════════════════════════════════════════════════════════════════
 
     private fun handleCommandReady(pcmBytes: ByteArray) {
         viewModelScope.launch(Dispatchers.Main) {
             _brainState.value = BrainState.THINKING
 
-            // Try using RustBridge to analyze audio first (gets emotion data)
-            val audioAnalysis = try {
+            // ── Step 1: Stop SpeechRecognizer and grab its results ─────────
+            // This is the PRIMARY transcription source — real speech-to-text.
+            val recognizerTranscription = stopSpeechRecognizer()
+
+            // ── Step 2: Also get emotion metadata from audio analysis ──────
+            // This is NOT used for transcription — only for detecting
+            // the user's emotional tone (angry, calm, urgent, etc.)
+            val audioEmotion = try {
                 withContext(Dispatchers.IO) {
                     RustBridge.analyzeAudio(pcmBytes, 44_100)
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Audio analysis failed: ${e.message}")
+                Log.w(TAG, "Audio emotion analysis failed: ${e.message}")
                 null
             }
 
-            // Use SpeechRecognizer for actual transcription
-            // Since we can't pass PCM directly to SpeechRecognizer,
-            // we'll use a simulated transcription approach:
-            // Save PCM → play through recognizer OR send to Gemini as audio
-
-            // For now, use the Gemini API with the audio analysis as context
-            // In a full production app, you'd use Google Cloud Speech-to-Text API
-            // or Android's SpeechRecognizer with a live audio stream
-
-            val transcription = withContext(Dispatchers.IO) {
+            // Update emotion state from audio analysis (not transcription)
+            if (!audioEmotion.isNullOrBlank()) {
                 try {
-                    // Try sending audio analysis context to Gemini for understanding
-                    // The audio analysis gives us pitch, volume, emotion
-                    val audioContext = audioAnalysis ?: ""
-                    if (audioContext.isNotBlank() && !audioContext.startsWith("{") ) {
-                        // If analysis returned plain text, use it directly
-                        audioContext
-                    } else {
-                        // Parse audio analysis and create a transcription prompt
-                        val prompt = if (audioContext.isNotBlank()) {
-                            "The user just spoke to you. Audio analysis: $audioContext. " +
-                            "Based on the conversation context, what did they likely say? " +
-                            "Respond with ONLY their likely words, nothing else."
-                        } else {
-                            "The user just spoke but I couldn't analyze the audio clearly. " +
-                            "Please ask them to repeat."
+                    val emotionRegex = Regex(""""emotion"\s*:\s*"(\w+)"""")
+                    val match = emotionRegex.find(audioEmotion)
+                    if (match != null) {
+                        val detected = match.groupValues[1].lowercase()
+                        if (detected in listOf("angry", "calm", "happy", "sad", "fearful",
+                                "surprised", "neutral", "urgent", "stressed")) {
+                            _emotion.value = detected
+                            Log.d(TAG, "Emotion from audio analysis: $detected")
                         }
-                        RustBridge.processQuery(prompt, "", "[]")
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Transcription failed: ${e.message}")
-                    ""
+                    Log.w(TAG, "Failed to parse emotion from audio analysis: ${e.message}")
                 }
             }
 
+            // ── Step 3: Use SpeechRecognizer result if available ───────────
+            var transcription = recognizerTranscription.trim()
+
+            // ── Step 4: Fallback — Gemini multimodal API with audio ────────
+            if (transcription.isBlank()) {
+                Log.w(TAG, "SpeechRecognizer returned nothing — falling back to Gemini multimodal")
+                transcription = transcribeViaGeminiFallback(pcmBytes)
+            }
+
+            // ── Step 5: Process the transcription ──────────────────────────
             if (transcription.isNotBlank()) {
                 _currentTranscription.value = transcription
-                // Get context from MainActivity (we need a reference)
+                Log.i(TAG, "Final transcription: \"$transcription\"")
                 val context = getApplicationContext()
                 if (context != null) {
                     processQuery(transcription, context)
+                } else {
+                    Log.e(TAG, "No application context — cannot process transcription")
+                    _brainState.value = BrainState.IDLE
+                    _isListening.value = false
                 }
             } else {
                 _brainState.value = BrainState.IDLE
@@ -452,6 +678,183 @@ class JarvisViewModel(
                 addAssistantMessage("I couldn't make that out, Sir. Please try again.", "confused")
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // GEMINI MULTIMODAL FALLBACK — SEND ACTUAL AUDIO FOR TRANSCRIPTION
+    //
+    // When Android's SpeechRecognizer is unavailable or returns nothing,
+    // we fall back to sending the raw PCM audio (converted to WAV) to
+    // Gemini's multimodal API for server-side transcription.
+    //
+    // This is REAL transcription — Gemini receives actual audio data
+    // and returns what was said. This is NOT the old hallucination
+    // pipeline that sent audio metadata JSON.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Transcribe audio via Gemini's multimodal API.
+     * Converts PCM to WAV, base64 encodes it, and sends it to Gemini
+     * with a transcription prompt.
+     *
+     * @param pcmBytes Raw PCM audio data (16-bit, 44100Hz, mono)
+     * @return Transcribed text, or empty string on failure
+     */
+    private suspend fun transcribeViaGeminiFallback(pcmBytes: ByteArray): String {
+        return withContext(Dispatchers.IO) {
+            try {
+                val apiKey = _geminiApiKey.value
+                if (apiKey.isBlank()) {
+                    Log.w(TAG, "Gemini API key not set — cannot use multimodal fallback")
+                    return@withContext ""
+                }
+
+                // Convert PCM to WAV format
+                val wavBytes = pcmToWav(pcmBytes, sampleRate = 44100, channels = 1, bitsPerSample = 16)
+                val base64Audio = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
+
+                Log.d(TAG, "Sending ${wavBytes.size} bytes WAV (${pcmBytes.size} PCM) to Gemini for transcription")
+
+                // Build the Gemini multimodal request
+                val requestBody = """
+                    {
+                      "contents": [{
+                        "parts": [
+                          {
+                            "inline_data": {
+                              "mimeType": "audio/wav",
+                              "data": "$base64Audio"
+                            }
+                          },
+                          {
+                            "text": "Transcribe the audio. Respond with ONLY the exact words spoken, nothing else. No quotes, no explanation, no commentary."
+                          }
+                        ]
+                      }],
+                      "generationConfig": {
+                        "temperature": 0.0,
+                        "maxOutputTokens": 256
+                      }
+                    }
+                """.trimIndent()
+
+                // Make HTTP request to Gemini API
+                val url = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey")
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.doOutput = true
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 30_000
+
+                connection.outputStream.use { os ->
+                    os.write(requestBody.toByteArray(Charsets.UTF_8))
+                }
+
+                val responseCode = connection.responseCode
+                if (responseCode != HttpURLConnection.HTTP_OK) {
+                    val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
+                    Log.e(TAG, "Gemini API error $responseCode: ${errorBody.take(500)}")
+                    return@withContext ""
+                }
+
+                val responseBody = connection.inputStream.bufferedReader().readText()
+                connection.disconnect()
+
+                // Parse the response to extract transcribed text
+                // Response format: {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
+                val textRegex = Regex(""""text"\s*:\s*"((?:[^"\\]|\\.)*)"""")
+                val match = textRegex.find(responseBody)
+                val transcribedText = match?.groupValues?.get(1)
+                    ?.replace("\\n", "\n")
+                    ?.replace("\\\"", "\"")
+                    ?.replace("\\\\", "\\")
+                    ?.trim()
+                    ?: ""
+
+                if (transcribedText.isNotBlank()) {
+                    Log.i(TAG, "Gemini multimodal transcription: \"$transcribedText\"")
+                } else {
+                    Log.w(TAG, "Gemini multimodal returned empty transcription")
+                }
+
+                transcribedText
+            } catch (e: Exception) {
+                Log.e(TAG, "Gemini multimodal fallback failed: ${e.message}")
+                ""
+            }
+        }
+    }
+
+    /**
+     * Convert raw PCM audio data to WAV format by prepending a WAV header.
+     *
+     * @param pcmData Raw PCM samples (16-bit signed little-endian)
+     * @param sampleRate Sample rate in Hz
+     * @param channels Number of channels (1=mono, 2=stereo)
+     * @param bitsPerSample Bits per sample (16)
+     * @return WAV-formatted byte array
+     */
+    private fun pcmToWav(
+        pcmData: ByteArray,
+        sampleRate: Int = 44100,
+        channels: Int = 1,
+        bitsPerSample: Int = 16
+    ): ByteArray {
+        val byteRate = sampleRate * channels * bitsPerSample / 8
+        val blockAlign = channels * bitsPerSample / 8
+        val dataSize = pcmData.size
+        val headerSize = 44
+
+        val wav = ByteArray(headerSize + dataSize)
+
+        // RIFF header
+        wav[0] = 'R'.code.toByte()
+        wav[1] = 'I'.code.toByte()
+        wav[2] = 'F'.code.toByte()
+        wav[3] = 'F'.code.toByte()
+        writeInt32LE(wav, 4, 36 + dataSize)          // ChunkSize
+        wav[8] = 'W'.code.toByte()
+        wav[9] = 'A'.code.toByte()
+        wav[10] = 'V'.code.toByte()
+        wav[11] = 'E'.code.toByte()
+
+        // fmt sub-chunk
+        wav[12] = 'f'.code.toByte()
+        wav[13] = 'm'.code.toByte()
+        wav[14] = 't'.code.toByte()
+        wav[15] = ' '.code.toByte()
+        writeInt32LE(wav, 16, 16)                     // Subchunk1Size (PCM = 16)
+        writeInt16LE(wav, 20, 1)                        // AudioFormat (1 = PCM)
+        writeInt16LE(wav, 22, channels)                 // NumChannels
+        writeInt32LE(wav, 24, sampleRate)               // SampleRate
+        writeInt32LE(wav, 28, byteRate)                 // ByteRate
+        writeInt16LE(wav, 32, blockAlign)               // BlockAlign
+        writeInt16LE(wav, 34, bitsPerSample)            // BitsPerSample
+
+        // data sub-chunk
+        wav[36] = 'd'.code.toByte()
+        wav[37] = 'a'.code.toByte()
+        wav[38] = 't'.code.toByte()
+        wav[39] = 'a'.code.toByte()
+        writeInt32LE(wav, 40, dataSize)               // Subchunk2Size
+
+        // Copy PCM data
+        System.arraycopy(pcmData, 0, wav, headerSize, dataSize)
+
+        return wav
+    }
+
+    private fun writeInt32LE(buf: ByteArray, offset: Int, value: Int) {
+        buf[offset]     = (value and 0xFF).toByte()
+        buf[offset + 1] = (value shr 8 and 0xFF).toByte()
+        buf[offset + 2] = (value shr 16 and 0xFF).toByte()
+        buf[offset + 3] = (value shr 24 and 0xFF).toByte()
+    }
+
+    private fun writeInt16LE(buf: ByteArray, offset: Int, value: Int) {
+        buf[offset]     = (value and 0xFF).toByte()
+        buf[offset + 1] = ((value shr 8) and 0xFF).toByte()
     }
 
     // Store application context for command processing
@@ -602,7 +1005,7 @@ class JarvisViewModel(
             }
 
             val parsed  = parseErrorResponse(rawResponse)
-            val isError = parsed !== rawResponse || rawResponse.startsWith("[ERROR]")
+            val isError = parsed != rawResponse || rawResponse.startsWith("[ERROR]")
 
             if (isError) {
                 _brainState.value   = BrainState.ERROR
@@ -772,6 +1175,21 @@ class JarvisViewModel(
         _audioAmplitude.value = amplitude.coerceIn(0f, 1f)
     }
 
+    /**
+     * Request Shizuku permission with an Activity context.
+     * This is the preferred method — Shizuku needs an Activity to show
+     * the permission dialog to the user.
+     */
+    fun requestShizukuPermission(activity: android.app.Activity, requestCode: Int = 0) {
+        if (ShizukuManager.isReady() && !ShizukuManager.hasPermission()) {
+            ShizukuManager.requestPermission(activity, requestCode)
+        }
+    }
+
+    /**
+     * Request Shizuku permission without an Activity context (fallback).
+     * May not show the permission dialog on some devices.
+     */
     fun requestShizukuPermission() {
         if (ShizukuManager.isReady() && !ShizukuManager.hasPermission()) {
             ShizukuManager.requestPermission()
@@ -878,14 +1296,19 @@ class JarvisViewModel(
         _messages.value += ChatMessage(id = nextMessageId++, content = text, isFromUser = false, emotion = emotion)
     }
 
+    private val gson = Gson()
+
+    private data class HistoryEntry(val role: String, val content: String)
+
     private fun buildHistoryJson(): String {
-        val recent  = _messages.value.takeLast(MAX_HISTORY_ENTRIES)
+        val recent = _messages.value.takeLast(MAX_HISTORY_ENTRIES)
         val entries = recent.map { m ->
-            val role    = if (m.isFromUser) "user" else "model"
-            val escaped = com.google.gson.Gson().toJson(m.content)
-            """{"role":"$role","content":$escaped}"""
+            HistoryEntry(
+                role = if (m.isFromUser) "user" else "model",
+                content = m.content
+            )
         }
-        return "[${entries.joinToString(",")}]"
+        return gson.toJson(entries)
     }
 
     private fun parseEmotionTag(r: String) =
@@ -895,9 +1318,10 @@ class JarvisViewModel(
         Regex("""\[EMOTION:\w+]\s*""", RegexOption.IGNORE_CASE).replace(r, "").trim()
 
     private fun playMp3Audio(mp3Bytes: ByteArray, context: Context) {
+        val tmp = File(context.cacheDir, "tts_${System.currentTimeMillis()}.mp3")
         try {
-            val tmp = File(context.cacheDir, "tts_${System.currentTimeMillis()}.mp3")
             FileOutputStream(tmp).use { it.write(mp3Bytes) }
+            tmp.deleteOnExit() // Safety net in case normal cleanup is missed
 
             if (exoPlayer == null) {
                 exoPlayer = ExoPlayer.Builder(context).build().apply {
@@ -905,6 +1329,7 @@ class JarvisViewModel(
                         override fun onPlayerError(e: PlaybackException) {
                             Log.e(TAG, "ExoPlayer error: ${e.message}")
                             _brainState.value = BrainState.ERROR
+                            tmp.delete()
                         }
                         override fun onPlaybackStateChanged(playbackState: Int) {
                             if (playbackState == Player.STATE_ENDED) {
@@ -920,12 +1345,14 @@ class JarvisViewModel(
                 }
             }
             exoPlayer?.apply {
+                stop()   // Stop current playback before setting new media item
                 setMediaItem(MediaItem.fromUri(Uri.fromFile(tmp)))
                 prepare()
                 playWhenReady = true
             }
         } catch (e: Exception) {
             Log.w(TAG, "playMp3Audio: ${e.message}")
+            tmp.delete() // Delete temp file on error too
         }
     }
 
@@ -933,12 +1360,11 @@ class JarvisViewModel(
         super.onCleared()
         stopAudioEngine()
         stopWakeWordMonitor()
+        destroySpeechRecognizer()
         try { exoPlayer?.release() } catch (_: Exception) {}
         exoPlayer = null
         try { RustBridge.shutdown() } catch (_: Exception) {}
         ShizukuManager.setOnShizukuStateChangedListener {}
-        speechRecognizer?.destroy()
-        speechRecognizer = null
     }
 
     class Factory(private val repo: SettingsRepository) : ViewModelProvider.Factory {

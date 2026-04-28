@@ -190,7 +190,7 @@ class MainActivity : ComponentActivity() {
             onSaveAndApplyKeys = { gemini, elevenlabs ->
                 viewModel.saveAndApplyApiKeys(gemini, elevenlabs)
             },
-            onShizukuRequestPermission = { viewModel.requestShizukuPermission() },
+            onShizukuRequestPermission = { viewModel.requestShizukuPermission(this@MainActivity) },
             apiKeySaveResult = apiKeySaveResult,
             onConsumeApiKeySaveResult = { viewModel.consumeApiKeySaveResult() }
         )
