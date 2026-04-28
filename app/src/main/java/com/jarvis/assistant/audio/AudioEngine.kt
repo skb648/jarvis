@@ -11,13 +11,16 @@ import android.util.Log
 import androidx.annotation.RequiresPermission
 import com.jarvis.assistant.jni.RustBridge
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withMutex
+import java.util.Collections
 import kotlin.math.sqrt
 
 /**
  * AudioEngine — Production-grade silent audio capture engine WITH VAD.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CRITICAL FIXES (v6):
+ * CRITICAL FIXES (v7):
  *
  * 1. VOICE ACTIVITY DETECTION (VAD):
  *    When startListening() is active and VAD mode is enabled, the engine
@@ -44,6 +47,14 @@ import kotlin.math.sqrt
  *
  * 5. ZERO SYSTEM BEEPS:
  *    Uses VOICE_COMMUNICATION as primary source (never triggers beeps).
+ *
+ * 6. THREAD SAFETY (v7 fixes):
+ *    - flushCommandBuffer() guarded by Mutex to prevent double-flush
+ *      when called from both VAD loop and stopCommandRecording().
+ *    - commandFrames uses Collections.synchronizedList() to prevent
+ *      ConcurrentModificationException across coroutines.
+ *    - AudioRecord creation + startRecording() moved into engineScope
+ *      (IO thread) to avoid binder calls on the calling thread.
  * ═══════════════════════════════════════════════════════════════════════
  */
 class AudioEngine(
@@ -114,9 +125,14 @@ class AudioEngine(
     private var recordingStartTime: Long = 0L
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private val commandFrames   = mutableListOf<ByteArray>()
+    // FIX #14: Thread-safe list — accessed from IO coroutine read loop,
+    // startCommandRecording() (any thread), and flushCommandBuffer() (IO coroutine).
+    private val commandFrames   = Collections.synchronizedList(mutableListOf<ByteArray>())
     private var cmdFrameCount   = 0
     private val maxCmdFrames    = (MAX_CMD_SECONDS * SAMPLE_RATE) / FRAME_SAMPLES
+
+    // FIX #5: Mutex prevents concurrent flush from VAD loop + stopCommandRecording()
+    private val flushMutex = Mutex()
 
     /** Isolated coroutine scope — cancelled only in [release]. */
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -132,36 +148,38 @@ class AudioEngine(
      *   3. NEVER VOICE_RECOGNITION — triggers system beeps on many OEMs
      *
      * Safe to call multiple times — previous session is stopped first.
-     * Returns immediately; the read loop runs in a background coroutine.
+     * Returns immediately; AudioRecord creation and the read loop run on IO.
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startListening() {
         stopListening()     // ensure clean slate
 
-        val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-        if (minBuf <= 0) {
-            Log.e(TAG, "getMinBufferSize returned $minBuf — device may not support 44100Hz mono")
-            return
-        }
-        val bufSize = maxOf(minBuf, FRAME_BYTES) * 4
-
-        // ── Create AudioRecord with VOICE_COMMUNICATION (zero-beep source) ──
-        val ar = tryCreateAudioRecord(bufSize)
-
-        if (ar == null || ar.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "AudioRecord init failed — check permissions")
-            ar?.release()
-            return
-        }
-
-        audioRecord = ar
-        isRunning   = true
-        smoothedRms = 0f
-        vadState    = VadState.IDLE
-        ar.startRecording()
-        Log.i(TAG, "AudioRecord STARTED  source=${ar.audioSource}  sample_rate=$SAMPLE_RATE  buf_size=$bufSize")
-
+        // FIX: AudioRecord creation + startRecording() moved into engineScope
+        // so binder calls happen on the IO thread, not the calling thread.
         listeningJob = engineScope.launch {
+            val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+            if (minBuf <= 0) {
+                Log.e(TAG, "getMinBufferSize returned $minBuf — device may not support 44100Hz mono")
+                return@launch
+            }
+            val bufSize = maxOf(minBuf, FRAME_BYTES) * 4
+
+            // ── Create AudioRecord with VOICE_COMMUNICATION (zero-beep source) ──
+            val ar = tryCreateAudioRecord(bufSize)
+
+            if (ar == null || ar.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "AudioRecord init failed — check permissions")
+                ar?.release()
+                return@launch
+            }
+
+            audioRecord = ar
+            isRunning   = true
+            smoothedRms = 0f
+            vadState    = VadState.IDLE
+            ar.startRecording()
+            Log.i(TAG, "AudioRecord STARTED  source=${ar.audioSource}  sample_rate=$SAMPLE_RATE  buf_size=$bufSize")
+
             val readBuf = ByteArray(FRAME_BYTES)
             while (isRunning && isActive) {
                 val read = ar.read(readBuf, 0, readBuf.size)
@@ -336,20 +354,33 @@ class AudioEngine(
 
     // ── Private ────────────────────────────────────────────────────────────────
 
+    /**
+     * Flush the command buffer and deliver PCM bytes via [onCommandReady].
+     *
+     * FIX #5: Guarded by [flushMutex] to prevent double-delivery when
+     * called concurrently from the VAD IO loop and stopCommandRecording().
+     * The early-return on `!isRecordingCommand` ensures the second caller
+     * is a no-op after the first has already flushed.
+     */
     private suspend fun flushCommandBuffer() {
-        isRecordingCommand = false
-        vadState = VadState.IDLE
-        val frames = commandFrames.toList()
-        commandFrames.clear()
-        cmdFrameCount = 0
-        if (frames.isEmpty()) return
+        flushMutex.withMutex {
+            // If another invocation already flushed, skip — prevents double delivery
+            if (!isRecordingCommand) return@withMutex
 
-        val out = ByteArray(frames.sumOf { it.size })
-        var off = 0
-        for (f in frames) { f.copyInto(out, off); off += f.size }
-        val durationSec = out.size.toFloat() / (SAMPLE_RATE * 2)
-        Log.i(TAG, "Command flushed: ${out.size} bytes (~${"%.1f".format(durationSec)}s)")
-        withContext(Dispatchers.Main) { onCommandReady(out) }
+            isRecordingCommand = false
+            vadState = VadState.IDLE
+            val frames = commandFrames.toList()
+            commandFrames.clear()
+            cmdFrameCount = 0
+            if (frames.isEmpty()) return@withMutex
+
+            val out = ByteArray(frames.sumOf { it.size })
+            var off = 0
+            for (f in frames) { f.copyInto(out, off); off += f.size }
+            val durationSec = out.size.toFloat() / (SAMPLE_RATE * 2)
+            Log.i(TAG, "Command flushed: ${out.size} bytes (~${"%.1f".format(durationSec)}s)")
+            withContext(Dispatchers.Main) { onCommandReady(out) }
+        }
     }
 
     /**

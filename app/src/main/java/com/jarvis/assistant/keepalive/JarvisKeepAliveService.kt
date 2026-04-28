@@ -191,7 +191,7 @@ class JarvisKeepAliveService : Service() {
         }
 
         // Check Accessibility service
-        if (JarviewModel.accessibilityService != null) {
+        if (JarviewModel.accessibilityService?.get() != null) {
             activeServices.add("Accessibility")
         }
 

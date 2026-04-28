@@ -49,48 +49,8 @@ object CommandRouter {
     }
 
     // ─── Well-known app name → package mapping ──────────────────
-    private val appAliases = mapOf(
-        // Google
-        "youtube" to "com.google.android.youtube",
-        "maps" to "com.google.android.apps.maps",
-        "gmail" to "com.google.android.gm",
-        "chrome" to "com.android.chrome",
-        "drive" to "com.google.android.apps.docs",
-        "photos" to "com.google.android.apps.photos",
-        "play store" to "com.android.vending",
-        "play music" to "com.google.android.music",
-        "google" to "com.google.android.googlequicksearchbox",
-        "google home" to "com.google.android.apps.chromecast.app",
-        "translate" to "com.google.android.apps.translate",
-        "calendar" to "com.google.android.calendar",
-        "clock" to "com.android.deskclock",
-        "calculator" to "com.google.android.calculator",
-        "weather" to "com.google.android.apps.weather",
-        // Social
-        "whatsapp" to "com.whatsapp",
-        "instagram" to "com.instagram.android",
-        "twitter" to "com.twitter.android",
-        "x" to "com.twitter.android",
-        "facebook" to "com.facebook.katana",
-        "telegram" to "org.telegram.messenger",
-        "snapchat" to "com.snapchat.android",
-        "discord" to "com.discord",
-        "spotify" to "com.spotify.music",
-        "netflix" to "com.netflix.mediaclient",
-        // Samsung
-        "samsung internet" to "com.sec.android.app.sbrowser",
-        "samsung health" to "com.sec.android.app.shealth",
-        "galaxy store" to "com.sec.android.app.samsungapps",
-        // Messaging
-        "messages" to "com.google.android.apps.messaging",
-        "sms" to "com.google.android.apps.messaging",
-        "phone" to "com.google.android.dialer",
-        "dialer" to "com.google.android.dialer",
-        // System
-        "settings" to "com.android.settings",
-        "files" to "com.google.android.apps.nbu.files",
-        "camera" to "com.google.android.GoogleCamera",
-    )
+    // Delegated to shared AppRegistry (BUG #12 fix: eliminates duplicate map)
+    private val appAliases: Map<String, String> get() = com.jarvis.assistant.actions.AppRegistry.appAliases
 
     /**
      * Route a user query to the appropriate handler.
@@ -329,7 +289,7 @@ object CommandRouter {
     }
 
     private fun handleGlobalAction(action: String): RouteResult {
-        val svc = JarviewModel.accessibilityService
+        val svc = JarviewModel.accessibilityService?.get()
         if (svc == null) {
             return RouteResult.Handled(
                 "I need Accessibility Service enabled to perform $action.",
@@ -354,7 +314,7 @@ object CommandRouter {
     }
 
     private fun handleScreenshot(): RouteResult {
-        val svc = JarviewModel.accessibilityService
+        val svc = JarviewModel.accessibilityService?.get()
         if (svc != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
             val success = svc.takeScreenshot()
             return if (success) {

@@ -69,8 +69,6 @@ const EMOTION_LEXICON: &[(&str, &str, f64, f64)] = &[
     // Confused
     ("confused", "confused", -0.2, 0.4),
     ("unsure", "confused", -0.2, 0.3),
-    ("what", "confused", -0.1, 0.3),
-    ("how", "confused", -0.1, 0.2),
     // Stressed
     ("stressed", "stressed", -0.5, 0.6),
     ("overwhelmed", "stressed", -0.6, 0.7),

@@ -79,6 +79,11 @@ pub extern "system" fn Java_com_jarvis_assistant_jni_RustBridge_nativeProcessQue
     let context_str = jni_helpers::jstring_to_string(&mut env, &context);
     let history_str = jni_helpers::jstring_to_string(&mut env, &history_json);
 
+    // SAFETY: block_on() is called from a JNI thread (Kotlin Dispatchers.IO),
+    // which is independent of the Tokio runtime's worker thread pool. The Tokio
+    // runtime (4 dedicated worker threads) does not call back into JNI, so
+    // there is no risk of deadlock from thread starvation. Each JNI caller
+    // thread blocks independently while waiting for the async result.
     let rt = runtime();
     let result =
         rt.block_on(async { gemini::process_query(&query_str, &context_str, &history_str).await });
@@ -106,6 +111,8 @@ pub extern "system" fn Java_com_jarvis_assistant_jni_RustBridge_nativeProcessQue
     let image_b64 = jni_helpers::jstring_to_string(&mut env, &image_base64);
     let mime = jni_helpers::jstring_to_string(&mut env, &mime_type);
 
+    // SAFETY: Same rationale as nativeProcessQuery — JNI thread is independent
+    // of the Tokio worker pool; no deadlock risk.
     let rt = runtime();
     let result = rt
         .block_on(async { gemini::process_query_with_image(&query_str, &image_b64, &mime).await });
@@ -142,8 +149,11 @@ pub extern "system" fn Java_com_jarvis_assistant_jni_RustBridge_nativeAnalyzeAud
         }
         Err(e) => {
             log::error!("Audio analysis failed: {}", e);
-            jni_helpers::string_to_jstring(&mut env, &format!("{{\"error\": \"{}\"}}", e))
-                .into_raw()
+            jni_helpers::string_to_jstring(
+                &mut env,
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            )
+            .into_raw()
         }
     }
 }
@@ -193,6 +203,8 @@ pub extern "system" fn Java_com_jarvis_assistant_jni_RustBridge_nativeSynthesize
     let text_str = jni_helpers::jstring_to_string(&mut env, &text);
     let voice = jni_helpers::jstring_to_string(&mut env, &voice_id);
 
+    // SAFETY: Same rationale as nativeProcessQuery — JNI thread is independent
+    // of the Tokio worker pool; no deadlock risk.
     let rt = runtime();
     let result = rt.block_on(async {
         gemini::synthesize_speech(&text_str, &voice, stability, similarity_boost).await

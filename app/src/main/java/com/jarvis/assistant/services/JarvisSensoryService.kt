@@ -258,7 +258,7 @@ class JarvisSensoryService : Service() {
             while (isScreenTextPolling && !Thread.interrupted()) {
                 try {
                     // Read screen text from AccessibilityService via JarviewModel
-                    val accessibilityService = JarviewModel.accessibilityService
+                    val accessibilityService = JarviewModel.accessibilityService?.get()
                     if (accessibilityService != null) {
                         val screenText = accessibilityService.extractScreenText()
                         val currentApp = JarviewModel.foregroundApp

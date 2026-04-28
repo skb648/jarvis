@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.util.Log
 import rikka.shizuku.Shizuku
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * JARVIS Shizuku Manager — ADB-level system control without root.
@@ -22,6 +23,7 @@ object ShizukuManager {
 
     private const val TAG = "JarvisShizuku"
     private const val SHELL_TIMEOUT_SECONDS = 15L
+    private const val THREAD_JOIN_TIMEOUT_MS = 5_000L
 
     data class ShellResult(
         val stdout: String,
@@ -173,6 +175,18 @@ object ShizukuManager {
 
     /**
      * Execute a shell command with ADB-level privileges via Shizuku.
+     *
+     * IMPORTANT: This method performs blocking I/O and MUST be called from
+     * a background thread (e.g., Dispatchers.IO or Dispatchers.Default).
+     * The caller (JarvisViewModel via ActionHandler) already dispatches
+     * to Dispatchers.Default, so this is safe.
+     *
+     * DEADLOCK FIX: stdout and stderr are read in separate threads
+     * concurrently with process.waitFor(). If the child process writes
+     * more than the OS pipe buffer (~64KB) to either stream and we
+     * don't drain it, the process blocks on write() and waitFor() never
+     * returns — a classic pipe buffer deadlock. Reading both streams
+     * on dedicated threads prevents this.
      */
     fun executeShellCommand(command: String): ShellResult {
         if (!isReady()) {
@@ -185,14 +199,45 @@ object ShizukuManager {
         return try {
             val process = newProcess(arrayOf("sh", "-c", command), null, null)
 
+            // Read stdout and stderr in parallel threads to prevent pipe buffer deadlock.
+            // If we read them sequentially after waitFor(), a process producing >64KB
+            // of output would block forever on write() while we block on waitFor().
+            val stdoutRef = AtomicReference("")
+            val stderrRef = AtomicReference("")
+
+            val stdoutThread = Thread {
+                try {
+                    stdoutRef.set(process.inputStream.bufferedReader().use { it.readText().trim() })
+                } catch (e: Exception) {
+                    Log.w(TAG, "stdout read failed: ${e.message}")
+                }
+            }.apply { name = "shizuku-stdout"; isDaemon = true }
+
+            val stderrThread = Thread {
+                try {
+                    stderrRef.set(process.errorStream.bufferedReader().use { it.readText().trim() })
+                } catch (e: Exception) {
+                    Log.w(TAG, "stderr read failed: ${e.message}")
+                }
+            }.apply { name = "shizuku-stderr"; isDaemon = true }
+
+            stdoutThread.start()
+            stderrThread.start()
+
             val completed = process.waitFor(SHELL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+
+            // Wait for reader threads to finish (they should complete quickly
+            // once the process exits and closes its output pipes)
+            stdoutThread.join(THREAD_JOIN_TIMEOUT_MS)
+            stderrThread.join(THREAD_JOIN_TIMEOUT_MS)
+
             if (!completed) {
                 process.destroyForcibly()
                 return ShellResult("", "Command timed out after ${SHELL_TIMEOUT_SECONDS}s", -1, false)
             }
 
-            val stdout = process.inputStream.bufferedReader().use { it.readText().trim() }
-            val stderr = process.errorStream.bufferedReader().use { it.readText().trim() }
+            val stdout = stdoutRef.get()
+            val stderr = stderrRef.get()
             val exitCode = process.exitValue()
 
             Log.d(TAG, "Shell: $command → exit=$exitCode stdout=${stdout.take(200)}")

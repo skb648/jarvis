@@ -10,6 +10,12 @@ import com.jarvis.assistant.shizuku.ShizukuManager
 /**
  * ActionHandler — Intercepts AI responses and executes REAL Android actions.
  *
+ * THREADING NOTE: All ShizukuManager calls made here are synchronous and
+ * blocking (they execute shell commands and wait for output). This is safe
+ * because the caller (JarvisViewModel) already dispatches action execution
+ * to Dispatchers.Default before invoking this handler. Do NOT call these
+ * methods from the main/UI thread.
+ *
  * ═══════════════════════════════════════════════════════════════════════
  * CRITICAL FIX (v6): JSON ACTION BLOCK PARSING
  *
@@ -44,44 +50,9 @@ object ActionHandler {
         data object NoAction : ActionResult()
     }
 
-    // Well-known app name to package mapping
-    private val appAliases = mapOf(
-        "youtube" to "com.google.android.youtube",
-        "maps" to "com.google.android.apps.maps",
-        "gmail" to "com.google.android.gm",
-        "chrome" to "com.android.chrome",
-        "drive" to "com.google.android.apps.docs",
-        "photos" to "com.google.android.apps.photos",
-        "play store" to "com.android.vending",
-        "play music" to "com.google.android.music",
-        "google" to "com.google.android.googlequicksearchbox",
-        "google home" to "com.google.android.apps.chromecast.app",
-        "translate" to "com.google.android.apps.translate",
-        "calendar" to "com.google.android.calendar",
-        "clock" to "com.android.deskclock",
-        "calculator" to "com.google.android.calculator",
-        "weather" to "com.google.android.apps.weather",
-        "whatsapp" to "com.whatsapp",
-        "instagram" to "com.instagram.android",
-        "twitter" to "com.twitter.android",
-        "x" to "com.twitter.android",
-        "facebook" to "com.facebook.katana",
-        "telegram" to "org.telegram.messenger",
-        "snapchat" to "com.snapchat.android",
-        "discord" to "com.discord",
-        "spotify" to "com.spotify.music",
-        "netflix" to "com.netflix.mediaclient",
-        "samsung internet" to "com.sec.android.app.sbrowser",
-        "samsung health" to "com.sec.android.app.shealth",
-        "galaxy store" to "com.sec.android.app.samsungapps",
-        "messages" to "com.google.android.apps.messaging",
-        "sms" to "com.google.android.apps.messaging",
-        "phone" to "com.google.android.dialer",
-        "dialer" to "com.google.android.dialer",
-        "settings" to "com.android.settings",
-        "files" to "com.google.android.apps.nbu.files",
-        "camera" to "com.google.android.GoogleCamera",
-    )
+    // Well-known app name to package mapping — delegated to shared AppRegistry
+    // (BUG #12 fix: eliminates duplicate map that also existed in CommandRouter)
+    private val appAliases: Map<String, String> get() = AppRegistry.appAliases
 
     /**
      * Intercept an AI response and execute any actions found in it.

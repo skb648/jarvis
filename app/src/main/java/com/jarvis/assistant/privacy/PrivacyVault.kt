@@ -46,6 +46,7 @@ class PrivacyVault(context: Context) {
 
     // ─── Key Management ─────────────────────────────────────────
 
+    @Synchronized
     private fun getOrCreateKey(): SecretKey {
         if (keyStore.containsAlias(KEY_ALIAS)) {
             val entry = keyStore.getEntry(KEY_ALIAS, null)

@@ -218,7 +218,9 @@ object RustBridge {
 
     fun shutdown() {
         try {
-            nativeShutdown()
+            kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                nativeShutdown()
+            }
         } catch (e: UnsatisfiedLinkError) {
             // Library not loaded — nothing to shut down
         } catch (e: Exception) {

@@ -9,6 +9,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.jarvis.assistant.channels.JarviewModel
+import java.lang.ref.WeakReference
 
 class JarvisAccessibilityService : AccessibilityService() {
 
@@ -21,7 +22,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         ensureNoTouchExploration()
 
-        JarviewModel.accessibilityService = this
+        JarviewModel.accessibilityService = WeakReference(this)
         JarviewModel.hasAccessibilityEnabled = true
         JarviewModel.sendEventToUi("accessibility_connected", mapOf(
             "timestamp" to System.currentTimeMillis()

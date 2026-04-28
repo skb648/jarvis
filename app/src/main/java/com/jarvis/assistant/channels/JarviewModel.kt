@@ -6,6 +6,7 @@ import com.jarvis.assistant.services.JarvisAccessibilityService
 import com.jarvis.assistant.services.JarvisSensoryService
 import com.jarvis.assistant.services.JarvisSpeechService
 import com.jarvis.assistant.keepalive.JarvisKeepAliveService
+import java.lang.ref.WeakReference
 
 /**
  * Global shared state singleton for cross-service communication.
@@ -29,7 +30,11 @@ object JarviewModel {
     }
 
     // ─── Service References ───────────────────────────────────────
-    @Volatile var accessibilityService: JarvisAccessibilityService? = null
+    // BUG #11 fix: WeakReference prevents memory leak — the accessibility
+    // service is an Android system component with its own lifecycle. A strong
+    // reference in a global singleton would prevent GC after the service is
+    // destroyed, leading to leaks. Use .get() to access the service instance.
+    @Volatile var accessibilityService: WeakReference<JarvisAccessibilityService>? = null
     @Volatile var speechService: JarvisSpeechService? = null
     @Volatile var sensoryService: JarvisSensoryService? = null
     @Volatile var keepAliveService: JarvisKeepAliveService? = null
@@ -183,7 +188,7 @@ object JarviewModel {
      */
     fun reset() {
         eventSink = null
-        accessibilityService = null
+        accessibilityService = null  // WeakReference cleared; GC can reclaim the service
         speechService = null
         sensoryService = null
         keepAliveService = null

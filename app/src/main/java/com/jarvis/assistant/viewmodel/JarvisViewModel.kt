@@ -2,23 +2,12 @@ package com.jarvis.assistant.viewmodel
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
+import android.media.MediaPlayer
 import android.util.Base64
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
 import com.google.gson.Gson
 import com.jarvis.assistant.actions.ActionHandler
 import com.jarvis.assistant.audio.AudioEngine
@@ -32,6 +21,7 @@ import com.jarvis.assistant.ui.screens.ChatMessage
 import com.jarvis.assistant.ui.screens.SmartDevice
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -44,7 +34,7 @@ enum class ApiKeySaveResult { NONE, SUCCESS, FAILURE }
  * JarvisViewModel — Central state holder and orchestrator.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CRITICAL FIXES (v6):
+ * CRITICAL FIXES (v8):
  *
  * 1. VAD (Voice Activity Detection) INTEGRATION:
  *    When the mic is started, AudioEngine now uses VAD to auto-stop
@@ -61,23 +51,36 @@ enum class ApiKeySaveResult { NONE, SUCCESS, FAILURE }
  *    startListening()/stopListening(). The Chat screen voice button
  *    is no longer a dead toggle.
  *
- * 4. SPEECH-TO-TEXT VIA SpeechRecognizer (v7 FIX):
- *    CRITICAL BUG FIX: The previous implementation was a HALLUCINATION
- *    PIPELINE. It called RustBridge.analyzeAudio() which only returns
- *    pitch/volume/emotion metadata, then sent that JSON to Gemini asking
- *    "what did they likely say?" — Gemini would HALLUCINATE words from
- *    audio analysis JSON, not transcribe actual speech.
- *
- *    FIX: We now run Android's SpeechRecognizer in PARALLEL with the
- *    AudioEngine. When VAD detects end-of-speech, we use the actual
- *    transcription from SpeechRecognizer. If SpeechRecognizer fails or
- *    returns nothing, we fall back to Gemini's multimodal API by sending
- *    the raw audio (as WAV base64) for transcription — NOT audio metadata.
+ * 4. REMOVED SpeechRecognizer (BUG #2 FIX):
+ *    SpeechRecognizer and AudioEngine were both trying to capture
+ *    audio simultaneously, causing microphone contention crashes on
+ *    most Android devices. SpeechRecognizer has been entirely removed.
+ *    Transcription now relies on the Gemini multimodal fallback,
+ *    which sends actual WAV audio data for server-side transcription.
+ *    This also fixes BUG #3 (stopSpeechRecognizer() reading results
+ *    too early — SpeechRecognizer.stopListening() is async, and
+ *    onResults() may arrive after stopSpeechRecognizer() returns).
  *
  * 5. BACKGROUND WAKE WORD MONITORING:
  *    When the app is in the foreground and wake word is enabled,
  *    a lightweight AudioEngine monitors for the wake word and
  *    automatically triggers VAD listening when detected.
+ *
+ * 6. ExoPlayer REPLACED with android.media.MediaPlayer:
+ *    ExoPlayer was overkill for simple TTS MP3 playback and caused
+ *    temp file leaks (BUG #4). MediaPlayer is used instead, with
+ *    proper temp file cleanup and synthetic amplitude pulsing for
+ *    the hologram orb animation during TTS playback.
+ *
+ * 7. ElevenLabs API KEY VALIDATION (BUG #10 FIX):
+ *    Added a check for empty ElevenLabs API key before calling
+ *    synthesizeSpeech, preventing unnecessary network calls and
+ *    confusing errors.
+ *
+ * 8. DEPRECATED toggleVoiceMode() no-context version (BUG #13 FIX):
+ *    The legacy no-context version of toggleVoiceMode() is now
+ *    marked @Deprecated — it cannot actually start/stop the mic
+ *    without a Context.
  * ═══════════════════════════════════════════════════════════════════════
  */
 class JarvisViewModel(
@@ -104,7 +107,7 @@ class JarvisViewModel(
      *
      * When the mic is OFF, this drops to 0f.
      * When the user speaks, this spikes proportionally to voice volume.
-     * When JARVIS speaks (TTS), this is set to a synthetic 0.5f for visual feedback.
+     * When JARVIS speaks (TTS), this pulses with a synthetic value for visual feedback.
      */
     private val _audioAmplitude = MutableStateFlow(0f)
     val audioAmplitude: StateFlow<Float> = _audioAmplitude.asStateFlow()
@@ -196,24 +199,21 @@ class JarvisViewModel(
     private var wakeWordEngine: AudioEngine? = null
     @Volatile private var isWakeWordMonitoring = false
 
-    // ── ExoPlayer for TTS ──────────────────────────────────────────────────────
-    private var exoPlayer: ExoPlayer? = null
+    // ── MediaPlayer for TTS (replaces ExoPlayer) ───────────────────────────────
+    /** MediaPlayer instance for TTS audio playback. Managed lifecycle-aware. */
+    private var mediaPlayer: MediaPlayer? = null
+
+    /** Path to the current TTS temp file, tracked for cleanup. */
+    @Volatile
+    private var currentTtsTempPath: String? = null
+
+    /** Job that pulses _audioAmplitude while MediaPlayer is playing. */
+    private var amplitudePulseJob: Job? = null
+
+    /** Mutex for synchronizing MediaPlayer operations. */
+    private val mediaPlayerMutex = Mutex()
+
     private var nextMessageId = 0L
-
-    // ── Speech Recognition ──────────────────────────────────────────────────────
-    private var speechRecognizer: SpeechRecognizer? = null
-
-    /** Latest full transcription from SpeechRecognizer — updated in real-time. */
-    @Volatile
-    private var speechRecognizerResult: String = ""
-
-    /** Latest partial transcription from SpeechRecognizer — updated in real-time. */
-    @Volatile
-    private var speechRecognizerPartial: String = ""
-
-    /** Whether SpeechRecognizer is currently listening. */
-    @Volatile
-    private var isSpeechRecognizerActive: Boolean = false
 
 
     init {
@@ -318,7 +318,13 @@ class JarvisViewModel(
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // MIC TOGGLE — FULLY WIRED WITH VAD
+    // MIC TOGGLE — FULLY WIRED WITH VAD (SpeechRecognizer REMOVED)
+    //
+    // BUG #2 FIX: SpeechRecognizer was removed because it and AudioEngine
+    // both tried to capture audio simultaneously, causing microphone
+    // contention crashes. Now only AudioEngine captures audio.
+    // Transcription is done via Gemini multimodal fallback (sends actual
+    // WAV audio for server-side transcription).
     //
     // Flow:
     // 1. User presses mic → startListening()
@@ -326,7 +332,7 @@ class JarvisViewModel(
     // 3. VAD detects speech → begins accumulating command frames
     // 4. VAD detects 1.5s silence after speech → auto-flushes command
     // 5. Command PCM bytes delivered to onCommandReady
-    // 6. onCommandReady uses SpeechRecognizer to transcribe
+    // 6. onCommandReady uses Gemini multimodal fallback for transcription
     // 7. Transcribed text sent to processQuery()
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -351,10 +357,9 @@ class JarvisViewModel(
 
         startAudioEngine(context)
 
-        // Start SpeechRecognizer in parallel for ACTUAL transcription
-        // AudioEngine handles VAD (detecting speech/silence boundaries),
-        // while SpeechRecognizer provides real-time speech-to-text.
-        startSpeechRecognizer(context)
+        // NOTE: SpeechRecognizer was REMOVED (BUG #2 fix).
+        // Only AudioEngine captures audio. Transcription is done via
+        // Gemini multimodal fallback in handleCommandReady().
 
         // Auto-start VAD command recording — the mic button means "I'm talking now"
         audioEngine?.startCommandRecording()
@@ -367,8 +372,8 @@ class JarvisViewModel(
         audioEngine?.stopCommandRecording()
         stopAudioEngine()
 
-        // Stop SpeechRecognizer — capture any pending results
-        stopSpeechRecognizer()
+        // NOTE: SpeechRecognizer was REMOVED (BUG #2/3 fix).
+        // No more stopSpeechRecognizer() call needed.
 
         _isListening.value       = false
         _brainState.value        = BrainState.IDLE
@@ -395,7 +400,7 @@ class JarvisViewModel(
                 audioEngine?.startCommandRecording()
             },
             onCommandReady = { pcmBytes ->
-                Log.i(TAG, "Command ready: ${pcmBytes.size} bytes — transcribing via SpeechRecognizer")
+                Log.i(TAG, "Command ready: ${pcmBytes.size} bytes — transcribing via Gemini multimodal")
                 handleCommandReady(pcmBytes)
             }
         )
@@ -422,204 +427,30 @@ class JarvisViewModel(
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // SpeechRecognizer — PARALLEL LIVE TRANSCRIPTION
+    // COMMAND READY HANDLER — GEMINI MULTIMODAL TRANSCRIPTION PIPELINE (v8)
     //
-    // Android's SpeechRecognizer captures audio from the microphone
-    // independently and transcribes it in real-time. We run it in
-    // parallel with AudioEngine's VAD so that when VAD detects
-    // end-of-speech, we already have a transcription ready.
+    // BUG #2/3 FIX: SpeechRecognizer has been REMOVED entirely.
+    // Both SpeechRecognizer and AudioEngine were trying to capture audio
+    // simultaneously, causing microphone contention crashes. Additionally,
+    // stopSpeechRecognizer() was reading results too early (BUG #3) since
+    // SpeechRecognizer.stopListening() is async.
     //
-    // Flow:
-    //   startListening() → startSpeechRecognizer()
-    //   SpeechRecognizer captures partial/full results in callbacks
-    //   VAD fires onCommandReady → handleCommandReady()
-    //   handleCommandReady() uses SpeechRecognizer result
-    //   Fallback: Gemini multimodal API with WAV audio
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /**
-     * Lazily creates and configures the SpeechRecognizer.
-     * Must be called on the main thread (SpeechRecognizer requirement).
-     */
-    @SuppressLint("MissingPermission")
-    private fun ensureSpeechRecognizer(context: Context): Boolean {
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            Log.w(TAG, "SpeechRecognizer not available on this device")
-            return false
-        }
-
-        // Destroy existing instance if any
-        speechRecognizer?.destroy()
-
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
-            setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    Log.d(TAG, "SpeechRecognizer: ready for speech")
-                    isSpeechRecognizerActive = true
-                }
-
-                override fun onBeginningOfSpeech() {
-                    Log.d(TAG, "SpeechRecognizer: beginning of speech")
-                }
-
-                override fun onRmsChanged(rmsdB: Float) {
-                    // No-op — we get amplitude from AudioEngine
-                }
-
-                override fun onBufferReceived(buffer: ByteArray?) {
-                    // No-op — we don't use raw audio from SpeechRecognizer
-                }
-
-                override fun onEndOfSpeech() {
-                    Log.d(TAG, "SpeechRecognizer: end of speech")
-                    isSpeechRecognizerActive = false
-                }
-
-                override fun onError(error: Int) {
-                    val errMsg = when (error) {
-                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "network timeout"
-                        SpeechRecognizer.ERROR_NETWORK -> "network error"
-                        SpeechRecognizer.ERROR_AUDIO -> "audio error"
-                        SpeechRecognizer.ERROR_SERVER -> "server error"
-                        SpeechRecognizer.ERROR_CLIENT -> "client error"
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "no speech detected"
-                        SpeechRecognizer.ERROR_NO_MATCH -> "no match found"
-                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "recognizer busy"
-                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "insufficient permissions"
-                        else -> "unknown error ($error)"
-                    }
-                    Log.w(TAG, "SpeechRecognizer error: $errMsg")
-                    isSpeechRecognizerActive = false
-                }
-
-                override fun onResults(results: Bundle?) {
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!matches.isNullOrEmpty()) {
-                        speechRecognizerResult = matches[0]
-                        Log.i(TAG, "SpeechRecognizer full result: \"$speechRecognizerResult\"")
-                    }
-                    isSpeechRecognizerActive = false
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) {
-                    val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!matches.isNullOrEmpty()) {
-                        speechRecognizerPartial = matches[0]
-                        Log.d(TAG, "SpeechRecognizer partial: \"$speechRecognizerPartial\"")
-                    }
-                }
-
-                override fun onEvent(eventType: Int, params: Bundle?) {
-                    // No-op
-                }
-            })
-        }
-
-        return true
-    }
-
-    /**
-     * Start SpeechRecognizer listening in parallel with AudioEngine.
-     * Must be called on the main thread.
-     */
-    @SuppressLint("MissingPermission")
-    private fun startSpeechRecognizer(context: Context) {
-        // Reset state
-        speechRecognizerResult = ""
-        speechRecognizerPartial = ""
-
-        if (!ensureSpeechRecognizer(context)) {
-            Log.w(TAG, "SpeechRecognizer unavailable — will rely on Gemini fallback")
-            return
-        }
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            // Keep listening for up to 30 seconds
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 30000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 10000L)
-        }
-
-        try {
-            speechRecognizer?.startListening(intent)
-            isSpeechRecognizerActive = true
-            Log.i(TAG, "SpeechRecognizer started — listening in parallel with AudioEngine")
-        } catch (e: SecurityException) {
-            Log.e(TAG, "SpeechRecognizer: RECORD_AUDIO permission denied: ${e.message}")
-            isSpeechRecognizerActive = false
-        } catch (e: Exception) {
-            Log.e(TAG, "SpeechRecognizer failed to start: ${e.message}")
-            isSpeechRecognizerActive = false
-        }
-    }
-
-    /**
-     * Stop SpeechRecognizer and return the best available transcription.
-     * Must be called on the main thread.
-     */
-    private fun stopSpeechRecognizer(): String {
-        try {
-            speechRecognizer?.stopListening()
-        } catch (e: Exception) {
-            Log.w(TAG, "SpeechRecognizer stopListening error: ${e.message}")
-        }
-        isSpeechRecognizerActive = false
-
-        // Prefer full result, fall back to partial
-        val result = speechRecognizerResult.ifBlank { speechRecognizerPartial }
-        Log.i(TAG, "SpeechRecognizer stopped — best result: \"$result\"")
-        return result
-    }
-
-    /**
-     * Completely destroy the SpeechRecognizer instance.
-     */
-    private fun destroySpeechRecognizer() {
-        try {
-            speechRecognizer?.destroy()
-        } catch (e: Exception) {
-            Log.w(TAG, "SpeechRecognizer destroy error: ${e.message}")
-        }
-        speechRecognizer = null
-        isSpeechRecognizerActive = false
-        speechRecognizerResult = ""
-        speechRecognizerPartial = ""
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // COMMAND READY HANDLER — REAL TRANSCRIPTION PIPELINE (v7)
+    // Now the transcription pipeline is:
     //
-    // When VAD flushes a command (user finished speaking), we need to
-    // convert the speech to text. The pipeline is now:
+    //   1. Get emotion metadata from audio analysis (NOT for transcription,
+    //      only for detecting the user's emotional tone).
     //
-    //   1. Check SpeechRecognizer results (captured in parallel while
-    //      the user was speaking). This is REAL speech-to-text, not
-    //      hallucination.
+    //   2. Transcribe via Gemini's multimodal API by sending the actual
+    //      audio as WAV base64 for server-side transcription.
     //
-    //   2. If SpeechRecognizer returned nothing, fall back to Gemini's
-    //      multimodal API by sending the actual audio as WAV base64
-    //      for transcription. This is still real transcription, just
-    //      server-side.
-    //
-    //   3. If both fail, ask the user to repeat.
-    //
-    // We also run RustBridge.analyzeAudio() for emotion metadata (this
-    // is fine — it's for detecting the user's emotional tone, NOT for
-    // transcription).
+    //   3. If transcription fails, ask the user to repeat.
     // ═══════════════════════════════════════════════════════════════════════
 
     private fun handleCommandReady(pcmBytes: ByteArray) {
         viewModelScope.launch(Dispatchers.Main) {
             _brainState.value = BrainState.THINKING
 
-            // ── Step 1: Stop SpeechRecognizer and grab its results ─────────
-            // This is the PRIMARY transcription source — real speech-to-text.
-            val recognizerTranscription = stopSpeechRecognizer()
-
-            // ── Step 2: Also get emotion metadata from audio analysis ──────
+            // ── Step 1: Get emotion metadata from audio analysis ──────────
             // This is NOT used for transcription — only for detecting
             // the user's emotional tone (angry, calm, urgent, etc.)
             val audioEmotion = try {
@@ -649,16 +480,12 @@ class JarvisViewModel(
                 }
             }
 
-            // ── Step 3: Use SpeechRecognizer result if available ───────────
-            var transcription = recognizerTranscription.trim()
+            // ── Step 2: Transcribe via Gemini multimodal API ──────────────
+            // SpeechRecognizer was removed (BUG #2/3 fix). We now rely
+            // entirely on Gemini's multimodal API for transcription.
+            var transcription = transcribeViaGeminiFallback(pcmBytes)
 
-            // ── Step 4: Fallback — Gemini multimodal API with audio ────────
-            if (transcription.isBlank()) {
-                Log.w(TAG, "SpeechRecognizer returned nothing — falling back to Gemini multimodal")
-                transcription = transcribeViaGeminiFallback(pcmBytes)
-            }
-
-            // ── Step 5: Process the transcription ──────────────────────────
+            // ── Step 3: Process the transcription ──────────────────────────
             if (transcription.isNotBlank()) {
                 _currentTranscription.value = transcription
                 Log.i(TAG, "Final transcription: \"$transcription\"")
@@ -681,9 +508,8 @@ class JarvisViewModel(
     // ═══════════════════════════════════════════════════════════════════════
     // GEMINI MULTIMODAL FALLBACK — SEND ACTUAL AUDIO FOR TRANSCRIPTION
     //
-    // When Android's SpeechRecognizer is unavailable or returns nothing,
-    // we fall back to sending the raw PCM audio (converted to WAV) to
-    // Gemini's multimodal API for server-side transcription.
+    // We send the raw PCM audio (converted to WAV) to Gemini's multimodal
+    // API for server-side transcription.
     //
     // This is REAL transcription — Gemini receives actual audio data
     // and returns what was said. This is NOT the old hallucination
@@ -737,7 +563,7 @@ class JarvisViewModel(
                 }.toString()
 
                 // Make HTTP request to Gemini API
-                val url = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey")
+                val url = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$apiKey")
                 val connection = url.openConnection() as HttpURLConnection
                 connection.requestMethod = "POST"
                 connection.setRequestProperty("Content-Type", "application/json")
@@ -1105,8 +931,37 @@ class JarvisViewModel(
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // TTS PIPELINE — ElevenLabs via RustBridge → Base64 → MP3 → MediaPlayer
+    //
+    // BUG #10 FIX: Validate ElevenLabs API key before calling synthesizeSpeech.
+    // BUG #4 FIX: Properly clean up temp MP3 files when MediaPlayer is stopped
+    //             before playback ends (no more relying on STATE_ENDED callback).
+    // MAJOR FIX: Replaced ExoPlayer with android.media.MediaPlayer for TTS
+    //            playback. MediaPlayer is simpler, lighter, and doesn't leak
+    //            temp files the way ExoPlayer did.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Synthesize speech via ElevenLabs and play the result through MediaPlayer.
+     *
+     * Pipeline: text → RustBridge.synthesizeSpeech() → Base64 MP3 → decode →
+     * temp .mp3 file → MediaPlayer → amplitude pulse coroutine.
+     *
+     * BUG #10 FIX: Checks for empty ElevenLabs API key before calling
+     * synthesizeSpeech, preventing unnecessary network calls.
+     */
     private suspend fun trySynthesizeAndPlay(text: String, context: Context) {
         try {
+            // BUG #10 FIX: Validate ElevenLabs API key before TTS call
+            val elevenLabsKey = _elevenLabsApiKey.value
+            if (elevenLabsKey.isBlank()) {
+                Log.w(TAG, "ElevenLabs API key is empty — skipping TTS synthesis")
+                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
+                _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
+                return
+            }
+
             val (stability, similarityBoost) = computeTtsParams()
             Log.d(TAG, "TTS params: emotion=${_emotion.value} stability=$stability similarityBoost=$similarityBoost")
 
@@ -1116,22 +971,49 @@ class JarvisViewModel(
                         text, _ttsVoiceId.value,
                         stability = stability, similarityBoost = similarityBoost
                     )
-                } catch (e: Exception) { null }
-            } ?: return
+                } catch (e: Exception) {
+                    Log.e(TAG, "RustBridge.synthesizeSpeech failed: ${e.message}")
+                    null
+                }
+            }
+
+            if (base64.isNullOrBlank()) {
+                Log.w(TAG, "TTS synthesis returned empty result — skipping playback")
+                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
+                _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
+                return
+            }
 
             val mp3 = withContext(Dispatchers.IO) {
-                try { RustBridge.decodeBase64Audio(base64) } catch (e: Exception) { null }
-            } ?: return
+                try { RustBridge.decodeBase64Audio(base64) } catch (e: Exception) {
+                    Log.e(TAG, "Base64 decode of TTS audio failed: ${e.message}")
+                    null
+                }
+            }
+
+            if (mp3 == null || mp3.isEmpty()) {
+                Log.w(TAG, "TTS decoded MP3 is empty — skipping playback")
+                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
+                _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
+                return
+            }
 
             withContext(Dispatchers.Main) { playMp3Audio(mp3, context) }
 
+            // Wait for MediaPlayer playback to finish (with timeout)
             withTimeoutOrNull(TTS_TIMEOUT_MS) {
-                while (isActive && exoPlayer?.isPlaying == true) delay(100)
+                while (isActive && mediaPlayer != null) {
+                    val isPlaying = try { mediaPlayer?.isPlaying == true } catch (_: Exception) { false }
+                    if (!isPlaying) break
+                    delay(100)
+                }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "TTS failed: ${e.message}")
+            _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
+            _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
         }
     }
 
@@ -1156,7 +1038,17 @@ class JarvisViewModel(
         }
     }
 
-    /** Legacy compat — no context version */
+    /**
+     * Legacy compat — no context version.
+     *
+     * BUG #13 FIX: Marked @Deprecated because this version cannot actually
+     * start/stop the microphone (requires a Context). Use the Context
+     * version [toggleVoiceMode] instead.
+     */
+    @Deprecated(
+        message = "Use toggleVoiceMode(context: Context) instead — this version cannot start/stop the mic",
+        replaceWith = ReplaceWith("toggleVoiceMode(context)")
+    )
     fun toggleVoiceMode() {
         _isVoiceMode.value = !_isVoiceMode.value
     }
@@ -1315,52 +1207,167 @@ class JarvisViewModel(
     private fun stripEmotionTag(r: String) =
         Regex("""\[EMOTION:\w+]\s*""", RegexOption.IGNORE_CASE).replace(r, "").trim()
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // MediaPlayer TTS PLAYBACK (replaces ExoPlayer)
+    //
+    // MAJOR FIX: Replaced ExoPlayer with android.media.MediaPlayer for
+    // TTS playback. ExoPlayer was overkill for simple MP3 playback and
+    // caused temp file leaks (BUG #4) because STATE_ENDED callback
+    // doesn't fire when stop() is called before playback ends.
+    //
+    // BUG #4 FIX: Before creating a new temp file, we delete the
+    // previous one. We also track the current temp file path so it
+    // can be cleaned up in all exit paths.
+    //
+    // MediaPlayer lifecycle:
+    //   playMp3Audio() → delete previous temp → write new temp →
+    //   release old player → create new player → setDataSource →
+    //   prepare → start → amplitude pulse coroutine →
+    //   onCompletion → delete temp → reset brain state
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Play MP3 audio bytes through MediaPlayer.
+     *
+     * BUG #4 FIX: Deletes the previous temp file before creating a new one,
+     * ensuring no temp file leaks even when stop() is called before
+     * playback ends.
+     *
+     * @param mp3Bytes Decoded MP3 audio data
+     * @param context Android context for cache directory
+     */
+    @SuppressLint("UnsafeDynamicallyLoadedCode")
     private fun playMp3Audio(mp3Bytes: ByteArray, context: Context) {
+        // ── Delete previous temp file (BUG #4 FIX) ─────────────────────
+        currentTtsTempPath?.let { prevPath ->
+            try {
+                val prevFile = File(prevPath)
+                if (prevFile.exists()) {
+                    prevFile.delete()
+                    Log.d(TAG, "Deleted previous TTS temp file: $prevPath")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to delete previous TTS temp file: ${e.message}")
+            }
+        }
+
+        // ── Cancel previous amplitude pulse job ────────────────────────
+        amplitudePulseJob?.cancel()
+        amplitudePulseJob = null
+
+        // ── Release previous MediaPlayer ───────────────────────────────
+        releaseMediaPlayer()
+
         val tmp = File(context.cacheDir, "tts_${System.currentTimeMillis()}.mp3")
+        currentTtsTempPath = tmp.absolutePath
+
         try {
             FileOutputStream(tmp).use { it.write(mp3Bytes) }
             tmp.deleteOnExit() // Safety net in case normal cleanup is missed
 
-            if (exoPlayer == null) {
-                exoPlayer = ExoPlayer.Builder(context).build().apply {
-                    addListener(object : Player.Listener {
-                        override fun onPlayerError(e: PlaybackException) {
-                            Log.e(TAG, "ExoPlayer error: ${e.message}")
-                            _brainState.value = BrainState.ERROR
-                            tmp.delete()
-                        }
-                        override fun onPlaybackStateChanged(playbackState: Int) {
-                            if (playbackState == Player.STATE_ENDED) {
-                                if (!_isListening.value) {
-                                    _audioAmplitude.value = 0f
-                                }
-                                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
-                                // Clean up temp file
-                                tmp.delete()
-                            }
-                        }
-                    })
+            val player = MediaPlayer().apply {
+                setDataSource(tmp.absolutePath)
+                setOnCompletionListener {
+                    Log.d(TAG, "MediaPlayer: playback completed")
+                    if (!_isListening.value) {
+                        _audioAmplitude.value = 0f
+                    }
+                    _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
+                    // Clean up temp file
+                    tmp.delete()
+                    currentTtsTempPath = null
+                    // Cancel amplitude pulse
+                    amplitudePulseJob?.cancel()
+                    amplitudePulseJob = null
+                }
+                setOnErrorListener { _, what, extra ->
+                    Log.e(TAG, "MediaPlayer error: what=$what extra=$extra")
+                    _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.ERROR
+                    _audioAmplitude.value = 0f
+                    tmp.delete()
+                    currentTtsTempPath = null
+                    amplitudePulseJob?.cancel()
+                    amplitudePulseJob = null
+                    true  // Error was handled
                 }
             }
-            exoPlayer?.apply {
-                stop()   // Stop current playback before setting new media item
-                setMediaItem(MediaItem.fromUri(Uri.fromFile(tmp)))
-                prepare()
-                playWhenReady = true
+
+            mediaPlayer = player
+            player.prepare()
+            player.start()
+
+            // ── Start amplitude pulse coroutine ─────────────────────────
+            // While MediaPlayer is playing, pulse _audioAmplitude with a
+            // synthetic value so the hologram orb animates during TTS.
+            amplitudePulseJob = viewModelScope.launch(Dispatchers.Default) {
+                var phase = 0f
+                while (isActive) {
+                    val isPlaying = try { mediaPlayer?.isPlaying == true } catch (_: Exception) { false }
+                    if (!isPlaying) break
+
+                    // Generate a smooth pulsing amplitude between 0.2f and 0.6f
+                    // using a sine wave for natural-looking orb animation.
+                    phase += 0.15f  // Speed of the pulse
+                    val pulse = 0.4f + 0.2f * kotlin.math.sin(phase.toDouble()).toFloat()
+                    _audioAmplitude.value = pulse.coerceIn(0.2f, 0.6f)
+                    delay(45)  // ~22 Hz update rate (matches AudioEngine)
+                }
+                // Reset amplitude when done (if not listening)
+                if (!_isListening.value) {
+                    _audioAmplitude.value = 0f
+                }
             }
+
         } catch (e: Exception) {
             Log.w(TAG, "playMp3Audio: ${e.message}")
-            tmp.delete() // Delete temp file on error too
+            tmp.delete()
+            currentTtsTempPath = null
+            _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
+            _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
         }
+    }
+
+    /**
+     * Safely release the current MediaPlayer instance.
+     * Called before creating a new player and in onCleared().
+     */
+    private fun releaseMediaPlayer() {
+        try {
+            mediaPlayer?.apply {
+                if (isPlaying) {
+                    stop()
+                }
+                release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaPlayer release error: ${e.message}")
+        }
+        mediaPlayer = null
     }
 
     override fun onCleared() {
         super.onCleared()
+
+        // Cancel amplitude pulse coroutine
+        amplitudePulseJob?.cancel()
+        amplitudePulseJob = null
+
+        // Release MediaPlayer (replaces ExoPlayer release)
+        releaseMediaPlayer()
+
+        // Clean up any remaining temp file
+        currentTtsTempPath?.let { path ->
+            try {
+                val file = File(path)
+                if (file.exists()) file.delete()
+            } catch (_: Exception) {}
+            currentTtsTempPath = null
+        }
+
+        // NOTE: No destroySpeechRecognizer() call needed (BUG #2 fix — removed entirely)
+
         stopAudioEngine()
         stopWakeWordMonitor()
-        destroySpeechRecognizer()
-        try { exoPlayer?.release() } catch (_: Exception) {}
-        exoPlayer = null
         try { RustBridge.shutdown() } catch (_: Exception) {}
         ShizukuManager.setOnShizukuStateChangedListener {}
     }

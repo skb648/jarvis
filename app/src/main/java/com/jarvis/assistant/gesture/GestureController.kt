@@ -30,7 +30,7 @@ object GestureController {
      */
     fun performTap(x: Int, y: Int): Boolean {
         // Try AccessibilityService first
-        val service = JarviewModel.accessibilityService
+        val service = JarviewModel.accessibilityService?.get()
         if (service != null) {
             val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
             val gesture = GestureDescription.Builder()
@@ -48,7 +48,7 @@ object GestureController {
      * Perform a long press gesture at the specified coordinates.
      */
     fun performLongPress(x: Int, y: Int): Boolean {
-        val service = JarviewModel.accessibilityService
+        val service = JarviewModel.accessibilityService?.get()
         if (service != null) {
             val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
             val gesture = GestureDescription.Builder()
@@ -66,7 +66,7 @@ object GestureController {
      * Perform a swipe gesture from (x1,y1) to (x2,y2).
      */
     fun performSwipe(x1: Int, y1: Int, x2: Int, y2: Int, duration: Long = SWIPE_DURATION_MS): Boolean {
-        val service = JarviewModel.accessibilityService
+        val service = JarviewModel.accessibilityService?.get()
         if (service != null) {
             val path = Path().apply {
                 moveTo(x1.toFloat(), y1.toFloat())
@@ -97,7 +97,7 @@ object GestureController {
      * sequential taps which don't resemble a pinch at all.
      */
     fun performPinch(centerX: Int, centerY: Int, pinchDistance: Float, duration: Long = PINCH_DURATION_MS): Boolean {
-        val service = JarviewModel.accessibilityService
+        val service = JarviewModel.accessibilityService?.get()
         if (service != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val path1 = Path().apply {
                 moveTo((centerX - pinchDistance), centerY.toFloat())

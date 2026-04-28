@@ -1,21 +1,17 @@
-# ─── JARVIS Android APK — CI Build Workflow ────────────────────────
-# Triggers on every push to main/master and on pull requests.
-# Builds both debug and release APKs, with optional Rust JNI.
-# The Rust build is best-effort: if cargo-ndk fails, the CMake
-# stub provides a fallback so the APK still builds.
+# ─── JARVIS Android APK — Release Workflow ────────────────────────
+# Triggers on version tag pushes (v*), builds a release APK,
+# and creates a GitHub Release with the APK attached.
 # ──────────────────────────────────────────────────────────────────
 
-name: Build APK
+name: Release APK
 
 on:
   push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+    tags:
+      - "v*"
 
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: write
 
 env:
   JAVA_VERSION: "17"
@@ -27,8 +23,8 @@ env:
   RUST_TOOLCHAIN: stable
 
 jobs:
-  build:
-    name: Build Debug & Release APK
+  release:
+    name: Build & Release APK
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -36,6 +32,15 @@ jobs:
       # ─── Checkout ──────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # ─── Extract version from tag ──────────────────────────────
+      - name: Extract version from tag
+        id: version
+        run: |
+          # Strip leading 'v' from tag (v5.0.0 → 5.0.0)
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
       # ─── JDK ───────────────────────────────────────────────────
       - name: Set up JDK ${{ env.JAVA_VERSION }}
@@ -108,62 +113,76 @@ jobs:
           restore-keys: |
             android-sdk-${{ runner.os }}-
 
-      # ─── Gradle Build (Debug) ─────────────────────────────────
+      # ─── Build Release APK ────────────────────────────────────
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug
-        env:
-          NDK_HOME: ${{ env.NDK_HOME }}
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-
-      # ─── Gradle Build (Release) ───────────────────────────────
-      - name: Build release APK (debug-signed)
+      - name: Build release APK
         run: ./gradlew assembleRelease
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-      # ─── Upload Artifacts ─────────────────────────────────────
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: jarvis-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 14
-
-      - name: Upload release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: jarvis-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
-          retention-days: 30
-
-      # ─── Build Summary ────────────────────────────────────────
-      - name: Print build summary
+      # ─── Rename APK with version ──────────────────────────────
+      - name: Rename APK with version tag
+        id: apk
         run: |
-          echo "## Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          VERSION="${{ steps.version.outputs.version }}"
+          SOURCE="app/build/outputs/apk/release/app-release.apk"
+          DEST="jarvis-v${VERSION}.apk"
+
+          if [ ! -f "$SOURCE" ]; then
+            echo "::error::Release APK not found at $SOURCE"
+            exit 1
+          fi
+
+          cp "$SOURCE" "$DEST"
+          APK_SIZE=$(du -h "$DEST" | cut -f1)
+          echo "filename=${DEST}" >> "$GITHUB_OUTPUT"
+          echo "size=${APK_SIZE}" >> "$GITHUB_OUTPUT"
+
+      # ─── Generate Changelog ───────────────────────────────────
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "## What's Changed" > CHANGELOG.md
+            echo "" >> CHANGELOG.md
+            git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges >> CHANGELOG.md
+          else
+            echo "## Initial Release" > CHANGELOG.md
+          fi
+
+          echo "" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "---" >> CHANGELOG.md
+          echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${{ github.ref_name }}" >> CHANGELOG.md
+
+      # ─── Create GitHub Release ────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "JARVIS ${{ steps.version.outputs.tag }}"
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          files: |
+            ${{ steps.apk.outputs.filename }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─── Release Summary ──────────────────────────────────────
+      - name: Print release summary
+        run: |
+          echo "## Release Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
-          RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
-
-          if [ -f "$DEBUG_APK" ]; then
-            DEBUG_SIZE=$(du -h "$DEBUG_APK" | cut -f1)
-            echo "- Debug APK: \`$DEBUG_SIZE\`" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- Debug APK: **NOT FOUND**" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          if [ -f "$RELEASE_APK" ]; then
-            RELEASE_SIZE=$(du -h "$RELEASE_APK" | cut -f1)
-            echo "- Release APK: \`$RELEASE_SIZE\`" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- Release APK: **NOT FOUND**" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          # Check Rust .so status
+          echo "- **Version**: \`${{ steps.version.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **APK**: \`${{ steps.apk.outputs.filename }}\` (${{ steps.apk.outputs.size }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Pre-release**: ${{ contains(steps.version.outputs.version, '-') }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Native Libraries" >> "$GITHUB_STEP_SUMMARY"
           for abi in arm64-v8a armeabi-v7a; do
@@ -172,6 +191,6 @@ jobs:
               SO_SIZE=$(du -h "$SO_PATH" | cut -f1)
               echo "- ${abi}: \`libjarvis_rust.so\` (${SO_SIZE})" >> "$GITHUB_STEP_SUMMARY"
             else
-              echo "- ${abi}: CMake stub (Rust .so not built)" >> "$GITHUB_STEP_SUMMARY"
+              echo "- ${abi}: CMake stub only" >> "$GITHUB_STEP_SUMMARY"
             fi
           done
