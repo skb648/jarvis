@@ -210,7 +210,8 @@ class MainActivity : ComponentActivity() {
 
     private fun updatePermissionStates() {
         try {
-            val viewModel = androidx.lifecycle.ViewModelProvider(this)[JarvisViewModel::class.java]
+            // Use the correct factory that includes SettingsRepository
+            val viewModel = androidx.lifecycle.ViewModelProvider(this, JarvisViewModel.Factory(settingsRepository))[JarvisViewModel::class.java]
 
             val isBatteryOpt = !PermissionManager.isIgnoringBatteryOptimizations(this)
             viewModel.updateBatteryOptimized(isBatteryOpt)
@@ -233,8 +234,8 @@ class MainActivity : ComponentActivity() {
                     == PackageManager.PERMISSION_GRANTED
                 ) {
                     try {
-                        val viewModel = androidx.lifecycle.ViewModelProvider(this)[JarvisViewModel::class.java]
-                        viewModel.startListening(this)
+                        val viewModel = androidx.lifecycle.ViewModelProvider(this@MainActivity, JarvisViewModel.Factory(settingsRepository))[JarvisViewModel::class.java]
+                        viewModel.startListening(this@MainActivity)
                         android.util.Log.i(TAG, "Listening triggered from intent shortcut")
                     } catch (e: Exception) {
                         android.util.Log.e(TAG, "Failed to start listening from intent: ${e.message}")

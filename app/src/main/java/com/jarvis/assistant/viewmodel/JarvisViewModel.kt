@@ -215,8 +215,6 @@ class JarvisViewModel(
     @Volatile
     private var isSpeechRecognizerActive: Boolean = false
 
-    /** Handler for SpeechRecognizer callbacks (must be on main thread). */
-    private val speechHandler: Handler by lazy { Handler(Looper.getMainLooper()) }
 
     init {
         loadPersistedSettings()
@@ -715,28 +713,28 @@ class JarvisViewModel(
 
                 Log.d(TAG, "Sending ${wavBytes.size} bytes WAV (${pcmBytes.size} PCM) to Gemini for transcription")
 
-                // Build the Gemini multimodal request
-                val requestBody = """
-                    {
-                      "contents": [{
-                        "parts": [
-                          {
-                            "inline_data": {
-                              "mimeType": "audio/wav",
-                              "data": "$base64Audio"
-                            }
-                          },
-                          {
-                            "text": "Transcribe the audio. Respond with ONLY the exact words spoken, nothing else. No quotes, no explanation, no commentary."
-                          }
-                        ]
-                      }],
-                      "generationConfig": {
-                        "temperature": 0.0,
-                        "maxOutputTokens": 256
-                      }
-                    }
-                """.trimIndent()
+                // Build the Gemini multimodal request using JSONObject for safe escaping
+                val requestBody = org.json.JSONObject().apply {
+                    put("contents", org.json.JSONArray().put(
+                        org.json.JSONObject().apply {
+                            put("parts", org.json.JSONArray().apply {
+                                put(org.json.JSONObject().apply {
+                                    put("inline_data", org.json.JSONObject().apply {
+                                        put("mimeType", "audio/wav")
+                                        put("data", base64Audio)
+                                    })
+                                })
+                                put(org.json.JSONObject().apply {
+                                    put("text", "Transcribe the audio. Respond with ONLY the exact words spoken, nothing else. No quotes, no explanation, no commentary.")
+                                })
+                            })
+                        }
+                    ))
+                    put("generationConfig", org.json.JSONObject().apply {
+                        put("temperature", 0.0)
+                        put("maxOutputTokens", 256)
+                    })
+                }.toString()
 
                 // Make HTTP request to Gemini API
                 val url = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey")
