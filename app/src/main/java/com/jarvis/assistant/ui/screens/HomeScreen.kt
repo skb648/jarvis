@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -104,7 +105,7 @@ fun HomeScreen(
         val quickActions = listOf(
             QuickAction("Voice", Icons.Filled.Mic, "Start voice command"),
             QuickAction("Capture", Icons.Filled.PhotoCamera, "Capture screen"),
-            QuickAction("Chat", Icons.Filled.Chat, "Open conversation"),
+            QuickAction("Chat", Icons.AutoMirrored.Filled.Chat, "Open conversation"),
             QuickAction("Devices", Icons.Filled.Devices, "Smart home")
         )
 

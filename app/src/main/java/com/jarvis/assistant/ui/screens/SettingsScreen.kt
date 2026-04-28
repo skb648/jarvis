@@ -11,6 +11,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -166,7 +167,7 @@ fun SettingsScreen(
                     onValueChange = { localEleven = it },
                     label        = "ElevenLabs API Key",
                     placeholder  = "…",
-                    icon         = Icons.Filled.VolumeUp
+                    icon         = Icons.AutoMirrored.Filled.VolumeUp
                 )
 
                 // ══════════════════════════════════════════════════════════════
@@ -324,7 +325,7 @@ fun SettingsScreen(
                     onClick  = onHealthCheck,
                     modifier = Modifier.fillMaxWidth(),
                     colors   = ButtonDefaults.outlinedButtonColors(contentColor = JarvisCyan),
-                    border   = ButtonDefaults.outlinedButtonBorder
+                    border   = ButtonDefaults.outlinedButtonBorder(enabled = true)
                 ) {
                     Icon(Icons.Filled.MonitorHeart, null, Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))

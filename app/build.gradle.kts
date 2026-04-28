@@ -211,22 +211,27 @@ tasks.register("buildRustRelease") {
 // This ensures that ./gradlew assembleRelease and ./gradlew assembleDebug
 // ALWAYS attempt to build the Rust .so files before CMake runs.
 //
-// If cargo-ndk is not available, the tasks are skipped (via onlyIf {}),
-// and CMake falls back to the JNI stub. But when cargo-ndk IS available
-// (e.g., in CI/CD or a properly configured dev machine), the real
-// libjarvis_rust.so is built and packaged into the APK.
+// IMPORTANT: Debug builds use debug Rust .so (~83MB+63MB with symbols),
+// Release builds use release Rust .so (~2.6MB+1.8MB stripped).
+// We must NOT let release Rust overwrite debug .so — that was causing
+// the debug APK to be only 23MB instead of 66MB.
 // ═══════════════════════════════════════════════════════════════════════
 
-tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders") }.configureEach {
-    dependsOn("buildRustRelease")
-}
-
-// Also wire for debug builds
+// Wire debug builds to build Rust debug .so (large, with symbols)
 tasks.matching { it.name == "preDebugBuild" }.configureEach {
     dependsOn("buildRustDebug")
 }
 
+// Wire release builds to build Rust release .so (small, stripped with LTO)
 tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    dependsOn("buildRustRelease")
+}
+
+// Wire merge tasks to the CORRECT build type (not always release!)
+tasks.matching { it.name == "mergeDebugJniLibFolders" }.configureEach {
+    dependsOn("buildRustDebug")
+}
+tasks.matching { it.name == "mergeReleaseJniLibFolders" }.configureEach {
     dependsOn("buildRustRelease")
 }
 

@@ -69,7 +69,9 @@ fun JarvisTheme(
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
+            @Suppress("DEPRECATION")
             window.statusBarColor = DeepNavy.toArgb()
+            @Suppress("DEPRECATION")
             window.navigationBarColor = DeepNavy.toArgb()
             WindowCompat.getInsetsController(window, view).apply {
                 isAppearanceLightStatusBars = false

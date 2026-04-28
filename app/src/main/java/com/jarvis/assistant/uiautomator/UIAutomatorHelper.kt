@@ -76,6 +76,7 @@ object UIAutomatorHelper {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             traverseNode(child, nodes, depth + 1)
+            @Suppress("DEPRECATION")
             child.recycle()
         }
     }
@@ -94,6 +95,7 @@ object UIAutomatorHelper {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             collectText(child, textParts, depth + 1)
+            @Suppress("DEPRECATION")
             child.recycle()
         }
     }
@@ -115,6 +117,7 @@ object UIAutomatorHelper {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             findNodesByTextRecursive(child, searchLower, results, depth + 1)
+            @Suppress("DEPRECATION")
             child.recycle()
         }
     }
@@ -134,6 +137,7 @@ object UIAutomatorHelper {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             findNodesByIdRecursive(child, resourceId, results, depth + 1)
+            @Suppress("DEPRECATION")
             child.recycle()
         }
     }

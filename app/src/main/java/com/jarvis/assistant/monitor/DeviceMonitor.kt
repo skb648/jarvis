@@ -7,7 +7,6 @@ import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.BatteryManager
-import android.os.Build
 import android.os.Environment
 import android.os.StatFs
 import android.util.Log
@@ -100,21 +99,9 @@ object DeviceMonitor {
 
     private fun getStorageStats(path: File): Map<String, Any> {
         val stat = StatFs(path.path)
-        val blockSize = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-            stat.blockSizeLong
-        } else {
-            stat.blockSize.toLong()
-        }
-        val totalBlocks = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-            stat.blockCountLong
-        } else {
-            stat.blockCount.toLong()
-        }
-        val availableBlocks = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-            stat.availableBlocksLong
-        } else {
-            stat.availableBlocks.toLong()
-        }
+        val blockSize = stat.blockSizeLong
+        val totalBlocks = stat.blockCountLong
+        val availableBlocks = stat.availableBlocksLong
 
         val totalGB = (totalBlocks * blockSize) / (1024.0 * 1024 * 1024)
         val availableGB = (availableBlocks * blockSize) / (1024.0 * 1024 * 1024)

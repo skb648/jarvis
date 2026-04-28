@@ -38,6 +38,7 @@ pub fn jbytearray_to_vec(env: &mut JNIEnv, array: &JByteArray) -> Vec<u8> {
 }
 
 /// Convert a Rust Vec<u8> to a Java byte array.
+#[allow(dead_code)]
 pub fn vec_to_jbytearray<'local>(env: &mut JNIEnv<'local>, data: &[u8]) -> JByteArray<'local> {
     let len = data.len() as jsize;
     match env.new_byte_array(len) {

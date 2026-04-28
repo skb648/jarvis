@@ -2,6 +2,7 @@ package com.jarvis.assistant.ui.navigation
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -34,7 +35,7 @@ data class BottomNavTab(
 private val tabs = listOf(
     BottomNavTab("home",       "Home",       Icons.Filled.Home),
     BottomNavTab("assistant",  "Assistant",  Icons.Filled.Mic),
-    BottomNavTab("chat",       "Chat",       Icons.Filled.Chat),
+    BottomNavTab("chat",       "Chat",       Icons.AutoMirrored.Filled.Chat),
     BottomNavTab("smarthome",  "Devices",    Icons.Filled.Devices),
     BottomNavTab("settings",   "Settings",   Icons.Filled.Settings)
 )

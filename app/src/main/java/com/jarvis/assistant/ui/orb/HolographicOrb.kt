@@ -4,11 +4,11 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -293,7 +293,7 @@ fun HolographicOrb(
             BrainState.IDLE      -> Icon(Icons.Filled.AutoAwesome, contentDescription = "Idle", tint = iconTint, modifier = Modifier.size(size * 0.18f))
             BrainState.LISTENING -> Icon(Icons.Filled.Mic, contentDescription = "Listening", tint = iconTint, modifier = Modifier.size(size * 0.18f))
             BrainState.THINKING  -> Icon(Icons.Filled.Psychology, contentDescription = "Thinking", tint = iconTint, modifier = Modifier.size(size * 0.18f))
-            BrainState.SPEAKING  -> Icon(Icons.Filled.VolumeUp, contentDescription = "Speaking", tint = iconTint, modifier = Modifier.size(size * 0.18f))
+            BrainState.SPEAKING  -> Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Speaking", tint = iconTint, modifier = Modifier.size(size * 0.18f))
             BrainState.ERROR     -> Icon(Icons.Filled.Error, contentDescription = "Error", tint = iconTint, modifier = Modifier.size(size * 0.18f))
         }
     }

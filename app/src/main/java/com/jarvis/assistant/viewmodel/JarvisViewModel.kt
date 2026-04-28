@@ -22,6 +22,7 @@ import com.jarvis.assistant.ui.screens.SmartDevice
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -1237,7 +1238,8 @@ class JarvisViewModel(
      * @param context Android context for cache directory
      */
     @SuppressLint("UnsafeDynamicallyLoadedCode")
-    private fun playMp3Audio(mp3Bytes: ByteArray, context: Context) {
+    private suspend fun playMp3Audio(mp3Bytes: ByteArray, context: Context) {
+        mediaPlayerMutex.withLock {
         // ── Delete previous temp file (BUG #4 FIX) ─────────────────────
         currentTtsTempPath?.let { prevPath ->
             try {
@@ -1325,6 +1327,7 @@ class JarvisViewModel(
             _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
             _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
         }
+        } // mediaPlayerMutex.withLock
     }
 
     /**

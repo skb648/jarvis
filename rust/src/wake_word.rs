@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Configuration for wake word detection
+#[allow(dead_code)]
 struct WakeWordConfig {
     /// Minimum RMS energy to consider as speech (avoids false triggers in silence)
     energy_threshold: f64,
@@ -66,12 +67,14 @@ fn now_ms() -> u64 {
 }
 
 /// Stateful wake word detector (for continuous audio streams)
+#[allow(dead_code)]
 pub struct WakeWordDetector {
     config: WakeWordConfig,
     speech_frame_count: usize,
     is_speech: bool,
 }
 
+#[allow(dead_code)]
 impl WakeWordDetector {
     pub fn new() -> Self {
         Self {
@@ -82,7 +85,7 @@ impl WakeWordDetector {
     }
 
     /// Process an audio frame and return whether a wake word was detected.
-    pub fn process_frame(&mut self, audio_data: &[u8], sample_rate: u32) -> bool {
+    pub fn process_frame(&mut self, audio_data: &[u8], _sample_rate: u32) -> bool {
         let energy = compute_frame_energy(audio_data);
 
         if energy > self.config.energy_threshold {
@@ -246,6 +249,7 @@ fn compute_zero_crossing_rate(samples: &[f64]) -> f64 {
 }
 
 /// Compute RMS energy of an audio frame.
+#[allow(dead_code)]
 fn compute_frame_energy(audio_data: &[u8]) -> f64 {
     let samples = bytes_to_f64_samples(audio_data);
     if samples.is_empty() {
