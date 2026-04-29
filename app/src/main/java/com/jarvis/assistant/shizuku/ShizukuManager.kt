@@ -251,8 +251,15 @@ object ShizukuManager {
     fun setVolume(streamType: Int, volume: Int): ShellResult =
         executeShellCommand("media volume --stream $streamType --set $volume")
 
-    fun takeScreenshot(path: String): ShellResult =
-        executeShellCommand("screencap -p $path")
+    fun takeScreenshot(path: String): ShellResult {
+        // BUG FIX (BUG-25): Ensure target directory exists before screencap.
+        // screencap does not create directories, causing ENOENT failure.
+        val dir = path.substringBeforeLast("/")
+        if (dir.isNotEmpty()) {
+            executeShellCommand("mkdir -p $dir")
+        }
+        return executeShellCommand("screencap -p $path")
+    }
 
     fun clearNotifications(): ShellResult =
         executeShellCommand("service call notification 1")

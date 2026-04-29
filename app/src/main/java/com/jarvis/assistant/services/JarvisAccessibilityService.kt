@@ -5,6 +5,8 @@ import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -292,14 +294,14 @@ class JarvisAccessibilityService : AccessibilityService() {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val stroke = GestureDescription.StrokeDescription(path, 0, duration)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return dispatchGesture(gesture, null, null)
+        return dispatchGestureOnMainThread(gesture)
     }
 
     fun performLongPress(x: Int, y: Int, duration: Long = 1000): Boolean {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val stroke = GestureDescription.StrokeDescription(path, 0, duration)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return dispatchGesture(gesture, null, null)
+        return dispatchGestureOnMainThread(gesture)
     }
 
     fun performSwipe(
@@ -313,7 +315,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
         val stroke = GestureDescription.StrokeDescription(path, 0, duration)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return dispatchGesture(gesture, null, null)
+        return dispatchGestureOnMainThread(gesture)
     }
 
     fun performScroll(direction: String, distance: Int = 500, duration: Long = 500): Boolean {
@@ -340,20 +342,56 @@ class JarvisAccessibilityService : AccessibilityService() {
         distance: Int = 200,
         duration: Long = 500
     ): Boolean {
+        // BUG FIX (BUG-4): Corrected pinch gesture — fingers converge to center instead of crossing.
+        // For pinch-in: left finger moves from left offset TO center, right finger moves from right offset TO center.
+        // For pinch-out: left finger moves from center TO left offset, right finger moves from center TO right offset.
         val offset = if (pinchIn) distance else -distance
         val path1 = Path().apply {
-            moveTo((centerX - offset).toFloat(), centerY.toFloat())
-            lineTo((centerX + offset).toFloat(), centerY.toFloat())
+            if (pinchIn) {
+                moveTo((centerX - offset).toFloat(), centerY.toFloat())
+                lineTo(centerX.toFloat(), centerY.toFloat())
+            } else {
+                moveTo(centerX.toFloat(), centerY.toFloat())
+                lineTo((centerX - offset).toFloat(), centerY.toFloat())
+            }
         }
         val path2 = Path().apply {
-            moveTo((centerX + offset).toFloat(), centerY.toFloat())
-            lineTo((centerX - offset).toFloat(), centerY.toFloat())
+            if (pinchIn) {
+                moveTo((centerX + offset).toFloat(), centerY.toFloat())
+                lineTo(centerX.toFloat(), centerY.toFloat())
+            } else {
+                moveTo(centerX.toFloat(), centerY.toFloat())
+                lineTo((centerX + offset).toFloat(), centerY.toFloat())
+            }
         }
         val stroke1 = GestureDescription.StrokeDescription(path1, 0, duration)
         val stroke2 = GestureDescription.StrokeDescription(path2, 0, duration)
         val gesture = GestureDescription.Builder()
             .addStroke(stroke1).addStroke(stroke2).build()
-        return dispatchGesture(gesture, null, null)
+        return dispatchGestureOnMainThread(gesture)
+    }
+
+    /**
+     * BUG FIX (BUG-3): dispatchGesture() MUST be called on the main thread.
+     * When invoked from a background coroutine (e.g., via CommandRouter or GestureController),
+     * this throws IllegalStateException. We ensure it always runs on the main thread.
+     */
+    private fun dispatchGestureOnMainThread(gesture: GestureDescription): Boolean {
+        return if (Looper.myLooper() == Looper.getMainLooper()) {
+            dispatchGesture(gesture, null, null)
+        } else {
+            val result = java.util.concurrent.LinkedBlockingQueue<Boolean>(1)
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    val dispatched = dispatchGesture(gesture, null, null)
+                    result.offer(dispatched)
+                } catch (e: Exception) {
+                    Log.e(TAG, "dispatchGesture on main thread failed: ${e.message}")
+                    result.offer(false)
+                }
+            }
+            result.poll(3, java.util.concurrent.TimeUnit.SECONDS) ?: false
+        }
     }
 
     fun goBack(): Boolean = performGlobalAction(GLOBAL_ACTION_BACK)

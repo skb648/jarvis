@@ -101,6 +101,11 @@ class JarvisSensoryService : Service() {
         bgHandlerThread = HandlerThread("JarvisSensoryBg").also { it.start() }
         bgHandler = Handler(bgHandlerThread.looper)
         bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+        // BUG FIX (BUG-26): Validate buffer size before creating AudioRecord
+        if (bufferSize <= 0) {
+            Log.e(TAG, "AudioRecord.getMinBufferSize returned $bufferSize — audio recording not available")
+            bufferSize = 0
+        }
 
         // Register command receiver
         val filter = IntentFilter().apply {
@@ -260,7 +265,21 @@ class JarvisSensoryService : Service() {
                     // Read screen text from AccessibilityService via JarviewModel
                     val accessibilityService = JarviewModel.accessibilityService?.get()
                     if (accessibilityService != null) {
-                        val screenText = accessibilityService.extractScreenText()
+                        // BUG FIX (BUG-2): Accessibility tree MUST be accessed on the main thread.
+                        // rootInActiveWindow throws IllegalStateException if called from a background thread.
+                        // We use a blocking queue to get the result from the main thread.
+                        val screenTextResult = java.util.concurrent.LinkedBlockingQueue<String>(1)
+                        Handler(android.os.Looper.getMainLooper()).post {
+                            try {
+                                val text = accessibilityService.extractScreenText()
+                                screenTextResult.offer(text ?: "")
+                            } catch (e: Exception) {
+                                Log.w(TAG, "extractScreenText on main thread failed: ${e.message}")
+                                screenTextResult.offer("")
+                            }
+                        }
+                        // Wait up to 3 seconds for the main thread to produce a result
+                        val screenText = screenTextResult.poll(3, java.util.concurrent.TimeUnit.SECONDS) ?: ""
                         val currentApp = JarviewModel.foregroundApp
 
                         JarviewModel.screenTextData = screenText

@@ -30,14 +30,14 @@ object JarviewModel {
     }
 
     // ─── Service References ───────────────────────────────────────
-    // BUG #11 fix: WeakReference prevents memory leak — the accessibility
-    // service is an Android system component with its own lifecycle. A strong
-    // reference in a global singleton would prevent GC after the service is
-    // destroyed, leading to leaks. Use .get() to access the service instance.
+    // BUG FIX (BUG-6): ALL service references use WeakReference to prevent memory leaks.
+    // Android system components have their own lifecycle. Strong references in a global
+    // singleton prevent GC after the service is destroyed, causing memory leaks.
+    // Use .get() to access the service instance.
     @Volatile var accessibilityService: WeakReference<JarvisAccessibilityService>? = null
-    @Volatile var speechService: JarvisSpeechService? = null
-    @Volatile var sensoryService: JarvisSensoryService? = null
-    @Volatile var keepAliveService: JarvisKeepAliveService? = null
+    @Volatile var speechService: WeakReference<JarvisSpeechService>? = null
+    @Volatile var sensoryService: WeakReference<JarvisSensoryService>? = null
+    @Volatile var keepAliveService: WeakReference<JarvisKeepAliveService>? = null
 
     // ─── Permission States ────────────────────────────────────────
     @Volatile var hasOverlayPermission: Boolean = false

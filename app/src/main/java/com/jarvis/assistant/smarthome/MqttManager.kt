@@ -26,7 +26,9 @@ object MqttManager {
 
     private var client: MqttAndroidClient? = null
     private var mqttConnected = false
-    private val subscribedTopics = mutableSetOf<String>()
+    // BUG FIX (BUG-5): Use ConcurrentHashMap.newKeySet() for thread-safe subscribed topics
+    // mutableSetOf is NOT thread-safe — MQTT callbacks run on different threads
+    private val subscribedTopics: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     // Connection configuration
     private var brokerUrl: String = ""
@@ -45,7 +47,15 @@ object MqttManager {
         user: String = "",
         pass: String = ""
     ): Boolean {
-        brokerUrl = "tcp://$broker:$port"
+        // BUG FIX (BUG-8): Strip existing scheme from broker URL to prevent
+        // malformed URLs like "tcp://mqtt://broker.example.com:1883"
+        val cleanBroker = broker
+            .removePrefix("mqtt://")
+            .removePrefix("tcp://")
+            .removePrefix("ssl://")
+            .removePrefix("mqtts://")
+            .trimEnd('/')
+        brokerUrl = "tcp://$cleanBroker:$port"
         clientId = mqttClientId
         username = user
         password = pass

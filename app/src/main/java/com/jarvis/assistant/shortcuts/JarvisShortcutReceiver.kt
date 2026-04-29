@@ -43,7 +43,7 @@ class JarvisShortcutReceiver : BroadcastReceiver() {
     private fun launchMainActivity(context: Context, action: String) {
         val intent = Intent(context, MainActivity::class.java).apply {
             this.action = action
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra("shortcut_action", action)
         }
         context.startActivity(intent)

@@ -3,9 +3,11 @@ package com.jarvis.assistant.viewmodel
 import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaPlayer
 import android.media.MediaRecorder
+import android.media.ToneGenerator
 import android.speech.tts.TextToSpeech
 import android.util.Base64
 import android.util.Log
@@ -216,6 +218,47 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // A4: Android native TTS fallback
     private var textToSpeech: TextToSpeech? = null
     private var ttsInitialized = false
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX #4: ToneGenerator for Iron Man Earcons
+    // Uses Android native ToneGenerator instead of MP3 files.
+    // TONE_PROP_BEEP on wake word detection.
+    // TONE_PROP_ACK when AI stops listening and starts processing.
+    // ═══════════════════════════════════════════════════════════════════════
+    private var toneGenerator: ToneGenerator? = null
+
+    private fun initToneGenerator() {
+        if (toneGenerator == null) {
+            try {
+                toneGenerator = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
+                Log.d(AUDIO_TAG, "[initToneGenerator] ToneGenerator initialized")
+            } catch (e: Exception) {
+                Log.e(AUDIO_TAG, "[initToneGenerator] Failed: ${e.message}")
+            }
+        }
+    }
+
+    /** Play wake word detection beep — TONE_PROP_BEEP */
+    private fun playWakeWordBeep() {
+        try {
+            initToneGenerator()
+            toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+            Log.d(AUDIO_TAG, "[playWakeWordBeep] TONE_PROP_BEEP played")
+        } catch (e: Exception) {
+            Log.w(AUDIO_TAG, "[playWakeWordBeep] Failed: ${e.message}")
+        }
+    }
+
+    /** Play acknowledge beep when AI starts processing — TONE_PROP_ACK */
+    private fun playAckBeep() {
+        try {
+            initToneGenerator()
+            toneGenerator?.startTone(ToneGenerator.TONE_PROP_ACK, 200)
+            Log.d(AUDIO_TAG, "[playAckBeep] TONE_PROP_ACK played")
+        } catch (e: Exception) {
+            Log.w(AUDIO_TAG, "[playAckBeep] Failed: ${e.message}")
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // CRITICAL FIX: Processing Lock — prevents VAD from spamming Gemini API
@@ -617,6 +660,9 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             },
             onWakeWordDetected = {
                 Log.i(AUDIO_TAG, "[onWakeWordDetected] callback fired — triggering VAD recording")
+                // FIX #4: Play TONE_PROP_BEEP the exact millisecond wake word is detected
+                playWakeWordBeep()
+                // FIX #5: Hologram UI sync — set BrainState.LISTENING immediately on wake word
                 _brainState.value = BrainState.LISTENING
                 _isListening.value = true
                 audioEngine?.startCommandRecording()
@@ -703,6 +749,9 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         }
         isProcessing = true
         
+        // FIX #4: Play ACK beep when AI stops listening and starts processing
+        playAckBeep()
+        
         viewModelScope.launch(Dispatchers.Main) {
             _brainState.value = BrainState.THINKING
 
@@ -740,12 +789,16 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             Log.d(AUDIO_TAG, "[handleCommandReady] Starting Gemini multimodal transcription at ${sampleRate}Hz")
             val transcription = transcribeViaGeminiFallback(pcmBytes, sampleRate)
 
+            // FIX #3: STT Visual Feedback — inject transcription into Chat UI as User message
+            // This proves the mic is working by showing what was heard.
             if (transcription.isNotBlank()) {
                 _currentTranscription.value = transcription
-                Log.i(AUDIO_TAG, "[handleCommandReady] Final transcription: \"$transcription\"")
+                addUserMessage(transcription)  // SHOW the user what was transcribed in the chat
+                Log.i(AUDIO_TAG, "[handleCommandReady] Final transcription: \"$transcription\" — injected into chat UI")
                 val ctx = getApplicationContext()
                 if (ctx != null) {
-                    processQuery(transcription, ctx)
+                    // FIX #3: skipUserMessage=true because we already added the transcription above
+                    processQuery(transcription, ctx, skipUserMessage = true)
                 } else {
                     Log.e(AUDIO_TAG, "[handleCommandReady] No application context")
                     _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
@@ -1012,6 +1065,10 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             },
             onWakeWordDetected = {
                 Log.i(AUDIO_TAG, "[startWakeWordMonitor] Wake word detected — triggering listening mode")
+                // FIX #4: Play TONE_PROP_BEEP the exact millisecond wake word is detected
+                playWakeWordBeep()
+                // FIX #5: Hologram UI sync — set BrainState.LISTENING immediately
+                _brainState.value = BrainState.LISTENING
                 viewModelScope.launch(Dispatchers.Main) {
                     stopWakeWordMonitor()
                     startListening(context)
@@ -1049,7 +1106,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // QUERY PROCESSING PIPELINE
     // ═══════════════════════════════════════════════════════════════════════
 
-    fun processQuery(query: String, context: Context) {
+    fun processQuery(query: String, context: Context, skipUserMessage: Boolean = false) {
         Log.d(AUDIO_TAG, "[processQuery] query=\"$query\" brainState=${_brainState.value} isProcessing=$isProcessing")
         if (_brainState.value == BrainState.THINKING || _brainState.value == BrainState.SPEAKING) {
             Log.w(AUDIO_TAG, "[processQuery] Already ${_brainState.value} — forcing state reset for new query")
@@ -1060,9 +1117,17 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             textToSpeech?.stop()
         }
 
+        // FIX #1: Universal Voice Output — play ACK beep when processing starts
+        // This beep confirms the system heard you (works for both voice and text input)
+        playAckBeep()
+
         viewModelScope.launch(Dispatchers.Main) {
             try {
-                addUserMessage(query)
+                // FIX #3: Skip adding user message if it was already added by handleCommandReady
+                // (voice transcription). For text input, we add it here.
+                if (!skipUserMessage) {
+                    addUserMessage(query)
+                }
                 _brainState.value = BrainState.THINKING
                 _isTyping.value   = true
 
@@ -1434,7 +1499,15 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                             stability = stability, similarityBoost = similarityBoost
                         )
                         Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] Rust returned base64 length=${result?.length ?: 0}")
-                        result
+                        // FIX #2: If Rust returns an error string (starts with "ERROR:"), treat as null
+                        // The Rust TTS can return "ERROR: ..." which is NOT valid base64 audio.
+                        // Base64-decoding it and passing to MediaPlayer causes Error -2147483648.
+                        if (result != null && (result.startsWith("ERROR:") || result.startsWith("error:"))) {
+                            Log.w(AUDIO_TAG, "[trySynthesizeAndPlay] Rust TTS returned error string, treating as null: ${result.take(80)}")
+                            null
+                        } else {
+                            result
+                        }
                     } catch (e: Exception) {
                         Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] RustBridge.synthesizeSpeech FAILED: ${e.message}")
                         null
@@ -1462,7 +1535,25 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                     try {
                         val decoded = Base64.decode(base64, Base64.NO_WRAP)
                         Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] Decoded MP3 size=${decoded.size} bytes")
-                        decoded
+
+                        // FIX #2: Validate decoded bytes are actually MP3 data, not a JSON error.
+                        // ElevenLabs errors come back as JSON, not audio. If the first bytes
+                        // are '{' or '<', it's NOT an MP3 file — do NOT pass to MediaPlayer.
+                        // MP3 files start with 0xFF 0xFB or 0x49 0x44 0x33 ("ID3").
+                        if (decoded.isEmpty()) {
+                            Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] Decoded bytes are EMPTY — not valid audio")
+                            null
+                        } else if (decoded[0] == '{'.code.toByte() || decoded[0] == '<'.code.toByte()) {
+                            Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] Decoded bytes start with JSON/XML, NOT MP3 — ElevenLabs returned an error message instead of audio. Skipping MediaPlayer to prevent crash.")
+                            // Log the error for debugging
+                            try {
+                                val errorText = String(decoded, Charsets.UTF_8)
+                                Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] Error body: ${errorText.take(500)}")
+                            } catch (_: Exception) {}
+                            null
+                        } else {
+                            decoded
+                        }
                     } catch (e: Exception) {
                         Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] Base64 decode FAILED: ${e.message}")
                         null
@@ -1472,7 +1563,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 if (mp3 != null && mp3.isNotEmpty()) {
                     Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 4: Playing MP3 via MediaPlayer")
                     withContext(Dispatchers.Main) {
-                        playMp3AudioAsync(mp3, context)
+                        playMp3AudioAsync(mp3, context, text)
                     }
 
                     Log.d(AUDIO_TAG, "[trySynthesizeAndPlay] STEP 5: Waiting for playback (timeout=${TTS_TIMEOUT_MS}ms)")
@@ -1646,7 +1737,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // PUBLIC HELPERS
     // ═══════════════════════════════════════════════════════════════════════
 
-    fun sendMessage(text: String, context: Context) = processQuery(text, context)
+    fun sendMessage(text: String, context: Context) = processQuery(text, context, skipUserMessage = false)
 
     fun toggleVoiceMode(context: Context) {
         Log.d(AUDIO_TAG, "[toggleVoiceMode] voiceMode=${_isVoiceMode.value} isListening=${_isListening.value}")
@@ -2000,7 +2091,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // ═══════════════════════════════════════════════════════════════════════
 
     @SuppressLint("UnsafeDynamicallyLoadedCode")
-    private suspend fun playMp3AudioAsync(mp3Bytes: ByteArray, context: Context) {
+    private suspend fun playMp3AudioAsync(mp3Bytes: ByteArray, context: Context, fallbackText: String = "") {
         Log.d(AUDIO_TAG, "[playMp3AudioAsync] START mp3Bytes=${mp3Bytes.size}")
         mediaPlayerMutex.withLock {
             currentTtsTempPath?.let { prevPath ->
@@ -2100,7 +2191,17 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 } catch (_: Exception) {}
                 amplitudePulseJob?.cancel()
                 amplitudePulseJob = null
-                toast(context, "MediaPlayer error: what=$what extra=$extra")
+                // FIX #2: If MediaPlayer fails (e.g., corrupt MP3 from ElevenLabs error),
+                // immediately fall back to Android native TTS so JARVIS always speaks.
+                if (fallbackText.isNotBlank()) {
+                    Log.w(AUDIO_TAG, "[playMp3AudioAsync] MediaPlayer failed — falling back to native TTS for: \"${fallbackText.take(40)}\"")
+                    viewModelScope.launch(Dispatchers.Main) {
+                        fallbackToNativeTts(fallbackText, context)
+                    }
+                } else {
+                    isProcessing = false
+                    toast(context, "MediaPlayer error: what=$what extra=$extra")
+                }
                 true
             }
 
@@ -2186,6 +2287,12 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         } catch (_: Exception) {}
 
         ShizukuManager.setOnShizukuStateChangedListener {}
+
+        // FIX #4: Release ToneGenerator
+        try {
+            toneGenerator?.release()
+            toneGenerator = null
+        } catch (_: Exception) {}
     }
 
     class Factory(private val repo: SettingsRepository) : ViewModelProvider.Factory {
