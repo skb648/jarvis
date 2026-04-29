@@ -214,6 +214,22 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     private var textToSpeech: TextToSpeech? = null
     private var ttsInitialized = false
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // CRITICAL FIX: Processing Lock — prevents VAD from spamming Gemini API
+    //
+    // BUG: Without this lock, the VAD's silence-after-speech detection
+    // could trigger handleCommandReady() → processQuery() → Gemini API
+    // MULTIPLE TIMES per utterance. If VAD detects silence, triggers
+    // transcription, but then detects more speech, it would start a
+    // SECOND API call while the first is still running. This causes
+    // 429 rate limit errors and wastes quota.
+    //
+    // FIX: isProcessing gate ensures only ONE query is in-flight at a time.
+    // Subsequent VAD triggers are dropped until the current query completes.
+    // ═══════════════════════════════════════════════════════════════════════
+    @Volatile
+    private var isProcessing = false
+
     // ─── Overlay Manager ─────────────────────────────────────────────────
 
     private var overlayManager: JarvisOverlayManager? = null
@@ -322,14 +338,19 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     fun saveAndApplyApiKeys(geminiKey: String, elevenLabsKey: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                _geminiApiKey.value     = geminiKey
-                _elevenLabsApiKey.value = elevenLabsKey
-                Log.i(TAG, "API keys FORCE-UPDATED in memory — gemini=${geminiKey.take(4)}... (${geminiKey.length} chars), elevenLabs=${elevenLabsKey.take(4)}... (${elevenLabsKey.length} chars)")
+                // CRITICAL FIX: Trim whitespace from API keys.
+                // Users frequently paste keys with trailing spaces/newlines
+                // from the clipboard, which causes 403 API errors.
+                val trimmedGemini = geminiKey.trim()
+                val trimmedElevenLabs = elevenLabsKey.trim()
+                _geminiApiKey.value     = trimmedGemini
+                _elevenLabsApiKey.value = trimmedElevenLabs
+                Log.i(TAG, "API keys FORCE-UPDATED in memory — gemini=${trimmedGemini.take(4)}... (${trimmedGemini.length} chars), elevenLabs=${trimmedElevenLabs.take(4)}... (${trimmedElevenLabs.length} chars)")
 
                 // Step 1: Persist to DataStore — if this fails, report FAILURE immediately
                 try {
-                    settingsRepository.setGeminiApiKey(geminiKey)
-                    settingsRepository.setElevenLabsApiKey(elevenLabsKey)
+                    settingsRepository.setGeminiApiKey(trimmedGemini)
+                    settingsRepository.setElevenLabsApiKey(trimmedElevenLabs)
                     Log.i(TAG, "API keys persisted to DataStore — CONFIRMED")
                 } catch (e: Exception) {
                     Log.e(TAG, "API keys DataStore write FAILED: ${e.message}")
@@ -340,7 +361,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 // Step 2: Apply keys to RustBridge engine
                 if (RustBridge.isNativeReady()) {
                     try {
-                        val ok = RustBridge.initialize(geminiKey, elevenLabsKey)
+                        val ok = RustBridge.initialize(trimmedGemini, trimmedElevenLabs)
                         _isRustReady.value = ok
                         updateEngineStatusText()
                         Log.i(TAG, "Hot-swap RustBridge.initialize -> $ok")
@@ -598,6 +619,17 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
     private fun handleCommandReady(pcmBytes: ByteArray, sampleRate: Int) {
         Log.d(AUDIO_TAG, "[handleCommandReady] launched with ${pcmBytes.size} bytes at ${sampleRate}Hz")
+        
+        // CRITICAL FIX: Processing lock — drop duplicate VAD triggers
+        // If we're already processing a query, ignore this new command.
+        // This prevents the 429 quota error from VAD spamming Gemini.
+        if (isProcessing) {
+            Log.w(AUDIO_TAG, "[handleCommandReady] DROPPED — already processing a query (isProcessing=true). This prevents 429 quota errors from VAD re-triggers.")
+            _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+            return
+        }
+        isProcessing = true
+        
         viewModelScope.launch(Dispatchers.Main) {
             _brainState.value = BrainState.THINKING
 
@@ -644,10 +676,12 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 } else {
                     Log.e(AUDIO_TAG, "[handleCommandReady] No application context")
                     _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+                    isProcessing = false
                 }
             } else {
                 Log.w(AUDIO_TAG, "[handleCommandReady] Transcription is EMPTY")
                 addAssistantMessage("I couldn't make that out, Sir. Please try speaking louder or closer to the microphone.", "confused")
+                isProcessing = false
                 if (_isVoiceMode.value) {
                     // Stay in voice mode — restart listening after brief pause
                     restartListeningAfterTts()
@@ -936,7 +970,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // ═══════════════════════════════════════════════════════════════════════
 
     fun processQuery(query: String, context: Context) {
-        Log.d(AUDIO_TAG, "[processQuery] query=\"$query\" brainState=${_brainState.value}")
+        Log.d(AUDIO_TAG, "[processQuery] query=\"$query\" brainState=${_brainState.value} isProcessing=$isProcessing")
         if (_brainState.value == BrainState.THINKING || _brainState.value == BrainState.SPEAKING) {
             Log.w(AUDIO_TAG, "[processQuery] Already ${_brainState.value} — forcing state reset for new query")
             // Stop any in-progress TTS playback so the new query can proceed
@@ -966,12 +1000,14 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 }
             } catch (e: CancellationException) {
                 _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+                isProcessing = false
                 return@launch
             } catch (e: Exception) {
                 Log.e(TAG, "[processQuery] pipeline error", e)
                 _brainState.value     = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
                 _isTyping.value       = false
                 _audioAmplitude.value = 0f
+                isProcessing = false
                 addAssistantMessage("Error: ${e.message?.take(200) ?: "Unknown"}", "stressed")
                 toast(context, "Query error: ${e.message?.take(100)}")
             } finally {
@@ -1056,6 +1092,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 _isTyping.value     = false
                 _audioAmplitude.value = 0f
                 _lastResponse.value = parsed
+                isProcessing = false
                 addAssistantMessage(parsed, "stressed")
                 toast(context, "AI error: ${parsed.take(80)}")
                 if (_isVoiceMode.value) {
@@ -1095,6 +1132,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
             _isTyping.value   = false
             _audioAmplitude.value = 0f
+            isProcessing = false
             addAssistantMessage("Processing error, Sir.", "stressed")
             toast(context, "AI processing error: ${e.message?.take(80)}")
             if (_isVoiceMode.value) {
@@ -1377,6 +1415,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] UNEXPECTED EXCEPTION: ${e.message}", e)
             _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
             _audioAmplitude.value = 0f
+            isProcessing = false  // Release processing lock
             toast(context, "TTS error: ${e.message?.take(80)}")
             fallbackToNativeTts(text, context)
         }
@@ -1419,6 +1458,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                         _audioAmplitude.value = 0f
                         amplitudePulseJob?.cancel()
                         amplitudePulseJob = null
+                        isProcessing = false  // Release processing lock
                         if (_isVoiceMode.value) {
                             _brainState.value = BrainState.LISTENING
                             restartListeningAfterTts()
@@ -1946,6 +1986,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 amplitudePulseJob?.cancel()
                 amplitudePulseJob = null
                 currentTtsTempPath = null
+                isProcessing = false  // Release processing lock
                 try {
                     tmp.delete()
                     Log.d(AUDIO_TAG, "[playMp3AudioAsync] Temp file deleted on completion")
@@ -2027,7 +2068,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     override fun onCleared() {
         super.onCleared()
         Log.d(AUDIO_TAG, "[onCleared] ViewModel cleared")
-
+        isProcessing = false  // Reset processing lock
         amplitudePulseJob?.cancel()
         amplitudePulseJob = null
         releaseMediaPlayer()

@@ -58,12 +58,17 @@ pub fn set_api_keys(gemini_key: &str, elevenlabs_key: &str) -> Result<()> {
     let mut guard = API_KEYS
         .write()
         .map_err(|e| anyhow::anyhow!("API key write lock poisoned: {}", e))?;
-    guard.gemini = gemini_key.to_string();
-    guard.elevenlabs = elevenlabs_key.to_string();
+    // CRITICAL FIX: Trim whitespace/newlines from keys.
+    // Users often paste keys with trailing spaces or newlines from
+    // the clipboard, which causes 403 API errors.
+    let trimmed_gemini = gemini_key.trim();
+    let trimmed_elevenlabs = elevenlabs_key.trim();
+    guard.gemini = trimmed_gemini.to_string();
+    guard.elevenlabs = trimmed_elevenlabs.to_string();
     log::info!(
         "API keys updated — gemini={} chars, elevenlabs={} chars",
-        gemini_key.len(),
-        elevenlabs_key.len()
+        trimmed_gemini.len(),
+        trimmed_elevenlabs.len()
     );
     Ok(())
 }
@@ -72,20 +77,26 @@ fn get_gemini_key() -> Result<String> {
     let guard = API_KEYS
         .read()
         .map_err(|e| anyhow::anyhow!("API key read lock poisoned: {}", e))?;
-    if guard.gemini.is_empty() {
+    let key = guard.gemini.trim();
+    if key.is_empty() {
         anyhow::bail!("Gemini API key not set — open Settings and enter a key first");
     }
-    Ok(guard.gemini.clone())
+    // Double-check: reject keys that look malformed after trimming
+    if key.len() < 20 {
+        anyhow::bail!("Gemini API key appears too short ({} chars) — please check you copied the full key", key.len());
+    }
+    Ok(key.to_string())
 }
 
 fn get_elevenlabs_key() -> Result<String> {
     let guard = API_KEYS
         .read()
         .map_err(|e| anyhow::anyhow!("API key read lock poisoned: {}", e))?;
-    if guard.elevenlabs.is_empty() {
+    let key = guard.elevenlabs.trim();
+    if key.is_empty() {
         anyhow::bail!("ElevenLabs API key not set — open Settings and enter a key first");
     }
-    Ok(guard.elevenlabs.clone())
+    Ok(key.to_string())
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -105,9 +116,17 @@ const GEMINI_MODEL: &str = "gemini-2.0-flash";
 struct GeminiRequest {
     contents: Vec<GeminiContent>,
     #[serde(rename = "systemInstruction")]
-    system_instruction: GeminiContent,
+    system_instruction: GeminiSystemInstruction,
     generation_config: GeminiGenerationConfig,
     safety_settings: Vec<GeminiSafetySetting>,
+}
+
+/// System instruction — CRITICAL: Must NOT include a "role" field.
+/// The Gemini API v1beta rejects systemInstruction with role="system".
+/// It should only contain "parts".
+#[derive(Debug, Serialize)]
+struct GeminiSystemInstruction {
+    parts: Vec<GeminiPart>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -288,8 +307,7 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
 
     let request = GeminiRequest {
         contents,
-        system_instruction: GeminiContent {
-            role: "system".to_string(),
+        system_instruction: GeminiSystemInstruction {
             parts: vec![GeminiPart::Text {
                 text: JARVIS_SYSTEM_PROMPT.to_string(),
             }],
@@ -322,6 +340,40 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        
+        // If 429 (rate limited), wait and retry ONCE
+        if status.as_u16() == 429 {
+            log::warn!("Gemini API rate limited (429) — waiting 2s and retrying once...");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            
+            let retry_response = HTTP_CLIENT
+                .post(&url)
+                .json(&request)
+                .send()
+                .await
+                .context("Gemini API retry request failed")?;
+            
+            if retry_response.status().is_success() {
+                let gemini_response: GeminiResponse = retry_response
+                    .json()
+                    .await
+                    .context("Failed to parse Gemini response")?;
+                
+                let text = gemini_response
+                    .candidates
+                    .first()
+                    .and_then(|c| c.content.parts.first())
+                    .and_then(|p| p.text.clone())
+                    .unwrap_or_else(|| "Processing complete, Sir.".to_string());
+                
+                return Ok(text);
+            }
+            
+            let retry_status = retry_response.status();
+            let retry_body = retry_response.text().await.unwrap_or_default();
+            anyhow::bail!("Gemini API error {} (after retry): {}", retry_status, retry_body);
+        }
+        
         anyhow::bail!("Gemini API error {}: {}", status, body);
     }
 
@@ -371,8 +423,7 @@ pub async fn process_query_with_image(
 
     let request = GeminiRequest {
         contents,
-        system_instruction: GeminiContent {
-            role: "system".to_string(),
+        system_instruction: GeminiSystemInstruction {
             parts: vec![GeminiPart::Text {
                 text: JARVIS_SYSTEM_PROMPT.to_string(),
             }],
