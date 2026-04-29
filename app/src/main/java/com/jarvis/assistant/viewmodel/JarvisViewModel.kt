@@ -79,13 +79,16 @@ class JarvisViewModel(
         private const val SHIZUKU_CHECK_INTERVAL_MS = 5_000L
 
         // A2: Model fallback list — tried in order until one succeeds
+        // CRITICAL FIX (v7): Put gemini-1.5-flash FIRST because it's the most
+        // universally accessible model. gemini-2.0-flash requires specific API
+        // key permissions that many users don't have, causing 403 errors.
         // IMPORTANT: For audio transcription, models must support audio input.
-        // gemini-2.0-flash supports audio as of 2025. Put audio-capable models first.
+        // gemini-1.5-flash supports audio as of 2024.
         private val GEMINI_MODELS = listOf(
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-latest",
             "gemini-2.0-flash",
             "gemini-2.0-flash-lite",
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-flash",
             "gemini-1.5-pro-latest"
         )
 
@@ -412,6 +415,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
     private fun testGeminiKey(key: String): Boolean {
         if (key.isBlank()) return false
+        val trimmedKey = key.trim()
         return try {
             val testBody = org.json.JSONObject().apply {
                 put("contents", org.json.JSONArray().put(
@@ -426,18 +430,33 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 })
             }.toString()
 
-            val model = GEMINI_MODELS.first()
-            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key")
+            // CRITICAL FIX (v7): Use x-goog-api-key header instead of ?key= query param.
+            // This matches Google's recommended authentication method and avoids 403 errors
+            // that occur with ?key= for some API key configurations.
+            // Also use gemini-1.5-flash (most universally accessible model).
+            val model = "gemini-1.5-flash"
+            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
             connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("x-goog-api-key", trimmedKey)
             connection.doOutput = true
             connection.connectTimeout = 10_000
             connection.readTimeout = 10_000
             connection.outputStream.use { it.write(testBody.toByteArray(Charsets.UTF_8)) }
 
             val code = connection.responseCode
-            Log.i(TAG, "[testGeminiKey] HTTP $code")
+            Log.i(TAG, "[testGeminiKey] HTTP $code for model=$model, key_len=${trimmedKey.length}, auth=header")
+            
+            if (code != 200) {
+                // Log the FULL error response body so we can see WHY Google rejected it
+                val errorBody = try {
+                    connection.errorStream?.bufferedReader()?.readText() ?: "no error body"
+                } catch (e: Exception) {
+                    "could not read error body: ${e.message}"
+                }
+                Log.e(TAG, "[testGeminiKey] FAILED — HTTP $code, error body: ${errorBody.take(500)}")
+            }
             connection.disconnect()
             code == 200
         } catch (e: Exception) {
@@ -740,10 +759,12 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 var lastError = ""
                 for (model in GEMINI_MODELS) {
                     try {
-                        val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey")
+                        // CRITICAL FIX (v7): Use x-goog-api-key header instead of ?key= query param
+                        val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
                         val connection = url.openConnection() as HttpURLConnection
                         connection.requestMethod = "POST"
                         connection.setRequestProperty("Content-Type", "application/json")
+                        connection.setRequestProperty("x-goog-api-key", apiKey.trim())
                         connection.doOutput = true
                         connection.connectTimeout = 15_000
                         connection.readTimeout = 30_000
@@ -1200,10 +1221,12 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             var lastError = ""
             for (model in GEMINI_MODELS) {
                 try {
-                    val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey")
+                    // CRITICAL FIX (v7): Use x-goog-api-key header instead of ?key= query param
+                    val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
                     val connection = url.openConnection() as HttpURLConnection
                     connection.requestMethod = "POST"
                     connection.setRequestProperty("Content-Type", "application/json")
+                    connection.setRequestProperty("x-goog-api-key", apiKey.trim())
                     connection.doOutput = true
                     connection.connectTimeout = 15_000
                     connection.readTimeout = 60_000

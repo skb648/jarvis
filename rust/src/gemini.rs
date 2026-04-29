@@ -104,9 +104,12 @@ fn get_elevenlabs_key() -> Result<String> {
 // ═══════════════════════════════════════════════════════════════
 
 /// The Gemini model to use.
-/// Updated: gemini-2.0-flash now supports audio input (as of 2025).
-/// Falls back to gemini-1.5-flash if 2.0 is unavailable.
-const GEMINI_MODEL: &str = "gemini-2.0-flash";
+/// CRITICAL FIX (v7): Changed from gemini-2.0-flash to gemini-1.5-flash
+/// because many API keys only have access to 1.5 models. The 2.0-flash
+/// model requires specific API key permissions that not all users have,
+/// causing 403 errors even with valid keys. gemini-1.5-flash is the
+/// most universally accessible model.
+const GEMINI_MODEL: &str = "gemini-1.5-flash";
 
 // ═══════════════════════════════════════════════════════════════
 // GEMINI API TYPES
@@ -284,9 +287,18 @@ lazy_static! {
 pub async fn process_query(query: &str, context: &str, history_json: &str) -> Result<String> {
     let api_key = get_gemini_key()?;
 
+    // CRITICAL FIX (v7): Use x-goog-api-key header instead of ?key= query param.
+    // Google's recommended authentication method is the x-goog-api-key header.
+    // Using ?key= in the URL can cause 403 errors with some API key configurations
+    // and exposes the key in server logs. The header method is more reliable.
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        GEMINI_MODEL, api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        GEMINI_MODEL
+    );
+
+    log::info!(
+        "Gemini API call — model={}, key_len={}, auth=header",
+        GEMINI_MODEL, api_key.len()
     );
 
     // Parse conversation history
@@ -332,6 +344,8 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
 
     let response = HTTP_CLIENT
         .post(&url)
+        .header("x-goog-api-key", &api_key)
+        .header("Content-Type", "application/json")
         .json(&request)
         .send()
         .await
@@ -340,14 +354,17 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        log::error!("Gemini API error {} — response body: {}", status, body);
         
         // If 429 (rate limited), wait and retry ONCE
         if status.as_u16() == 429 {
-            log::warn!("Gemini API rate limited (429) — waiting 2s and retrying once...");
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            log::warn!("Gemini API rate limited (429) — waiting 3s and retrying once...");
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             
             let retry_response = HTTP_CLIENT
                 .post(&url)
+                .header("x-goog-api-key", &api_key)
+                .header("Content-Type", "application/json")
                 .json(&request)
                 .send()
                 .await
@@ -401,9 +418,15 @@ pub async fn process_query_with_image(
 ) -> Result<String> {
     let api_key = get_gemini_key()?;
 
+    // CRITICAL FIX (v7): Use x-goog-api-key header instead of ?key= query param
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        GEMINI_MODEL, api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        GEMINI_MODEL
+    );
+
+    log::info!(
+        "Gemini multimodal API call — model={}, key_len={}, auth=header",
+        GEMINI_MODEL, api_key.len()
     );
 
     let contents = vec![GeminiContent {
@@ -437,11 +460,18 @@ pub async fn process_query_with_image(
         safety_settings: vec![],
     };
 
-    let response = HTTP_CLIENT.post(&url).json(&request).send().await?;
+    let response = HTTP_CLIENT
+        .post(&url)
+        .header("x-goog-api-key", &api_key)
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        log::error!("Gemini multimodal API error {} — response body: {}", status, body);
         anyhow::bail!("Gemini multimodal API error {}: {}", status, body);
     }
 

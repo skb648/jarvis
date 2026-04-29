@@ -3,13 +3,41 @@ use jni::sys::jsize;
 use jni::JNIEnv;
 
 /// Convert a Java String to a Rust String.
+/// CRITICAL FIX (v7): Added diagnostic logging for key length verification.
+/// If a standard Gemini key is 39 chars and Rust sees 40, the JNI bridge
+/// is injecting garbage. This logging helps detect that immediately.
 pub fn jstring_to_string(env: &mut JNIEnv, jstr: &JString) -> String {
     if jstr.is_null() {
+        log::warn!("jstring_to_string: received null JString — returning empty string");
         return String::new();
     }
     match env.get_string(jstr) {
-        Ok(java_str) => java_str.into(),
-        Err(_) => String::new(),
+        Ok(java_str) => {
+            let rust_string: String = java_str.into();
+            // Diagnostic: log the exact byte length and char length to detect
+            // null terminators or garbage trailing bytes from JNI conversion
+            log::info!(
+                "JNI string conversion — bytes={}, chars={}, first_4='{}'",
+                rust_string.len(),
+                rust_string.chars().count(),
+                if rust_string.len() >= 4 { &rust_string[..4] } else { &rust_string }
+            );
+            // Strip any trailing null bytes that might leak from JNI
+            let trimmed = rust_string.trim_end_matches('\0').to_string();
+            if trimmed.len() != rust_string.len() {
+                log::warn!(
+                    "JNI string had {} trailing null bytes — stripped! Original len={}, Clean len={}",
+                    rust_string.len() - trimmed.len(),
+                    rust_string.len(),
+                    trimmed.len()
+                );
+            }
+            trimmed
+        }
+        Err(e) => {
+            log::error!("jstring_to_string: env.get_string() failed: {:?}", e);
+            String::new()
+        }
     }
 }
 
