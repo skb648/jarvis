@@ -67,7 +67,7 @@
 
     <application
         android:name=".JarvisApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -143,9 +143,11 @@
         </service>
 
         <!-- ─── MQTT Service (Paho) ──────────────────────────────── -->
+        <!-- CRITICAL FIX (v14): Added foregroundServiceType for Android 14+ compatibility -->
         <service
             android:name="org.eclipse.paho.android.service.MqttService"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- ─── Boot Receiver ─────────────────────────────────────── -->
         <receiver

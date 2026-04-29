@@ -121,7 +121,7 @@ impl WakeWordDetector {
     fn check_cooldown_and_trigger(&self) -> bool {
         let now = now_ms();
         let last = LAST_TRIGGER_MS.load(Ordering::Relaxed);
-        if now > last && now - last < self.config.cooldown_ms {
+        if now >= last && now - last < self.config.cooldown_ms {
             log::debug!(
                 "Wake word cooldown active — {}ms since last trigger (need {}ms)",
                 now - last,
@@ -186,7 +186,7 @@ pub fn detect(audio_data: &[u8], sample_rate: u32) -> bool {
     // Layer 5: Cooldown check — 5 second cooldown
     let now = now_ms();
     let last = LAST_TRIGGER_MS.load(Ordering::Relaxed);
-    if now > last && now - last < 5000 {
+    if now >= last && now - last < 5000 {
         return false;
     }
 

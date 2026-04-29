@@ -55,6 +55,14 @@ pub extern "system" fn Java_com_jarvis_assistant_jni_RustBridge_nativeInitialize
     let gemini_api_key = jni_helpers::jstring_to_string(&mut env, &gemini_key);
     let elevenlabs_api_key = jni_helpers::jstring_to_string(&mut env, &elevenlabs_key);
 
+    // CRITICAL FIX (v14): Prevent overwriting valid keys with empty/null strings.
+    // If Kotlin passes a null JString, jstring_to_string returns empty string,
+    // which would overwrite previously-set valid keys with nothing.
+    if gemini_api_key.is_empty() {
+        log::error!("nativeInitialize — received empty/null Gemini API key, refusing to overwrite");
+        return 0; // false
+    }
+
     if let Err(e) = gemini::set_api_keys(&gemini_api_key, &elevenlabs_api_key) {
         log::error!("Failed to set API keys: {}", e);
         return 0; // false

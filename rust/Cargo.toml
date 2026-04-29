@@ -1,6 +1,6 @@
 [package]
 name = "jarvis-rust"
-version = "5.0.0"
+version = "5.1.2"
 edition = "2021"
 description = "JARVIS AI Assistant — Rust Core Backend (JNI)"
 authors = ["JarvisDev"]

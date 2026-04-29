@@ -52,8 +52,9 @@ enum class ApiKeySaveResult { NONE, SUCCESS, FAILURE }
  *
  *  A1: parseErrorResponse now prefixes ALL errors with [ERROR] so
  *      the isError check never misses a friendly error message.
- *  A2: Model fallback — tries gemini-1.5-flash, then gemini-1.5-flash-latest,
- *      then gemini-1.5-pro-latest. Prevents 404 dead-ends.
+ *  A2: Model fallback — tries gemini-2.5-flash, then gemini-2.0-flash,
+ *      then gemini-2.0-flash-lite, then gemini-1.5-pro-latest.
+ *      Prevents 404 dead-ends.
  *  A3: API key test function — user can tap TEST in settings to verify
  *      keys before using the app.
  *  A4: Android native TextToSpeech fallback — if ElevenLabs fails,
@@ -79,14 +80,13 @@ class JarvisViewModel(
         private const val SHIZUKU_CHECK_INTERVAL_MS = 5_000L
 
         // A2: Model fallback list — tried in order until one succeeds
-        // CRITICAL FIX (v7): Put gemini-1.5-flash FIRST because it's the most
-        // universally accessible model. gemini-2.0-flash requires specific API
-        // key permissions that many users don't have, causing 403 errors.
+        // CRITICAL FIX (v14): Put gemini-2.5-flash FIRST because gemini-1.5-flash
+        // is deprecated and returns 404 on many Google Cloud Projects.
+        // gemini-2.5-flash is the current recommended model.
         // IMPORTANT: For audio transcription, models must support audio input.
-        // gemini-1.5-flash supports audio as of 2024.
+        // gemini-2.5-flash supports audio input.
         private val GEMINI_MODELS = listOf(
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-latest",
+            "gemini-2.5-flash",
             "gemini-2.0-flash",
             "gemini-2.0-flash-lite",
             "gemini-1.5-pro-latest"
@@ -394,15 +394,33 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     }
 
     // A3: Test API keys and report result with DETAILED error messages
+    // CRITICAL FIX (v14): Decouple ElevenLabs from Gemini test.
+    // If ElevenLabs key is empty/blank, skip that test entirely and
+    // only report the Gemini result. A missing ElevenLabs key should
+    // NOT make the overall test appear to fail — the app has native
+    // TTS fallback for speech.
     fun testApiKeys(geminiKey: String, elevenLabsKey: String) {
         viewModelScope.launch(Dispatchers.IO) {
             _apiKeyTestResult.value = "Testing Gemini API..."
             val geminiResult = testGeminiKeyDetailed(geminiKey)
-            _apiKeyTestResult.value = "Testing ElevenLabs API..."
-            val elevenResult = testElevenLabsKeyDetailed(elevenLabsKey)
+
+            // Only test ElevenLabs if a key was actually provided
+            val elevenLabsProvided = elevenLabsKey.isNotBlank()
+            val elevenResult = if (elevenLabsProvided) {
+                _apiKeyTestResult.value = "Testing ElevenLabs API..."
+                testElevenLabsKeyDetailed(elevenLabsKey)
+            } else {
+                // Key not provided — skip test, don't report failure
+                null
+            }
+
             _apiKeyTestResult.value = when {
-                geminiResult.first && elevenResult.first -> "All keys valid!"
-                geminiResult.first -> "Gemini OK. ElevenLabs FAILED: ${elevenResult.second}"
+                geminiResult.first && (elevenResult == null || elevenResult.first) -> {
+                    if (elevenResult == null) "Gemini OK. ElevenLabs: not provided (using native TTS)."
+                    else "All keys valid!"
+                }
+                geminiResult.first -> "Gemini OK. ElevenLabs FAILED: ${elevenResult!!.second}"
+                elevenResult == null -> "Gemini FAILED: ${geminiResult.second} (ElevenLabs not provided)"
                 elevenResult.first -> "ElevenLabs OK. Gemini FAILED: ${geminiResult.second}"
                 else -> "BOTH FAILED — Gemini: ${geminiResult.second} | ElevenLabs: ${elevenResult.second}"
             }
@@ -439,7 +457,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             // CRITICAL FIX (v8): Use ?key= URL parameter for authentication.
             // This is the most universally compatible method — works with ALL Gemini API key types.
             // The x-goog-api-key header was causing 403 errors with some keys.
-            val model = "gemini-1.5-flash"
+            val model = "gemini-2.5-flash"
             val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$trimmedKey")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
@@ -794,11 +812,12 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 // A2: Try each model in the fallback list
                 var lastError = ""
                 for (model in GEMINI_MODELS) {
+                    var connection: HttpURLConnection? = null
                     try {
                         // CRITICAL FIX (v8): Use ?key= URL parameter instead of x-goog-api-key header.
                         // The header method was causing 403 errors with some API key configurations.
                         val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}")
-                        val connection = url.openConnection() as HttpURLConnection
+                        connection = url.openConnection() as HttpURLConnection
                         connection.requestMethod = "POST"
                         connection.setRequestProperty("Content-Type", "application/json")
                         connection.doOutput = true
@@ -813,6 +832,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                         if (responseCode == HttpURLConnection.HTTP_OK) {
                             val responseBody = connection.inputStream.bufferedReader().readText()
                             connection.disconnect()
+                            connection = null
 
                             val transcribedText = try {
                                 val root = JsonParser.parseString(responseBody).asJsonObject
@@ -836,10 +856,13 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                             lastError = "Model $model error $responseCode: ${errorBody.take(300)}"
                             Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] $lastError")
                         }
-                        connection.disconnect()
+                        connection?.disconnect()
+                        connection = null
                     } catch (e: Exception) {
                         lastError = "Model $model exception: ${e.message}"
                         Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] $lastError")
+                        // FIX (v14): Disconnect leaked connection on exception
+                        try { connection?.disconnect() } catch (_: Exception) {}
                     }
                 }
 
@@ -1011,9 +1034,9 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     fun stopWakeWordMonitor() {
         if (!isWakeWordMonitoring) return
         isWakeWordMonitoring = false
-        wakeWordEngine?.stopListening()
+        wakeWordEngine?.release()  // CRITICAL FIX (v14): Cancel engineScope CoroutineScope to prevent coroutine leak
         wakeWordEngine = null
-        Log.i(AUDIO_TAG, "[stopWakeWordMonitor] stopped")
+        Log.i(AUDIO_TAG, "[stopWakeWordMonitor] stopped and released")
     }
 
     private fun restartWakeWordMonitorIfNeeded() {
@@ -1256,10 +1279,11 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             // A2: Try multiple models
             var lastError = ""
             for (model in GEMINI_MODELS) {
+                var connection: HttpURLConnection? = null
                 try {
                     // CRITICAL FIX (v8): Use ?key= URL parameter instead of x-goog-api-key header
                     val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}")
-                    val connection = url.openConnection() as HttpURLConnection
+                    connection = url.openConnection() as HttpURLConnection
                     connection.requestMethod = "POST"
                     connection.setRequestProperty("Content-Type", "application/json")
                     connection.doOutput = true
@@ -1276,11 +1300,13 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                         Log.e(TAG, "[processQueryViaGeminiDirect] Model $model error $responseCode: ${errorBody.take(500)}")
                         lastError = "Model $model: HTTP $responseCode — ${errorBody.take(200)}"
                         connection.disconnect()
+                        connection = null
                         continue
                     }
 
                     val responseBody = connection.inputStream.bufferedReader().readText()
                     connection.disconnect()
+                    connection = null
 
                     val responseText = try {
                         val root = JsonParser.parseString(responseBody).asJsonObject
@@ -1305,6 +1331,8 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 } catch (e: Exception) {
                     lastError = "Model $model exception: ${e.message}"
                     Log.e(TAG, "[processQueryViaGeminiDirect] $lastError")
+                    // FIX (v14): Disconnect leaked connection on exception
+                    try { connection?.disconnect() } catch (_: Exception) {}
                 }
             }
 
@@ -1530,6 +1558,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                         _audioAmplitude.value = 0f
                         amplitudePulseJob?.cancel()
                         amplitudePulseJob = null
+                        isProcessing = false  // Release processing lock on error
                         _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
                     }
                 })
@@ -1554,12 +1583,14 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 Log.e(AUDIO_TAG, "[fallbackToNativeTts] Android TTS not available")
                 _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
                 _audioAmplitude.value = 0f
+                isProcessing = false  // CRITICAL FIX (v14): Release processing lock — prevents permanent voice lockout
                 toast(context, "Text-to-speech unavailable — no voice output")
             }
         } catch (e: Exception) {
             Log.e(AUDIO_TAG, "[fallbackToNativeTts] Exception: ${e.message}")
             _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
             _audioAmplitude.value = 0f
+            isProcessing = false  // CRITICAL FIX (v14): Release processing lock on exception
         }
     }
 

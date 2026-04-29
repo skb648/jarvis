@@ -6,7 +6,7 @@
 //! so they can be overwritten at ANY time — including after the first
 //! `nativeInitialize` call.
 //!
-//! Model version: hardcoded to `gemini-1.5-flash` per spec.
+//! Model version: hardcoded to `gemini-2.5-flash` (updated v14).
 //!
 //! ═══════════════════════════════════════════════════════════════
 //! CRITICAL FIX (v6): JARVIS PERSONA INJECTION
@@ -104,12 +104,11 @@ fn get_elevenlabs_key() -> Result<String> {
 // ═══════════════════════════════════════════════════════════════
 
 /// The Gemini model to use.
-/// CRITICAL FIX (v7): Changed from gemini-2.0-flash to gemini-1.5-flash
-/// because many API keys only have access to 1.5 models. The 2.0-flash
-/// model requires specific API key permissions that not all users have,
-/// causing 403 errors even with valid keys. gemini-1.5-flash is the
-/// most universally accessible model.
-const GEMINI_MODEL: &str = "gemini-1.5-flash";
+/// CRITICAL FIX (v14): Changed from gemini-1.5-flash to gemini-2.5-flash
+/// because gemini-1.5-flash is deprecated and returns 404 on many
+/// Google Cloud Projects. gemini-2.5-flash is the current recommended
+/// model and supports audio + text + vision.
+const GEMINI_MODEL: &str = "gemini-2.5-flash";
 
 // ═══════════════════════════════════════════════════════════════
 // GEMINI API TYPES
@@ -180,7 +179,7 @@ struct GeminiResponse {
 
 #[derive(Debug, Deserialize)]
 struct GeminiCandidate {
-    content: GeminiContentResponse,
+    content: Option<GeminiContentResponse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -377,7 +376,8 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
                 let text = gemini_response
                     .candidates
                     .first()
-                    .and_then(|c| c.content.parts.first())
+                    .and_then(|c| c.content.as_ref())
+                    .and_then(|c| c.parts.first())
                     .and_then(|p| p.text.clone())
                     .unwrap_or_else(|| "Processing complete, Sir.".to_string());
                 
@@ -400,7 +400,8 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
     let text = gemini_response
         .candidates
         .first()
-        .and_then(|c| c.content.parts.first())
+        .and_then(|c| c.content.as_ref())
+        .and_then(|c| c.parts.first())
         .and_then(|p| p.text.clone())
         .unwrap_or_else(|| "Processing complete, Sir.".to_string());
 
@@ -477,9 +478,10 @@ pub async fn process_query_with_image(
     let text = gemini_response
         .candidates
         .first()
-        .and_then(|c| c.content.parts.first())
+        .and_then(|c| c.content.as_ref())
+        .and_then(|c| c.parts.first())
         .and_then(|p| p.text.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|| "Processing complete, Sir.".to_string());
 
     Ok(text)
 }
@@ -558,7 +560,8 @@ fn parse_history(history_json: &str) -> Vec<GeminiContent> {
             .into_iter()
             .take(5) // Keep last 5 turns for context window
             .map(|msg| GeminiContent {
-                role: msg.role,
+                // CRITICAL FIX (v14): Gemini API requires "model" not "assistant"
+                role: if msg.role == "assistant" { "model".to_string() } else { msg.role },
                 parts: vec![GeminiPart::Text { text: msg.content }],
             })
             .collect(),

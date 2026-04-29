@@ -191,7 +191,9 @@ fun SettingsScreen(
 
                 // Test result display
                 if (apiKeyTestResult.isNotBlank()) {
-                    val isSuccess = apiKeyTestResult.contains("valid", ignoreCase = true) && apiKeyTestResult.contains("All", ignoreCase = true)
+                    // CRITICAL FIX (v14): Show green for Gemini OK even without ElevenLabs
+                    val isSuccess = apiKeyTestResult.contains("Gemini OK", ignoreCase = true) ||
+                        apiKeyTestResult.contains("All keys valid", ignoreCase = true)
                     Text(
                         apiKeyTestResult,
                         color = if (isSuccess) JarvisGreen else WarningAmber,
@@ -237,7 +239,7 @@ fun SettingsScreen(
 
                 // Model info — hardcoded in Rust
                 Text(
-                    "Model: gemini-1.5-flash (audio + text + vision)",
+                    "Model: gemini-2.5-flash (audio + text + vision)",
                     color    = TextTertiary,
                     fontSize = 9.sp,
                     fontFamily = FontFamily.Monospace

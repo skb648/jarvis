@@ -3,7 +3,6 @@ name: Build Production APK
 on:
   push:
     branches: [main, master, develop]
-    tags: ['v*']
   pull_request:
     branches: [main, master]
   workflow_dispatch:
@@ -64,7 +63,7 @@ jobs:
 
       - name: Install Android SDK components
         run: |
-          sdkmanager --install "ndk;${{ env.NDK_VERSION }}" "cmake;${{ env.CMAKE_VERSION }}" "build-tools;35.0.0" "platforms;android-35"
+          sdkmanager --install "ndk;${{ env.NDK_VERSION }}" "cmake;${{ env.CMAKE_VERSION }}" "build-tools;35.0.1" "platforms;android-35"
         shell: bash
 
       - name: Set NDK environment variables
@@ -93,7 +92,7 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml') }}
+          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml', 'rust/src/**/*.rs') }}
           restore-keys: |
             rust-${{ runner.os }}-
 
