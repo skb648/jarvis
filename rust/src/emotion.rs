@@ -99,7 +99,7 @@ pub fn analyze_text_emotion(text: &str) -> EmotionResult {
 
     for word in &words {
         for (keyword, emotion, valence, arousal) in EMOTION_LEXICON {
-            if word == *keyword {
+            if *word == *keyword {
                 *emotion_scores.entry(emotion.to_string()).or_insert(0.0) += 1.0;
                 total_valence += valence;
                 total_arousal += arousal;
