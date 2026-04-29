@@ -117,9 +117,9 @@ jobs:
         run: mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/armeabi-v7a
         shell: bash
 
-      - name: Build Rust shared libraries via cargo-ndk
+      - name: Build Rust shared libraries (RELEASE) via cargo-ndk
         run: |
-          echo "Building Rust native libraries..."
+          echo "Building Rust RELEASE native libraries..."
           echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}"
           cd rust
           cargo ndk -t armeabi-v7a -t arm64-v8a -o ../app/src/main/jniLibs build --release

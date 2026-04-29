@@ -118,10 +118,10 @@ android {
 
     packaging {
         jniLibs {
-            // FIX: Use compressed .so packaging for smaller APK.
-            // Modern Android (API 23+) loads compressed .so directly.
-            // useLegacyPackaging=true stores .so uncompressed, bloating APK by 5-10MB.
-            useLegacyPackaging = false
+            // Use legacy packaging (uncompressed .so) for maximum compatibility.
+            // This increases APK size but ensures reliable native library loading
+            // and avoids issues with compressed .so on some Android versions.
+            useLegacyPackaging = true
         }
         resources {
             excludes += setOf(
