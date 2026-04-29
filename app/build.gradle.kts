@@ -118,7 +118,10 @@ android {
 
     packaging {
         jniLibs {
-            useLegacyPackaging = true
+            // FIX: Use compressed .so packaging for smaller APK.
+            // Modern Android (API 23+) loads compressed .so directly.
+            // useLegacyPackaging=true stores .so uncompressed, bloating APK by 5-10MB.
+            useLegacyPackaging = false
         }
         resources {
             excludes += setOf(
@@ -217,6 +220,24 @@ fun createRustBuildTask(abi: String, target: String, buildType: String): TaskPro
         inputs.dir("${rustDir}/src")
         inputs.file("${rustDir}/Cargo.toml")
         outputs.file("${jniLibsDir}/${abi}/libjarvis_rust.so")
+
+        // FIX: Check exit value after execution — fail the build if cargo-ndk crashes
+        doLast {
+            val result = executionResult.get()
+            if (result.exitValue != 0) {
+                val output = result.standardOutput.toString().take(2000)
+                val error = result.standardError.toString().take(2000)
+                logger.error("❌ Rust build FAILED for $abi (exit code ${result.exitValue})")
+                logger.error("  stdout: $output")
+                logger.error("  stderr: $error")
+                // Only throw if the .so was NOT produced (build genuinely failed vs. just warnings)
+                val producedSo = file("${jniLibsDir}/${abi}/libjarvis_rust.so")
+                if (!producedSo.exists()) {
+                    throw GradleException("Rust build for $abi failed with exit code ${result.exitValue}. " +
+                        "Check logs above. If cargo-ndk is not installed, run: cargo install cargo-ndk")
+                }
+            }
+        }
 
         // Only run if: (1) .so not already pre-built by CI, AND (2) cargo-ndk is available
         onlyIf {

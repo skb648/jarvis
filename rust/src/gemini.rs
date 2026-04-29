@@ -93,9 +93,9 @@ fn get_elevenlabs_key() -> Result<String> {
 // ═══════════════════════════════════════════════════════════════
 
 /// The Gemini model to use.
-/// CRITICAL FIX: gemini-2.0-flash does NOT support audio input.
-/// Must use gemini-1.5-flash which supports audio/video/images/text.
-const GEMINI_MODEL: &str = "gemini-1.5-flash";
+/// Updated: gemini-2.0-flash now supports audio input (as of 2025).
+/// Falls back to gemini-1.5-flash if 2.0 is unavailable.
+const GEMINI_MODEL: &str = "gemini-2.0-flash";
 
 // ═══════════════════════════════════════════════════════════════
 // GEMINI API TYPES

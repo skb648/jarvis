@@ -26,16 +26,23 @@ class JarvisApp : Application() {
 
         Log.i(TAG, "JARVIS Application starting...")
 
-        // 1. Initialize the Rust native core with persisted API keys
+        // 1. Initialize Shizuku (needed before Rust init for permission checks)
+        ShizukuManager.init()
+
+        // 2. Initialize the Rust native core with persisted API keys
         appScope.launch {
             initializeRustCore()
         }
 
-        // 2. Start keep-alive foreground service
-        startKeepAliveService()
-
-        // 3. Initialize Shizuku
-        ShizukuManager.init()
+        // 3. Start keep-alive service ONLY if user enabled it in settings
+        appScope.launch {
+            val keepAliveEnabled = settingsRepository.isKeepAliveEnabled()
+            if (keepAliveEnabled) {
+                startKeepAliveService()
+            } else {
+                Log.i(TAG, "Keep-alive service NOT started — disabled in settings")
+            }
+        }
 
         Log.i(TAG, "JARVIS Application initialized")
     }

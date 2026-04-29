@@ -223,9 +223,10 @@ object RustBridge {
 
     fun shutdown() {
         try {
-            kotlinx.coroutines.runBlocking(Dispatchers.IO) {
-                nativeShutdown()
-            }
+            // FIX: Call nativeShutdown() directly instead of using runBlocking
+            // which can deadlock if called from a coroutine already on Dispatchers.IO.
+            // nativeShutdown() is a plain JNI call — no suspension needed.
+            nativeShutdown()
         } catch (e: UnsatisfiedLinkError) {
             // Library not loaded — nothing to shut down
         } catch (e: Exception) {

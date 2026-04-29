@@ -79,12 +79,14 @@ class JarvisViewModel(
         private const val SHIZUKU_CHECK_INTERVAL_MS = 5_000L
 
         // A2: Model fallback list — tried in order until one succeeds
+        // IMPORTANT: For audio transcription, models must support audio input.
+        // gemini-2.0-flash supports audio as of 2025. Put audio-capable models first.
         private val GEMINI_MODELS = listOf(
             "gemini-2.0-flash",
-            "gemini-2.0-flash-latest",
+            "gemini-2.0-flash-lite",
             "gemini-1.5-flash-latest",
-            "gemini-1.5-pro-latest",
-            "gemini-1.5-flash"
+            "gemini-1.5-flash",
+            "gemini-1.5-pro-latest"
         )
 
         /** JARVIS system prompt for Gemini direct queries. */
@@ -776,7 +778,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             val srcSample = if (srcIdx + 1 < sourceSamples) {
                 val s0 = readInt16LE(pcm, srcIdx * 2)
                 val s1 = readInt16LE(pcm, (srcIdx + 1) * 2)
-                (s0 + (s1 - s0) * frac).toInt()
+                (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767)
             } else if (srcIdx < sourceSamples) {
                 readInt16LE(pcm, srcIdx * 2)
             } else {

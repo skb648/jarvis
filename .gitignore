@@ -1,3 +1,47 @@
-The input shows only a directory 'jarvis/' being added, with no specific file types or build artifacts mentioned. Since there are no compiled files, dependency directories, editor files, or other ignorable items in the changes, and the current .gitignore is empty, no additions are needed.
+# Built application files
+*.apk
+*.ap_
+*.aab
 
-Output: (nothing)
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+
+# Gradle files
+.gradle/
+build/
+app/build/
+
+# Local configuration file
+local.properties
+
+# Android Studio
+.idea/
+*.iml
+.navigation/
+captures/
+
+# Keystore files (keep out of version control)
+*.jks
+*.keystore
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Rust build artifacts (target directory is large)
+rust/target/
+
+# DO NOT ignore jniLibs — they contain pre-built .so files needed for the APK
+# DO NOT ignore Cargo.lock — it's needed for reproducible builds
+!app/src/main/jniLibs/

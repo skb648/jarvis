@@ -19,7 +19,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       # ═══════════════════════════════════════════════════════════════
@@ -62,9 +62,9 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK and CMake
+      - name: Install Android SDK components
         run: |
-          sdkmanager "ndk;${{ env.NDK_VERSION }}" "cmake;${{ env.CMAKE_VERSION }}" "build-tools;35.0.0"
+          sdkmanager --install "ndk;${{ env.NDK_VERSION }}" "cmake;${{ env.CMAKE_VERSION }}" "build-tools;35.0.0" "platforms;android-35"
         shell: bash
 
       - name: Set NDK environment variables
@@ -72,6 +72,8 @@ jobs:
           NDK_PATH="${ANDROID_HOME}/ndk/${{ env.NDK_VERSION }}"
           echo "NDK_HOME=${NDK_PATH}" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=${NDK_PATH}" >> "$GITHUB_ENV"
+          echo "NDK path: ${NDK_PATH}"
+          ls -la "${NDK_PATH}" 2>/dev/null || echo "Warning: NDK path not yet available"
 
       # ═══════════════════════════════════════════════════════════════
       # 5. Rust toolchain setup (REQUIRED for native .so)
@@ -91,7 +93,7 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml') }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock') }}
           restore-keys: |
             rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml') }}-
             rust-${{ runner.os }}-
@@ -112,51 +114,109 @@ jobs:
       #    Only builds arm64-v8a and armeabi-v7a to match abiFilters
       #    in build.gradle.kts. x86/x86_64 are excluded.
       # ═══════════════════════════════════════════════════════════════
+      - name: Create jniLibs directory structure
+        run: mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/armeabi-v7a
+        shell: bash
+
       - name: Build Rust shared libraries via cargo-ndk
         run: |
+          echo "Building Rust native libraries..."
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}"
           cd rust
           cargo ndk -t armeabi-v7a -t arm64-v8a -o ../app/src/main/jniLibs build --release
         shell: bash
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-      - name: Verify Rust .so files exist
+      - name: Verify Rust .so files exist and check sizes
         run: |
-          echo "Checking Rust native libraries..."
+          echo "═══════════════════════════════════════════════════════"
+          echo "Verifying Rust native libraries..."
+          echo "═══════════════════════════════════════════════════════"
+          ALL_OK=true
           for abi in arm64-v8a armeabi-v7a; do
             SO_PATH="app/src/main/jniLibs/${abi}/libjarvis_rust.so"
             if [ -f "$SO_PATH" ]; then
-              SO_SIZE=$(du -h "$SO_PATH" | cut -f1)
-              echo "  ✓ ${abi}: libjarvis_rust.so (${SO_SIZE})"
+              SO_SIZE=$(stat -c%s "$SO_PATH" 2>/dev/null || stat -f%z "$SO_PATH" 2>/dev/null)
+              SO_SIZE_HUMAN=$(du -h "$SO_PATH" | cut -f1)
+              echo "  ✓ ${abi}: libjarvis_rust.so (${SO_SIZE_HUMAN}, ${SO_SIZE} bytes)"
+              # Verify minimum size — a properly built Rust .so should be > 500KB in release mode
+              if [ "$SO_SIZE" -lt 512000 ]; then
+                echo "  ⚠ WARNING: .so file is suspiciously small (< 500KB). Build may have failed silently."
+                ALL_OK=false
+              fi
             else
               echo "  ✗ ${abi}: libjarvis_rust.so NOT FOUND"
-              exit 1
+              ALL_OK=false
             fi
           done
+          if [ "$ALL_OK" = false ]; then
+            echo "ERROR: Rust native library verification failed!"
+            exit 1
+          fi
+          echo "═══════════════════════════════════════════════════════"
         shell: bash
 
       # ═══════════════════════════════════════════════════════════════
-      # 7. Build debug APK (smoke test)
+      # 7. Build Debug APK
       # ═══════════════════════════════════════════════════════════════
       - name: Build Debug APK
         run: |
-          ./gradlew :app:assembleDebug --stacktrace
+          ./gradlew :app:assembleDebug --stacktrace --info 2>&1 | tee gradle-debug.log
         shell: bash
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
       # ═══════════════════════════════════════════════════════════════
-      # 8. Build release APK (unsigned — for distribution)
+      # 8. Build Release APK
       # ═══════════════════════════════════════════════════════════════
       - name: Build Release APK
         run: |
-          ./gradlew :app:assembleRelease --stacktrace
+          ./gradlew :app:assembleRelease --stacktrace --info 2>&1 | tee gradle-release.log
         shell: bash
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
       # ═══════════════════════════════════════════════════════════════
-      # 9. Upload artifacts
+      # 9. Verify APK sizes
+      # ═══════════════════════════════════════════════════════════════
+      - name: Verify APK sizes
+        run: |
+          echo "═══════════════════════════════════════════════════════"
+          echo "APK Size Verification"
+          echo "═══════════════════════════════════════════════════════"
+          
+          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" 2>/dev/null | head -1)
+          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" 2>/dev/null | head -1)
+          
+          if [ -n "$DEBUG_APK" ]; then
+            DEBUG_SIZE=$(du -h "$DEBUG_APK" | cut -f1)
+            DEBUG_BYTES=$(stat -c%s "$DEBUG_APK" 2>/dev/null || stat -f%z "$DEBUG_APK" 2>/dev/null)
+            echo "Debug APK: $DEBUG_SIZE ($DEBUG_BYTES bytes)"
+            echo "  Path: $DEBUG_APK"
+            if [ "$DEBUG_BYTES" -lt 30000000 ]; then
+              echo "  ⚠ WARNING: Debug APK is smaller than expected (should be 60-70MB with Rust .so)"
+            fi
+          else
+            echo "  ✗ No debug APK found"
+          fi
+          
+          if [ -n "$RELEASE_APK" ]; then
+            RELEASE_SIZE=$(du -h "$RELEASE_APK" | cut -f1)
+            RELEASE_BYTES=$(stat -c%s "$RELEASE_APK" 2>/dev/null || stat -f%z "$RELEASE_APK" 2>/dev/null)
+            echo "Release APK: $RELEASE_SIZE ($RELEASE_BYTES bytes)"
+            echo "  Path: $RELEASE_APK"
+            if [ "$RELEASE_BYTES" -lt 20000000 ]; then
+              echo "  ⚠ WARNING: Release APK is smaller than expected (should be 25-35MB with Rust .so)"
+            fi
+          else
+            echo "  ✗ No release APK found"
+          fi
+          echo "═══════════════════════════════════════════════════════"
+        shell: bash
+
+      # ═══════════════════════════════════════════════════════════════
+      # 10. Upload artifacts
       # ═══════════════════════════════════════════════════════════════
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
@@ -168,7 +228,7 @@ jobs:
           retention-days: 30
 
       # ═══════════════════════════════════════════════════════════════
-      # 10. Summary
+      # 11. Summary
       # ═══════════════════════════════════════════════════════════════
       - name: Build Summary
         run: |
