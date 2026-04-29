@@ -10,6 +10,10 @@ on:
 
 env:
   JAVA_VERSION: '21'
+  JAVA_DISTRIBUTION: 'temurin'
+  NDK_VERSION: '28.0.13004108'
+  CMAKE_VERSION: '3.22.1'
+  RUST_TOOLCHAIN: 'stable'
   GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8"
 
 jobs:
@@ -32,7 +36,7 @@ jobs:
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
           java-version: ${{ env.JAVA_VERSION }}
 
       - name: Grant execute permission for gradlew
@@ -53,31 +57,82 @@ jobs:
             ${{ runner.os }}-gradle-
 
       # ═══════════════════════════════════════════════════════════════
-      # 4. Setup Android SDK
+      # 4. Setup Android SDK + NDK + CMake
       # ═══════════════════════════════════════════════════════════════
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # ═══════════════════════════════════════════════════════════════
-      # 5. Install NDK + CMake (required for JNI stub native library)
-      # ═══════════════════════════════════════════════════════════════
       - name: Install Android NDK and CMake
         run: |
-          sdkmanager "ndk;28.0.13004108" "cmake;3.22.1" "build-tools;35.0.0"
+          sdkmanager "ndk;${{ env.NDK_VERSION }}" "cmake;${{ env.CMAKE_VERSION }}" "build-tools;35.0.0"
         shell: bash
 
+      - name: Set NDK environment variables
+        run: |
+          NDK_PATH="${ANDROID_HOME}/ndk/${{ env.NDK_VERSION }}"
+          echo "NDK_HOME=${NDK_PATH}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${NDK_PATH}" >> "$GITHUB_ENV"
+
       # ═══════════════════════════════════════════════════════════════
-      # 6. Build Rust native library (BEST EFFORT — non-blocking)
-      #    If this fails, the CMake stub still provides JNI stubs so
-      #    the app loads and falls back to Kotlin HTTP mode.
+      # 5. Rust toolchain setup (REQUIRED for native .so)
+      # ═══════════════════════════════════════════════════════════════
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: |
+            aarch64-linux-android
+            armv7-linux-androideabi
+
+      - name: Cache Rust compilation artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml') }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml') }}-
+            rust-${{ runner.os }}-
+
+      - name: Cache cargo-ndk binary
+        id: cache-cargo-ndk
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-ndk
+          key: cargo-ndk-${{ runner.os }}
+
+      - name: Install cargo-ndk
+        if: steps.cache-cargo-ndk.outputs.cache-hit != 'true'
+        run: cargo install cargo-ndk
+
+      # ═══════════════════════════════════════════════════════════════
+      # 6. Build Rust native library (REQUIRED — must succeed)
+      #    Only builds arm64-v8a and armeabi-v7a to match abiFilters
+      #    in build.gradle.kts. x86/x86_64 are excluded.
       # ═══════════════════════════════════════════════════════════════
       - name: Build Rust shared libraries via cargo-ndk
-        continue-on-error: true
         run: |
-          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.0.13004108
-          cargo install cargo-ndk
           cd rust
-          cargo ndk -t armeabi-v7a -t arm64-v8a -t x86 -t x86_64 -o ../app/src/main/jniLibs build --release
+          cargo ndk -t armeabi-v7a -t arm64-v8a -o ../app/src/main/jniLibs build --release
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+
+      - name: Verify Rust .so files exist
+        run: |
+          echo "Checking Rust native libraries..."
+          for abi in arm64-v8a armeabi-v7a; do
+            SO_PATH="app/src/main/jniLibs/${abi}/libjarvis_rust.so"
+            if [ -f "$SO_PATH" ]; then
+              SO_SIZE=$(du -h "$SO_PATH" | cut -f1)
+              echo "  ✓ ${abi}: libjarvis_rust.so (${SO_SIZE})"
+            else
+              echo "  ✗ ${abi}: libjarvis_rust.so NOT FOUND"
+              exit 1
+            fi
+          done
         shell: bash
 
       # ═══════════════════════════════════════════════════════════════
@@ -85,18 +140,20 @@ jobs:
       # ═══════════════════════════════════════════════════════════════
       - name: Build Debug APK
         run: |
-          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.0.13004108
           ./gradlew :app:assembleDebug --stacktrace
         shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
       # ═══════════════════════════════════════════════════════════════
       # 8. Build release APK (unsigned — for distribution)
       # ═══════════════════════════════════════════════════════════════
       - name: Build Release APK
         run: |
-          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.0.13004108
           ./gradlew :app:assembleRelease --stacktrace
         shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
       # ═══════════════════════════════════════════════════════════════
       # 9. Upload artifacts
@@ -120,4 +177,15 @@ jobs:
           echo "═══════════════════════════════════════════════════════"
           ls -lh app/build/outputs/apk/debug/*.apk 2>/dev/null || echo "No debug APK"
           ls -lh app/build/outputs/apk/release/*.apk 2>/dev/null || echo "No release APK"
+          echo ""
+          echo "Native libraries included:"
+          for abi in arm64-v8a armeabi-v7a; do
+            SO_PATH="app/src/main/jniLibs/${abi}/libjarvis_rust.so"
+            if [ -f "$SO_PATH" ]; then
+              SO_SIZE=$(du -h "$SO_PATH" | cut -f1)
+              echo "  ${abi}: libjarvis_rust.so (${SO_SIZE})"
+            else
+              echo "  ${abi}: missing"
+            fi
+          done
           echo "═══════════════════════════════════════════════════════"

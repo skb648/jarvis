@@ -324,14 +324,18 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 _elevenLabsApiKey.value = elevenLabsKey
                 Log.i(TAG, "API keys FORCE-UPDATED in memory — gemini=${geminiKey.take(4)}... (${geminiKey.length} chars), elevenLabs=${elevenLabsKey.take(4)}... (${elevenLabsKey.length} chars)")
 
+                // Step 1: Persist to DataStore — if this fails, report FAILURE immediately
                 try {
                     settingsRepository.setGeminiApiKey(geminiKey)
                     settingsRepository.setElevenLabsApiKey(elevenLabsKey)
                     Log.i(TAG, "API keys persisted to DataStore — CONFIRMED")
                 } catch (e: Exception) {
                     Log.e(TAG, "API keys DataStore write FAILED: ${e.message}")
+                    _apiKeySaveResult.value = ApiKeySaveResult.FAILURE
+                    return@launch
                 }
 
+                // Step 2: Apply keys to RustBridge engine
                 if (RustBridge.isNativeReady()) {
                     try {
                         val ok = RustBridge.initialize(geminiKey, elevenLabsKey)
@@ -347,6 +351,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                     updateEngineStatusText()
                 }
 
+                // Step 3: Only report SUCCESS after ALL operations complete
                 _apiKeySaveResult.value = ApiKeySaveResult.SUCCESS
                 Log.i(TAG, "API keys save & apply COMPLETE — all layers updated")
             } catch (e: CancellationException) {
@@ -594,6 +599,10 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         viewModelScope.launch(Dispatchers.Main) {
             _brainState.value = BrainState.THINKING
 
+            // Stop recording but keep voice mode active — don't reset _isListening/_isVoiceMode
+            audioEngine?.stopCommandRecording()
+            _isListening.value = false
+
             val audioEmotion = try {
                 withContext(Dispatchers.IO) {
                     Log.d(AUDIO_TAG, "[handleCommandReady] calling RustBridge.analyzeAudio at ${sampleRate}Hz")
@@ -632,14 +641,17 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                     processQuery(transcription, ctx)
                 } else {
                     Log.e(AUDIO_TAG, "[handleCommandReady] No application context")
-                    _brainState.value = BrainState.IDLE
-                    _isListening.value = false
+                    _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
                 }
             } else {
                 Log.w(AUDIO_TAG, "[handleCommandReady] Transcription is EMPTY")
-                _brainState.value = BrainState.IDLE
-                _isListening.value = false
                 addAssistantMessage("I couldn't make that out, Sir. Please try speaking louder or closer to the microphone.", "confused")
+                if (_isVoiceMode.value) {
+                    // Stay in voice mode — restart listening after brief pause
+                    restartListeningAfterTts()
+                } else {
+                    _brainState.value = BrainState.IDLE
+                }
             }
         }
     }
@@ -922,10 +934,14 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // ═══════════════════════════════════════════════════════════════════════
 
     fun processQuery(query: String, context: Context) {
-        Log.d(AUDIO_TAG, "[processQuery] query=\"$query\"")
+        Log.d(AUDIO_TAG, "[processQuery] query=\"$query\" brainState=${_brainState.value}")
         if (_brainState.value == BrainState.THINKING || _brainState.value == BrainState.SPEAKING) {
-            Log.w(AUDIO_TAG, "[processQuery] Already THINKING or SPEAKING — ignoring")
-            return
+            Log.w(AUDIO_TAG, "[processQuery] Already ${_brainState.value} — forcing state reset for new query")
+            // Stop any in-progress TTS playback so the new query can proceed
+            releaseMediaPlayer()
+            amplitudePulseJob?.cancel()
+            amplitudePulseJob = null
+            textToSpeech?.stop()
         }
 
         viewModelScope.launch(Dispatchers.Main) {
@@ -947,11 +963,11 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                     is CommandRouter.RouteResult.NeedsAI  -> handleAIQuery(routeResult.query, context)
                 }
             } catch (e: CancellationException) {
-                _brainState.value = BrainState.IDLE
+                _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
                 return@launch
             } catch (e: Exception) {
                 Log.e(TAG, "[processQuery] pipeline error", e)
-                _brainState.value     = BrainState.ERROR
+                _brainState.value     = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
                 _isTyping.value       = false
                 _audioAmplitude.value = 0f
                 addAssistantMessage("Error: ${e.message?.take(200) ?: "Unknown"}", "stressed")
@@ -1034,11 +1050,15 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
             if (isError) {
                 Log.w(AUDIO_TAG, "[handleAIQuery] Error response detected")
-                _brainState.value   = BrainState.ERROR
+                _brainState.value   = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
                 _isTyping.value     = false
+                _audioAmplitude.value = 0f
                 _lastResponse.value = parsed
                 addAssistantMessage(parsed, "stressed")
                 toast(context, "AI error: ${parsed.take(80)}")
+                if (_isVoiceMode.value) {
+                    restartListeningAfterTts()
+                }
                 return
             }
 
@@ -1070,10 +1090,14 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "[handleAIQuery] failed", e)
-            _brainState.value = BrainState.ERROR
+            _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
             _isTyping.value   = false
+            _audioAmplitude.value = 0f
             addAssistantMessage("Processing error, Sir.", "stressed")
             toast(context, "AI processing error: ${e.message?.take(80)}")
+            if (_isVoiceMode.value) {
+                restartListeningAfterTts()
+            }
         }
     }
 
@@ -1349,8 +1373,8 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             throw e
         } catch (e: Exception) {
             Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] UNEXPECTED EXCEPTION: ${e.message}", e)
-            _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
-            _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
+            _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+            _audioAmplitude.value = 0f
             toast(context, "TTS error: ${e.message?.take(80)}")
             fallbackToNativeTts(text, context)
         }
@@ -1381,26 +1405,61 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 initNativeTts(context)
             }
             if (ttsInitialized) {
-                textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, android.os.Bundle(), "jarvis_tts_${System.currentTimeMillis()}")
-                Log.i(AUDIO_TAG, "[fallbackToNativeTts] Speaking via Android TTS: \"${text.take(40)}...\"")
-                // Android TTS doesn't give us amplitude data, so just show IDLE after a delay
-                viewModelScope.launch {
-                    delay(text.length * 80L + 1000L) // Rough estimate
-                    if (!_isListening.value) {
-                        _brainState.value = BrainState.IDLE
-                        _audioAmplitude.value = 0f
+                val utteranceId = "jarvis_tts_${System.currentTimeMillis()}"
+                // Set up completion listener to properly reset brain state
+                textToSpeech?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {
+                        Log.d(AUDIO_TAG, "[fallbackToNativeTts] TTS started speaking")
                     }
+
+                    override fun onDone(utteranceId: String?) {
+                        Log.d(AUDIO_TAG, "[fallbackToNativeTts] TTS completed — voiceMode=${_isVoiceMode.value}")
+                        _audioAmplitude.value = 0f
+                        amplitudePulseJob?.cancel()
+                        amplitudePulseJob = null
+                        if (_isVoiceMode.value) {
+                            _brainState.value = BrainState.LISTENING
+                            restartListeningAfterTts()
+                        } else {
+                            _brainState.value = BrainState.IDLE
+                        }
+                    }
+
+                    override fun onError(utteranceId: String?) {
+                        Log.e(AUDIO_TAG, "[fallbackToNativeTts] TTS error")
+                        _audioAmplitude.value = 0f
+                        amplitudePulseJob?.cancel()
+                        amplitudePulseJob = null
+                        _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
+                    }
+                })
+
+                textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, android.os.Bundle(), utteranceId)
+                Log.i(AUDIO_TAG, "[fallbackToNativeTts] Speaking via Android TTS: \"${text.take(40)}...\"")
+
+                // Simulate amplitude pulse during native TTS playback
+                amplitudePulseJob = viewModelScope.launch(Dispatchers.Default) {
+                    var phase = 0f
+                    while (isActive) {
+                        val speaking = try { textToSpeech?.isSpeaking == true } catch (_: Exception) { false }
+                        if (!speaking) break
+                        phase += 0.15f
+                        val pulse = 0.4f + 0.2f * kotlin.math.sin(phase.toDouble()).toFloat()
+                        _audioAmplitude.value = pulse.coerceIn(0.2f, 0.6f)
+                        delay(45)
+                    }
+                    _audioAmplitude.value = 0f
                 }
             } else {
                 Log.e(AUDIO_TAG, "[fallbackToNativeTts] Android TTS not available")
-                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
-                _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
+                _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+                _audioAmplitude.value = 0f
                 toast(context, "Text-to-speech unavailable — no voice output")
             }
         } catch (e: Exception) {
             Log.e(AUDIO_TAG, "[fallbackToNativeTts] Exception: ${e.message}")
-            _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
-            _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
+            _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+            _audioAmplitude.value = 0f
         }
     }
 
@@ -1459,13 +1518,15 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     fun sendMessage(text: String, context: Context) = processQuery(text, context)
 
     fun toggleVoiceMode(context: Context) {
-        Log.d(AUDIO_TAG, "[toggleVoiceMode] called")
-        if (_isListening.value) {
-            stopListening()
+        Log.d(AUDIO_TAG, "[toggleVoiceMode] voiceMode=${_isVoiceMode.value} isListening=${_isListening.value}")
+        if (_isVoiceMode.value) {
+            // Turn OFF voice mode — stop everything
             _isVoiceMode.value = false
+            stopListening()
         } else {
-            startListening(context)
+            // Turn ON voice mode — start listening
             _isVoiceMode.value = true
+            startListening(context)
         }
     }
 
@@ -1477,6 +1538,25 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     fun toggleVoiceMode() {
         Log.w(AUDIO_TAG, "[toggleVoiceMode] DEPRECATED no-arg version called — no context available, toggling state only")
         _isVoiceMode.value = !_isVoiceMode.value
+    }
+
+    /**
+     * Restarts the audio listening pipeline after TTS playback completes in voice mode.
+     * Called from MediaPlayer.OnCompletionListener and UtteranceProgressListener.onDone.
+     */
+    @SuppressLint("MissingPermission")
+    private fun restartListeningAfterTts() {
+        val ctx = getApplicationContext()
+        if (ctx == null) {
+            Log.e(AUDIO_TAG, "[restartListeningAfterTts] No application context — cannot restart listening")
+            _brainState.value = BrainState.IDLE
+            return
+        }
+        Log.d(AUDIO_TAG, "[restartListeningAfterTts] Restarting listening in voice mode")
+        viewModelScope.launch(Dispatchers.Main) {
+            delay(300) // Brief pause to avoid audio hardware contention
+            startListening(ctx)
+        }
     }
 
     fun toggleDevice(deviceId: String, newState: Boolean) {
@@ -1657,32 +1737,28 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     fun setGeminiApiKey(key: String) {
         _geminiApiKey.value = key
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                settingsRepository.setGeminiApiKey(key)
-            } catch (e: Exception) { Log.e(TAG, "setGeminiApiKey: ${e.message}") }
+            try { settingsRepository.setGeminiApiKey(key) } catch (e: Exception) { Log.e(TAG, "Persist Gemini API key failed: ${e.message}") }
         }
     }
 
     fun setElevenLabsApiKey(key: String) {
         _elevenLabsApiKey.value = key
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                settingsRepository.setElevenLabsApiKey(key)
-            } catch (e: Exception) { Log.e(TAG, "setElevenLabsApiKey: ${e.message}") }
+            try { settingsRepository.setElevenLabsApiKey(key) } catch (e: Exception) { Log.e(TAG, "Persist ElevenLabs API key failed: ${e.message}") }
         }
     }
 
     fun setTtsVoiceId(id: String) {
         _ttsVoiceId.value = id
         viewModelScope.launch(Dispatchers.IO) {
-            try { settingsRepository.setTtsVoiceId(id) } catch (e: Exception) {}
+            try { settingsRepository.setTtsVoiceId(id) } catch (e: Exception) { Log.e(TAG, "Persist TTS voice ID failed: ${e.message}") }
         }
     }
 
     fun setWakeWordEnabled(enabled: Boolean) {
         _isWakeWordEnabled.value = enabled
         viewModelScope.launch(Dispatchers.IO) {
-            try { settingsRepository.setWakeWordEnabled(enabled) } catch (e: Exception) {}
+            try { settingsRepository.setWakeWordEnabled(enabled) } catch (e: Exception) { Log.e(TAG, "Persist wake word enabled failed: ${e.message}") }
         }
         if (enabled && !_isListening.value && applicationContext != null) {
             startWakeWordMonitor(applicationContext!!)
@@ -1697,7 +1773,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             try {
                 settingsRepository.setMqttBrokerUrl(url)
                 reconnectSmartHome()
-            } catch (e: Exception) {}
+            } catch (e: Exception) { Log.e(TAG, "Persist MQTT broker URL failed: ${e.message}") }
         }
     }
 
@@ -1707,7 +1783,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             try {
                 settingsRepository.setMqttUsername(u)
                 reconnectSmartHome()
-            } catch (e: Exception) {}
+            } catch (e: Exception) { Log.e(TAG, "Persist MQTT username failed: ${e.message}") }
         }
     }
 
@@ -1717,7 +1793,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             try {
                 settingsRepository.setMqttPassword(p)
                 reconnectSmartHome()
-            } catch (e: Exception) {}
+            } catch (e: Exception) { Log.e(TAG, "Persist MQTT password failed: ${e.message}") }
         }
     }
 
@@ -1727,7 +1803,7 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             try {
                 settingsRepository.setHomeAssistantUrl(url)
                 reconnectSmartHome()
-            } catch (e: Exception) {}
+            } catch (e: Exception) { Log.e(TAG, "Persist Home Assistant URL failed: ${e.message}") }
         }
     }
 
@@ -1737,14 +1813,14 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             try {
                 settingsRepository.setHomeAssistantToken(token)
                 reconnectSmartHome()
-            } catch (e: Exception) {}
+            } catch (e: Exception) { Log.e(TAG, "Persist Home Assistant token failed: ${e.message}") }
         }
     }
 
     fun setKeepAliveEnabled(enabled: Boolean) {
         _isKeepAliveEnabled.value = enabled
         viewModelScope.launch(Dispatchers.IO) {
-            try { settingsRepository.setKeepAliveEnabled(enabled) } catch (e: Exception) {}
+            try { settingsRepository.setKeepAliveEnabled(enabled) } catch (e: Exception) { Log.e(TAG, "Persist keep-alive enabled failed: ${e.message}") }
         }
     }
 
@@ -1823,8 +1899,8 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 }
             } catch (e: Exception) {
                 Log.e(AUDIO_TAG, "[playMp3AudioAsync] Failed to write temp MP3: ${e.message}")
-                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
-                _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
+                _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+                _audioAmplitude.value = 0f
                 toast(context, "TTS file write failed")
                 return@withLock
             }
@@ -1863,25 +1939,28 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             }
 
             player.setOnCompletionListener {
-                Log.d(AUDIO_TAG, "[playMp3AudioAsync] MediaPlayer playback COMPLETED")
-                if (!_isListening.value) {
-                    _audioAmplitude.value = 0f
-                }
-                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.IDLE
+                Log.d(AUDIO_TAG, "[playMp3AudioAsync] MediaPlayer playback COMPLETED — voiceMode=${_isVoiceMode.value}")
+                _audioAmplitude.value = 0f
+                amplitudePulseJob?.cancel()
+                amplitudePulseJob = null
+                currentTtsTempPath = null
                 try {
                     tmp.delete()
                     Log.d(AUDIO_TAG, "[playMp3AudioAsync] Temp file deleted on completion")
                 } catch (e: Exception) {
                     Log.w(AUDIO_TAG, "[playMp3AudioAsync] Temp file delete failed: ${e.message}")
                 }
-                currentTtsTempPath = null
-                amplitudePulseJob?.cancel()
-                amplitudePulseJob = null
+                if (_isVoiceMode.value) {
+                    _brainState.value = BrainState.LISTENING
+                    restartListeningAfterTts()
+                } else {
+                    _brainState.value = BrainState.IDLE
+                }
             }
 
             player.setOnErrorListener { _, what, extra ->
                 Log.e(AUDIO_TAG, "[playMp3AudioAsync] MediaPlayer ERROR: what=$what extra=$extra")
-                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.ERROR
+                _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
                 _audioAmplitude.value = 0f
                 try {
                     tmp.delete()
@@ -1903,8 +1982,8 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 try { player.release() } catch (_: Exception) {}
                 try { tmp.delete() } catch (_: Exception) {}
                 currentTtsTempPath = null
-                _brainState.value = if (_isListening.value) BrainState.LISTENING else BrainState.ERROR
-                _audioAmplitude.value = if (_isListening.value) _audioAmplitude.value else 0f
+                _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
+                _audioAmplitude.value = 0f
                 toast(context, "MediaPlayer init failed: ${e.message?.take(60)}")
             }
         }

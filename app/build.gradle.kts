@@ -202,17 +202,29 @@ fun createRustBuildTask(abi: String, target: String, buildType: String): TaskPro
 
         commandLine("cargo", *cargoArgs.toTypedArray())
 
-        // FIX v13: Ignore Rust build failures. The CMake stub provides JNI
-        // fallbacks, so the APK can still build and run in pure Kotlin mode
-        // even if the Rust library fails to compile.
+        // Skip Gradle Rust build if the .so was already pre-built by CI.
+        // The CI workflow (build.yml / release.yml) runs cargo-ndk directly
+        // and places the .so files into jniLibs/ BEFORE Gradle runs.
+        // Running cargo again here would be redundant and might overwrite
+        // the pre-built binaries with a different configuration.
+        val prebuiltSo = file("${jniLibsDir}/${abi}/libjarvis_rust.so")
+        if (prebuiltSo.exists()) {
+            logger.lifecycle("✅ Pre-built libjarvis_rust.so found for $abi — skipping Gradle Rust build")
+        }
+
         isIgnoreExitValue = true
 
         inputs.dir("${rustDir}/src")
         inputs.file("${rustDir}/Cargo.toml")
         outputs.file("${jniLibsDir}/${abi}/libjarvis_rust.so")
 
-        // Only run if cargo-ndk is available — fail gracefully
+        // Only run if: (1) .so not already pre-built by CI, AND (2) cargo-ndk is available
         onlyIf {
+            // If the .so already exists (pre-built by CI), skip this task
+            if (prebuiltSo.exists()) {
+                logger.lifecycle("Skipping Rust build for $abi — pre-built .so found at ${prebuiltSo.absolutePath}")
+                return@onlyIf false
+            }
             try {
                 val proc = ProcessBuilder("cargo", "ndk", "--version")
                     .redirectErrorStream(true)
