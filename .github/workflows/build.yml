@@ -93,9 +93,8 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock') }}
+          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml') }}
           restore-keys: |
-            rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml') }}-
             rust-${{ runner.os }}-
 
       - name: Cache cargo-ndk binary
@@ -162,7 +161,7 @@ jobs:
       # ═══════════════════════════════════════════════════════════════
       - name: Build Debug APK
         run: |
-          ./gradlew :app:assembleDebug --stacktrace --info 2>&1 | tee gradle-debug.log
+          ./gradlew :app:assembleDebug --stacktrace 2>&1 | tee gradle-debug.log
         shell: bash
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
@@ -172,7 +171,7 @@ jobs:
       # ═══════════════════════════════════════════════════════════════
       - name: Build Release APK
         run: |
-          ./gradlew :app:assembleRelease --stacktrace --info 2>&1 | tee gradle-release.log
+          ./gradlew :app:assembleRelease --stacktrace 2>&1 | tee gradle-release.log
         shell: bash
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}

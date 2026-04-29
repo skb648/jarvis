@@ -225,12 +225,8 @@ fun createRustBuildTask(abi: String, target: String, buildType: String): TaskPro
         doLast {
             val result = executionResult.get()
             if (result.exitValue != 0) {
-                val output = result.standardOutput.toString().take(2000)
-                val error = result.standardError.toString().take(2000)
                 logger.error("❌ Rust build FAILED for $abi (exit code ${result.exitValue})")
-                logger.error("  stdout: $output")
-                logger.error("  stderr: $error")
-                // Only throw if the .so was NOT produced (build genuinely failed vs. just warnings)
+                // Only throw if the .so was NOT produced (build genuinely failed vs. just skipped)
                 val producedSo = file("${jniLibsDir}/${abi}/libjarvis_rust.so")
                 if (!producedSo.exists()) {
                     throw GradleException("Rust build for $abi failed with exit code ${result.exitValue}. " +
