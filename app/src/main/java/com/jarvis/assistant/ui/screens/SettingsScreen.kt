@@ -237,7 +237,7 @@ fun SettingsScreen(
 
                 // Model info — hardcoded in Rust
                 Text(
-                    "Model: gemini-2.0-flash (audio + text + vision)",
+                    "Model: gemini-1.5-flash (audio + text + vision)",
                     color    = TextTertiary,
                     fontSize = 9.sp,
                     fontFamily = FontFamily.Monospace

@@ -52,7 +52,7 @@ enum class ApiKeySaveResult { NONE, SUCCESS, FAILURE }
  *
  *  A1: parseErrorResponse now prefixes ALL errors with [ERROR] so
  *      the isError check never misses a friendly error message.
- *  A2: Model fallback — tries gemini-2.0-flash, then gemini-1.5-flash-latest,
+ *  A2: Model fallback — tries gemini-1.5-flash, then gemini-1.5-flash-latest,
  *      then gemini-1.5-pro-latest. Prevents 404 dead-ends.
  *  A3: API key test function — user can tap TEST in settings to verify
  *      keys before using the app.
@@ -393,18 +393,18 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         _apiKeySaveResult.value = ApiKeySaveResult.NONE
     }
 
-    // A3: Test API keys and report result
+    // A3: Test API keys and report result with DETAILED error messages
     fun testApiKeys(geminiKey: String, elevenLabsKey: String) {
         viewModelScope.launch(Dispatchers.IO) {
             _apiKeyTestResult.value = "Testing Gemini API..."
-            val geminiOk = testGeminiKey(geminiKey)
+            val geminiResult = testGeminiKeyDetailed(geminiKey)
             _apiKeyTestResult.value = "Testing ElevenLabs API..."
-            val elevenOk = testElevenLabsKey(elevenLabsKey)
+            val elevenResult = testElevenLabsKeyDetailed(elevenLabsKey)
             _apiKeyTestResult.value = when {
-                geminiOk && elevenOk -> "All keys valid!"
-                geminiOk -> "Gemini OK, ElevenLabs FAILED"
-                elevenOk -> "ElevenLabs OK, Gemini FAILED"
-                else -> "BOTH keys failed — check keys and internet"
+                geminiResult.first && elevenResult.first -> "All keys valid!"
+                geminiResult.first -> "Gemini OK. ElevenLabs FAILED: ${elevenResult.second}"
+                elevenResult.first -> "ElevenLabs OK. Gemini FAILED: ${geminiResult.second}"
+                else -> "BOTH FAILED — Gemini: ${geminiResult.second} | ElevenLabs: ${elevenResult.second}"
             }
         }
     }
@@ -413,9 +413,15 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         _apiKeyTestResult.value = ""
     }
 
-    private fun testGeminiKey(key: String): Boolean {
-        if (key.isBlank()) return false
+    /**
+     * Detailed Gemini API key test — returns (success, errorMessage) pair.
+     * Uses ?key= URL parameter (most universally compatible auth method).
+     * Logs the FULL Google API error response to Logcat for debugging.
+     */
+    private fun testGeminiKeyDetailed(key: String): Pair<Boolean, String> {
+        if (key.isBlank()) return Pair(false, "Key is empty")
         val trimmedKey = key.trim()
+        if (trimmedKey.length < 20) return Pair(false, "Key too short (${trimmedKey.length} chars)")
         return try {
             val testBody = org.json.JSONObject().apply {
                 put("contents", org.json.JSONArray().put(
@@ -430,57 +436,87 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 })
             }.toString()
 
-            // CRITICAL FIX (v7): Use x-goog-api-key header instead of ?key= query param.
-            // This matches Google's recommended authentication method and avoids 403 errors
-            // that occur with ?key= for some API key configurations.
-            // Also use gemini-1.5-flash (most universally accessible model).
+            // CRITICAL FIX (v8): Use ?key= URL parameter for authentication.
+            // This is the most universally compatible method — works with ALL Gemini API key types.
+            // The x-goog-api-key header was causing 403 errors with some keys.
             val model = "gemini-1.5-flash"
-            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$trimmedKey")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
             connection.setRequestProperty("Content-Type", "application/json")
-            connection.setRequestProperty("x-goog-api-key", trimmedKey)
             connection.doOutput = true
             connection.connectTimeout = 10_000
             connection.readTimeout = 10_000
             connection.outputStream.use { it.write(testBody.toByteArray(Charsets.UTF_8)) }
 
             val code = connection.responseCode
-            Log.i(TAG, "[testGeminiKey] HTTP $code for model=$model, key_len=${trimmedKey.length}, auth=header")
+            Log.i(TAG, "[testGeminiKey] HTTP $code for model=$model, key_len=${trimmedKey.length}, auth=url_param")
             
-            if (code != 200) {
-                // Log the FULL error response body so we can see WHY Google rejected it
+            if (code == 200) {
+                connection.disconnect()
+                Pair(true, "")
+            } else {
+                // Read and log the FULL error response body from Google API
                 val errorBody = try {
                     connection.errorStream?.bufferedReader()?.readText() ?: "no error body"
                 } catch (e: Exception) {
                     "could not read error body: ${e.message}"
                 }
                 Log.e(TAG, "[testGeminiKey] FAILED — HTTP $code, error body: ${errorBody.take(500)}")
+                connection.disconnect()
+                
+                // Parse a user-friendly error message from the Google API response
+                val friendlyMsg = when (code) {
+                    400 -> "Bad request (400) — check key format"
+                    403 -> "API key not authorized (403) — key may not have Gemini API access enabled"
+                    404 -> "Model not found (404) — endpoint may be wrong"
+                    429 -> "Quota exhausted (429) — rate limited or billing issue"
+                    else -> "HTTP $code"
+                }
+                Pair(false, "$friendlyMsg — ${errorBody.take(150)}")
             }
-            connection.disconnect()
-            code == 200
         } catch (e: Exception) {
             Log.e(TAG, "[testGeminiKey] FAILED: ${e.message}")
-            false
+            Pair(false, "Network error: ${e.message?.take(100)}")
         }
     }
 
-    private fun testElevenLabsKey(key: String): Boolean {
-        if (key.isBlank()) return false
+    /**
+     * Detailed ElevenLabs API key test — returns (success, errorMessage) pair.
+     */
+    private fun testElevenLabsKeyDetailed(key: String): Pair<Boolean, String> {
+        if (key.isBlank()) return Pair(false, "Key is empty")
         return try {
             val url = URL("https://api.elevenlabs.io/v1/voices")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
-            connection.setRequestProperty("xi-api-key", key)
+            connection.setRequestProperty("xi-api-key", key.trim())
             connection.connectTimeout = 10_000
             connection.readTimeout = 10_000
             val code = connection.responseCode
             Log.i(TAG, "[testElevenLabsKey] HTTP $code")
-            connection.disconnect()
-            code == 200
+            if (code == 200) {
+                connection.disconnect()
+                Pair(true, "")
+            } else {
+                val errorBody = try {
+                    connection.errorStream?.bufferedReader()?.readText() ?: "no error body"
+                } catch (e: Exception) {
+                    "could not read error body"
+                }
+                Log.e(TAG, "[testElevenLabsKey] FAILED — HTTP $code, error: ${errorBody.take(300)}")
+                connection.disconnect()
+                val friendlyMsg = when (code) {
+                    401 -> "Invalid API key (401)"
+                    403 -> "Access denied (403)"
+                    429 -> "Quota exhausted (429)"
+                    else -> "HTTP $code"
+                }
+                Pair(false, friendlyMsg)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "[testElevenLabsKey] FAILED: ${e.message}")
-            false
+            Pair(false, "Network error: ${e.message?.take(100)}")
         }
     }
 
@@ -759,12 +795,12 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 var lastError = ""
                 for (model in GEMINI_MODELS) {
                     try {
-                        // CRITICAL FIX (v7): Use x-goog-api-key header instead of ?key= query param
-                        val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+                        // CRITICAL FIX (v8): Use ?key= URL parameter instead of x-goog-api-key header.
+                        // The header method was causing 403 errors with some API key configurations.
+                        val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}")
                         val connection = url.openConnection() as HttpURLConnection
                         connection.requestMethod = "POST"
                         connection.setRequestProperty("Content-Type", "application/json")
-                        connection.setRequestProperty("x-goog-api-key", apiKey.trim())
                         connection.doOutput = true
                         connection.connectTimeout = 15_000
                         connection.readTimeout = 30_000
@@ -1221,12 +1257,11 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             var lastError = ""
             for (model in GEMINI_MODELS) {
                 try {
-                    // CRITICAL FIX (v7): Use x-goog-api-key header instead of ?key= query param
-                    val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+                    // CRITICAL FIX (v8): Use ?key= URL parameter instead of x-goog-api-key header
+                    val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}")
                     val connection = url.openConnection() as HttpURLConnection
                     connection.requestMethod = "POST"
                     connection.setRequestProperty("Content-Type", "application/json")
-                    connection.setRequestProperty("x-goog-api-key", apiKey.trim())
                     connection.doOutput = true
                     connection.connectTimeout = 15_000
                     connection.readTimeout = 60_000

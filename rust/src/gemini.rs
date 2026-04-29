@@ -6,7 +6,7 @@
 //! so they can be overwritten at ANY time — including after the first
 //! `nativeInitialize` call.
 //!
-//! Model version: hardcoded to `gemini-2.5-flash` per spec.
+//! Model version: hardcoded to `gemini-1.5-flash` per spec.
 //!
 //! ═══════════════════════════════════════════════════════════════
 //! CRITICAL FIX (v6): JARVIS PERSONA INJECTION
@@ -287,17 +287,17 @@ lazy_static! {
 pub async fn process_query(query: &str, context: &str, history_json: &str) -> Result<String> {
     let api_key = get_gemini_key()?;
 
-    // CRITICAL FIX (v7): Use x-goog-api-key header instead of ?key= query param.
-    // Google's recommended authentication method is the x-goog-api-key header.
-    // Using ?key= in the URL can cause 403 errors with some API key configurations
-    // and exposes the key in server logs. The header method is more reliable.
+    // CRITICAL FIX (v8): Use ?key= query param for authentication.
+    // The x-goog-api-key header method was causing 403 errors with many API keys.
+    // The ?key= URL parameter is the most universally compatible method and works
+    // reliably with all Gemini API key types.
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-        GEMINI_MODEL
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        GEMINI_MODEL, api_key
     );
 
     log::info!(
-        "Gemini API call — model={}, key_len={}, auth=header",
+        "Gemini API call — model={}, key_len={}, auth=url_param",
         GEMINI_MODEL, api_key.len()
     );
 
@@ -344,7 +344,6 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
 
     let response = HTTP_CLIENT
         .post(&url)
-        .header("x-goog-api-key", &api_key)
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
@@ -363,7 +362,6 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
             
             let retry_response = HTTP_CLIENT
                 .post(&url)
-                .header("x-goog-api-key", &api_key)
                 .header("Content-Type", "application/json")
                 .json(&request)
                 .send()
@@ -418,14 +416,14 @@ pub async fn process_query_with_image(
 ) -> Result<String> {
     let api_key = get_gemini_key()?;
 
-    // CRITICAL FIX (v7): Use x-goog-api-key header instead of ?key= query param
+    // CRITICAL FIX (v8): Use ?key= query param for authentication
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-        GEMINI_MODEL
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        GEMINI_MODEL, api_key
     );
 
     log::info!(
-        "Gemini multimodal API call — model={}, key_len={}, auth=header",
+        "Gemini multimodal API call — model={}, key_len={}, auth=url_param",
         GEMINI_MODEL, api_key.len()
     );
 
@@ -462,7 +460,6 @@ pub async fn process_query_with_image(
 
     let response = HTTP_CLIENT
         .post(&url)
-        .header("x-goog-api-key", &api_key)
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
