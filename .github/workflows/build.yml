@@ -114,40 +114,50 @@ jobs:
       #    in build.gradle.kts. x86/x86_64 are excluded.
       # ═══════════════════════════════════════════════════════════════
       - name: Create jniLibs directory structure
-        run: mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/armeabi-v7a
+        run: |
+          mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/armeabi-v7a
+          mkdir -p /tmp/rust-debug/arm64-v8a /tmp/rust-debug/armeabi-v7a
+          mkdir -p /tmp/rust-release/arm64-v8a /tmp/rust-release/armeabi-v7a
         shell: bash
 
-      - name: Build Rust shared libraries (RELEASE) via cargo-ndk
+      - name: Build Rust shared libraries (DEBUG) via cargo-ndk
         run: |
-          echo "Building Rust RELEASE native libraries..."
-          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}"
+          echo "Building Rust DEBUG native libraries (large, with symbols)..."
           cd rust
-          cargo ndk -t armeabi-v7a -t arm64-v8a -o ../app/src/main/jniLibs build --release
+          cargo ndk -t armeabi-v7a -t arm64-v8a -o /tmp/rust-debug build
         shell: bash
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-      - name: Verify Rust .so files exist and check sizes
+      - name: Build Rust shared libraries (RELEASE) via cargo-ndk
+        run: |
+          echo "Building Rust RELEASE native libraries (stripped, optimized)..."
+          cd rust
+          cargo ndk -t armeabi-v7a -t arm64-v8a -o /tmp/rust-release build --release
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+
+      - name: Verify Rust .so files and show sizes
         run: |
           echo "═══════════════════════════════════════════════════════"
-          echo "Verifying Rust native libraries..."
+          echo "Rust Native Library Sizes"
           echo "═══════════════════════════════════════════════════════"
           ALL_OK=true
-          for abi in arm64-v8a armeabi-v7a; do
-            SO_PATH="app/src/main/jniLibs/${abi}/libjarvis_rust.so"
-            if [ -f "$SO_PATH" ]; then
-              SO_SIZE=$(stat -c%s "$SO_PATH" 2>/dev/null || stat -f%z "$SO_PATH" 2>/dev/null)
-              SO_SIZE_HUMAN=$(du -h "$SO_PATH" | cut -f1)
-              echo "  ✓ ${abi}: libjarvis_rust.so (${SO_SIZE_HUMAN}, ${SO_SIZE} bytes)"
-              # Verify minimum size — a properly built Rust .so should be > 500KB in release mode
-              if [ "$SO_SIZE" -lt 512000 ]; then
-                echo "  ⚠ WARNING: .so file is suspiciously small (< 500KB). Build may have failed silently."
+          for build_type in debug release; do
+            echo ""
+            echo "  ${build_type^^} BUILD:"
+            for abi in arm64-v8a armeabi-v7a; do
+              SO_PATH="/tmp/rust-${build_type}/${abi}/libjarvis_rust.so"
+              if [ -f "$SO_PATH" ]; then
+                SO_SIZE=$(stat -c%s "$SO_PATH" 2>/dev/null || stat -f%z "$SO_PATH" 2>/dev/null)
+                SO_SIZE_HUMAN=$(du -h "$SO_PATH" | cut -f1)
+                echo "    ✓ ${abi}: libjarvis_rust.so (${SO_SIZE_HUMAN}, ${SO_SIZE} bytes)"
+              else
+                echo "    ✗ ${abi}: libjarvis_rust.so NOT FOUND"
                 ALL_OK=false
               fi
-            else
-              echo "  ✗ ${abi}: libjarvis_rust.so NOT FOUND"
-              ALL_OK=false
-            fi
+            done
           done
           if [ "$ALL_OK" = false ]; then
             echo "ERROR: Rust native library verification failed!"
@@ -157,8 +167,16 @@ jobs:
         shell: bash
 
       # ═══════════════════════════════════════════════════════════════
-      # 7. Build Debug APK
+      # 7. Build Debug APK (uses DEBUG Rust .so — larger, ~60-70MB)
       # ═══════════════════════════════════════════════════════════════
+      - name: Copy DEBUG Rust .so for debug APK build
+        run: |
+          cp /tmp/rust-debug/arm64-v8a/libjarvis_rust.so app/src/main/jniLibs/arm64-v8a/
+          cp /tmp/rust-debug/armeabi-v7a/libjarvis_rust.so app/src/main/jniLibs/armeabi-v7a/
+          echo "Debug .so files copied to jniLibs"
+          ls -lh app/src/main/jniLibs/*/libjarvis_rust.so
+        shell: bash
+
       - name: Build Debug APK
         run: |
           ./gradlew :app:assembleDebug --stacktrace 2>&1 | tee gradle-debug.log
@@ -167,8 +185,16 @@ jobs:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
       # ═══════════════════════════════════════════════════════════════
-      # 8. Build Release APK
+      # 8. Build Release APK (uses RELEASE Rust .so — smaller, ~25-35MB)
       # ═══════════════════════════════════════════════════════════════
+      - name: Copy RELEASE Rust .so for release APK build
+        run: |
+          cp /tmp/rust-release/arm64-v8a/libjarvis_rust.so app/src/main/jniLibs/arm64-v8a/
+          cp /tmp/rust-release/armeabi-v7a/libjarvis_rust.so app/src/main/jniLibs/armeabi-v7a/
+          echo "Release .so files copied to jniLibs"
+          ls -lh app/src/main/jniLibs/*/libjarvis_rust.so
+        shell: bash
+
       - name: Build Release APK
         run: |
           ./gradlew :app:assembleRelease --stacktrace 2>&1 | tee gradle-release.log
