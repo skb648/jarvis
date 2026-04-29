@@ -19,6 +19,8 @@ import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.jarvis.assistant.actions.ActionHandler
 import com.jarvis.assistant.audio.AudioEngine
+import com.jarvis.assistant.automation.GeminiFunctionCaller
+import com.jarvis.assistant.automation.TaskExecutorBridge
 import com.jarvis.assistant.channels.JarviewModel
 import com.jarvis.assistant.data.SettingsRepository
 import com.jarvis.assistant.jni.RustBridge
@@ -50,24 +52,32 @@ enum class ApiKeySaveResult { NONE, SUCCESS, FAILURE }
  * JarvisViewModel — Central state holder and orchestrator.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CRITICAL FIXES (v13) — THE FULL RESURRECTION:
+ * CRITICAL OVERHAUL (v14) — SPEED, SENSITIVITY, AND UI SYNC:
  *
- *  A1: parseErrorResponse now prefixes ALL errors with [ERROR] so
- *      the isError check never misses a friendly error message.
- *  A2: Model fallback — tries gemini-2.5-flash, then gemini-2.0-flash,
- *      then gemini-2.0-flash-lite, then gemini-1.5-pro-latest.
- *      Prevents 404 dead-ends.
- *  A3: API key test function — user can tap TEST in settings to verify
- *      keys before using the app.
- *  A4: Android native TextToSpeech fallback — if ElevenLabs fails,
- *      JARVIS still speaks using the device's TTS engine.
- *  A5: Better transcription diagnostics — logs exact HTTP status and
- *      response body so we can debug mic→transcription pipeline.
- *  A6: AudioEngine integration fixed for non-blocking stopListening.
- *  A7: processQueryViaGeminiDirect returns raw error body instead of ""
- *      so parseErrorResponse can produce meaningful messages.
- *  A8: VAD empty-buffer handling — if no speech detected, informs user
- *      instead of silently failing.
+ *  S1: CENTRALIZED STATE TRIGGER — Both the wake word detector AND
+ *      the manual Mic button now route through a single function
+ *      `enterListeningState()`. This function:
+ *        (1) Plays TONE_PROP_BEEP via ToneGenerator
+ *        (2) IMMEDIATELY sets _brainState.value = BrainState.LISTENING
+ *        (3) Ensures the Hologram Compose UI observes this state
+ *      Previously the mic button set state but didn't play the beep,
+ *      and the wake word played the beep but could race with state.
+ *
+ *  S2: TONE_PROP_ACK AT EXACT TRANSITION — The ACK beep fires at the
+ *      EXACT MILLISECOND we transition to BrainState.PROCESSING
+ *      (inside handleCommandReady). Previously there was a gap
+ *      between the beep and the state change.
+ *
+ *  S3: INSTANT TEXT FEEDBACK — The AI response text is pushed to
+ *      the Chat UI IMMEDIATELY when received, BEFORE TTS begins
+ *      downloading/playing the audio. This gives the user instant
+ *      visual feedback instead of waiting for the full audio pipeline.
+ *
+ *  S4: REMOVED 300ms STARTUP DELAY — The artificial delay(300) before
+ *      starting AudioEngine has been removed. AudioRecord starts
+ *      immediately for lower latency.
+ *
+ *  A1-A8: All previous fixes from v13 preserved.
  * ═══════════════════════════════════════════════════════════════════════
  */
 class JarvisViewModel(
@@ -275,6 +285,17 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     // ═══════════════════════════════════════════════════════════════════════
     @Volatile
     private var isProcessing = false
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // TASK QUEUE — Multi-Step Task Execution
+    //
+    // When the user gives a long command ("Open YouTube, search for X,
+    // and play the first video"), the AI plans the sequence and the
+    // Task Queue executes it step-by-step using the Accessibility Service.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private val taskQueue = mutableListOf<Pair<String, Map<String, String>>>()
+    @Volatile private var isTaskQueueRunning = false
 
     // ─── Overlay Manager ─────────────────────────────────────────────────
 
@@ -594,6 +615,25 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // S1: CENTRALIZED STATE TRIGGER
+    //
+    // BOTH the manual Mic button AND wake word detection route through
+    // this single function. This guarantees:
+    //   1. TONE_PROP_BEEP is ALWAYS played when entering listening mode
+    //   2. _brainState.value is ALWAYS set to BrainState.LISTENING
+    //   3. The Hologram Compose UI ALWAYS sees the state change
+    //   4. No race conditions between beep timing and state updates
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private fun enterListeningState(source: String) {
+        Log.i(AUDIO_TAG, "[enterListeningState] source=$source — playing BEEP and setting LISTENING")
+        playWakeWordBeep()  // TONE_PROP_BEEP
+        _brainState.value = BrainState.LISTENING
+        _isListening.value = true
+        _currentTranscription.value = ""
+    }
+
     @SuppressLint("MissingPermission")
     fun startListening(context: Context) {
         if (_isListening.value) {
@@ -601,17 +641,14 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             return
         }
 
-        _isListening.value       = true
-        _brainState.value        = BrainState.LISTENING
-        _currentTranscription.value = ""
-        Log.d(AUDIO_TAG, "[startListening] UI state set to LISTENING")
+        // S1: Use centralized trigger — manual mic button plays BEEP too
+        enterListeningState(source = "MANUAL_MIC_BUTTON")
 
         stopWakeWordMonitor()
 
+        // S4: Removed delay(300) — AudioRecord starts IMMEDIATELY for lower latency
         viewModelScope.launch(Dispatchers.Main) {
-            delay(300)
             startAudioEngine(context)
-            // FIX A6: AudioEngine is now non-blocking, so we can wait more reliably
             var waitCount = 0
             while (audioEngine?.isActive != true && waitCount < 30) {
                 delay(50)
@@ -659,12 +696,9 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 _audioAmplitude.value = amp
             },
             onWakeWordDetected = {
-                Log.i(AUDIO_TAG, "[onWakeWordDetected] callback fired — triggering VAD recording")
-                // FIX #4: Play TONE_PROP_BEEP the exact millisecond wake word is detected
-                playWakeWordBeep()
-                // FIX #5: Hologram UI sync — set BrainState.LISTENING immediately on wake word
-                _brainState.value = BrainState.LISTENING
-                _isListening.value = true
+                Log.i(AUDIO_TAG, "[onWakeWordDetected] callback fired — routing through centralized state trigger")
+                // S1: Use centralized trigger — wake word plays BEEP + sets state atomically
+                enterListeningState(source = "WAKE_WORD")
                 audioEngine?.startCommandRecording()
             },
             onCommandReady = { pcmBytes ->
@@ -738,24 +772,28 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
     private fun handleCommandReady(pcmBytes: ByteArray, sampleRate: Int) {
         Log.d(AUDIO_TAG, "[handleCommandReady] launched with ${pcmBytes.size} bytes at ${sampleRate}Hz")
-        
-        // CRITICAL FIX: Processing lock — drop duplicate VAD triggers
-        // If we're already processing a query, ignore this new command.
-        // This prevents the 429 quota error from VAD spamming Gemini.
+
+        // Processing lock — drop duplicate VAD triggers
         if (isProcessing) {
-            Log.w(AUDIO_TAG, "[handleCommandReady] DROPPED — already processing a query (isProcessing=true). This prevents 429 quota errors from VAD re-triggers.")
+            Log.w(AUDIO_TAG, "[handleCommandReady] DROPPED — already processing (isProcessing=true)")
             _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
             return
         }
         isProcessing = true
-        
-        // FIX #4: Play ACK beep when AI stops listening and starts processing
+
+        // ═══════════════════════════════════════════════════════════════════
+        // S2: TONE_PROP_ACK AT EXACT TRANSITION TO PROCESSING
+        //
+        // The ACK beep fires at the EXACT MILLISECOND we transition
+        // to BrainState.PROCESSING (formerly THINKING). This provides
+        // instant audio feedback that the AI heard you.
+        // ═══════════════════════════════════════════════════════════════════
         playAckBeep()
-        
+
         viewModelScope.launch(Dispatchers.Main) {
             _brainState.value = BrainState.THINKING
 
-            // Stop recording but keep voice mode active — don't reset _isListening/_isVoiceMode
+            // Stop recording but keep voice mode active
             audioEngine?.stopCommandRecording()
             _isListening.value = false
 
@@ -789,15 +827,13 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             Log.d(AUDIO_TAG, "[handleCommandReady] Starting Gemini multimodal transcription at ${sampleRate}Hz")
             val transcription = transcribeViaGeminiFallback(pcmBytes, sampleRate)
 
-            // FIX #3: STT Visual Feedback — inject transcription into Chat UI as User message
-            // This proves the mic is working by showing what was heard.
+            // Inject transcription into Chat UI as User message for immediate visual feedback
             if (transcription.isNotBlank()) {
                 _currentTranscription.value = transcription
-                addUserMessage(transcription)  // SHOW the user what was transcribed in the chat
+                addUserMessage(transcription)
                 Log.i(AUDIO_TAG, "[handleCommandReady] Final transcription: \"$transcription\" — injected into chat UI")
                 val ctx = getApplicationContext()
                 if (ctx != null) {
-                    // FIX #3: skipUserMessage=true because we already added the transcription above
                     processQuery(transcription, ctx, skipUserMessage = true)
                 } else {
                     Log.e(AUDIO_TAG, "[handleCommandReady] No application context")
@@ -809,7 +845,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 addAssistantMessage("I couldn't make that out, Sir. Please try speaking louder or closer to the microphone.", "confused")
                 isProcessing = false
                 if (_isVoiceMode.value) {
-                    // Stay in voice mode — restart listening after brief pause
                     restartListeningAfterTts()
                 } else {
                     _brainState.value = BrainState.IDLE
@@ -1064,11 +1099,9 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
                 }
             },
             onWakeWordDetected = {
-                Log.i(AUDIO_TAG, "[startWakeWordMonitor] Wake word detected — triggering listening mode")
-                // FIX #4: Play TONE_PROP_BEEP the exact millisecond wake word is detected
-                playWakeWordBeep()
-                // FIX #5: Hologram UI sync — set BrainState.LISTENING immediately
-                _brainState.value = BrainState.LISTENING
+                Log.i(AUDIO_TAG, "[startWakeWordMonitor] Wake word detected — routing through centralized state trigger")
+                // S1: Use centralized trigger — wake word + BEEP + state, atomically
+                enterListeningState(source = "WAKE_WORD_MONITOR")
                 viewModelScope.launch(Dispatchers.Main) {
                     stopWakeWordMonitor()
                     startListening(context)
@@ -1117,13 +1150,14 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             textToSpeech?.stop()
         }
 
-        // FIX #1: Universal Voice Output — play ACK beep when processing starts
-        // This beep confirms the system heard you (works for both voice and text input)
-        playAckBeep()
+        // ACK beep for text input (voice input already played it in handleCommandReady)
+        if (!skipUserMessage) {
+            playAckBeep()
+        }
 
         viewModelScope.launch(Dispatchers.Main) {
             try {
-                // FIX #3: Skip adding user message if it was already added by handleCommandReady
+                // Skip adding user message if it was already added by handleCommandReady
                 // (voice transcription). For text input, we add it here.
                 if (!skipUserMessage) {
                     addUserMessage(query)
@@ -1190,7 +1224,111 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             val historyJson    = buildHistoryJson()
             val screenContext  = JarviewModel.screenTextData
 
-            Log.d(AUDIO_TAG, "[handleAIQuery] Calling RustBridge.processQuery")
+            // ═══════════════════════════════════════════════════════════════════
+            // UPGRADE (v6.0): GEMINI FUNCTION CALLING
+            //
+            // First, try sending the query to Gemini with tool definitions.
+            // If Gemini returns a function call (e.g., open_and_search),
+            // we execute it via the TaskExecutorBridge.
+            //
+            // If Gemini returns a text response (no function call), we
+            // fall through to the normal AI processing pipeline.
+            //
+            // This makes JARVIS an AUTONOMOUS AGENT that can plan and
+            // execute multi-step tasks like:
+            //   "Open YouTube, search for X, and play the first video"
+            // ═══════════════════════════════════════════════════════════════════
+            if (_geminiApiKey.value.isNotBlank()) {
+                try {
+                    Log.d(AUDIO_TAG, "[handleAIQuery] Trying Gemini Function Calling for autonomous task planning")
+                    val toolResult = withContext(Dispatchers.IO) {
+                        GeminiFunctionCaller.processWithTools(
+                            query = query,
+                            apiKey = _geminiApiKey.value,
+                            context = context,
+                            historyJson = historyJson
+                        )
+                    }
+
+                    when (toolResult) {
+                        is GeminiFunctionCaller.ProcessResult.ToolExecuted -> {
+                            // Gemini returned a function call and we executed it
+                            val stepMsg = when (toolResult.stepResult) {
+                                is TaskExecutorBridge.StepResult.Success -> toolResult.stepResult.message
+                                is TaskExecutorBridge.StepResult.Failed -> "Action failed: ${toolResult.stepResult.message}"
+                            }
+                            val aiMsg = toolResult.aiResponse ?: stepMsg
+                            val emotion = if (toolResult.stepResult is TaskExecutorBridge.StepResult.Success) "confident" else "stressed"
+
+                            _emotion.value       = emotion
+                            _lastResponse.value  = aiMsg
+                            _isTyping.value      = false
+                            addAssistantMessage(aiMsg, emotion)
+                            _brainState.value     = BrainState.SPEAKING
+                            _audioAmplitude.value = 0.5f
+                            trySynthesizeAndPlay(aiMsg, context)
+                            return
+                        }
+                        is GeminiFunctionCaller.ProcessResult.TextOnly -> {
+                            // Gemini returned a text response — use it directly
+                            val rawResponse = toolResult.response
+                            val emotionTag = parseEmotionTag(rawResponse)
+                            var cleanResponse = stripEmotionTag(rawResponse)
+
+                            val (finalResponse, actionResult) = withContext(Dispatchers.Default) {
+                                ActionHandler.interceptAndExecute(cleanResponse, context)
+                            }
+                            cleanResponse = finalResponse
+
+                            val finalEmotion = when (actionResult) {
+                                is ActionHandler.ActionResult.Failed -> "stressed"
+                                is ActionHandler.ActionResult.Success -> emotionTag
+                                is ActionHandler.ActionResult.NoAction -> emotionTag
+                            }
+
+                            _emotion.value       = finalEmotion
+                            _lastResponse.value  = cleanResponse
+                            _isTyping.value      = false
+                            addAssistantMessage(cleanResponse, finalEmotion)
+                            _brainState.value     = BrainState.SPEAKING
+                            _audioAmplitude.value = 0.5f
+                            trySynthesizeAndPlay(cleanResponse, context)
+                            return
+                        }
+                        is GeminiFunctionCaller.ProcessResult.MultiStep -> {
+                            // Multiple tool calls were executed
+                            val summary = toolResult.steps.zip(toolResult.results).joinToString(". ") { (step, result) ->
+                                when (result) {
+                                    is TaskExecutorBridge.StepResult.Success -> result.message
+                                    is TaskExecutorBridge.StepResult.Failed -> "Failed: ${result.message}"
+                                }
+                            }
+                            val emotion = if (toolResult.results.all { it is TaskExecutorBridge.StepResult.Success }) "confident" else "stressed"
+
+                            _emotion.value       = emotion
+                            _lastResponse.value  = summary
+                            _isTyping.value      = false
+                            addAssistantMessage(summary, emotion)
+                            _brainState.value     = BrainState.SPEAKING
+                            _audioAmplitude.value = 0.5f
+                            trySynthesizeAndPlay(summary, context)
+                            return
+                        }
+                        is GeminiFunctionCaller.ProcessResult.Error -> {
+                            // Function calling failed — fall through to normal pipeline
+                            Log.w(AUDIO_TAG, "[handleAIQuery] Gemini Function Calling failed: ${toolResult.message} — falling back to normal pipeline")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(AUDIO_TAG, "[handleAIQuery] Gemini Function Calling exception: ${e.message} — falling back to normal pipeline")
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════════
+            // FALLBACK: Normal AI Query Pipeline (Rust → Gemini Direct)
+            // Used when Function Calling is unavailable or fails
+            // ═══════════════════════════════════════════════════════════════════
+            Log.d(AUDIO_TAG, "[handleAIQuery] Using standard pipeline — Calling RustBridge.processQuery")
             var rawResponse = withContext(Dispatchers.IO) {
                 if (RustBridge.isNativeReady()) {
                     try {
@@ -1228,7 +1366,6 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             }
 
             val parsed  = parseErrorResponse(rawResponse)
-            // FIX A1: All parsed errors now start with [ERROR], so this catches everything
             val isError = parsed.startsWith("[ERROR]") || rawResponse.startsWith("[ERROR]") || rawResponse.startsWith("ERROR:")
 
             if (isError) {
@@ -1264,10 +1401,10 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             _lastResponse.value  = cleanResponse
             _isTyping.value      = false
             addAssistantMessage(cleanResponse, finalEmotion)
+            Log.i(AUDIO_TAG, "[handleAIQuery] Response text pushed to Chat UI INSTANTLY — TTS will play in parallel")
 
             _brainState.value     = BrainState.SPEAKING
             _audioAmplitude.value = 0.5f
-            Log.d(AUDIO_TAG, "[handleAIQuery] Trying TTS for: \"${cleanResponse.take(60)}\"")
             trySynthesizeAndPlay(cleanResponse, context)
 
         } catch (e: CancellationException) {

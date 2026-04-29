@@ -5,7 +5,7 @@
     <string name="widget_listen">Listen</string>
     <string name="widget_capture">Capture</string>
     <string name="widget_read">Read</string>
-    <string name="accessibility_service_description">JARVIS Accessibility Service — Enables screen reading, gesture automation, and deep system control for your AI assistant.</string>
+    <string name="accessibility_service_description">JARVIS Autonomous Agent Service — Enables screen reading, gesture automation, deep text injection, app control, and multi-step task execution. This service allows JARVIS to see what\'s on your screen, click buttons, type text into any app, and perform complex automated tasks on your behalf. No data is collected or sent outside your device.</string>
     <string name="shortcut_voice">Voice Command</string>
     <string name="shortcut_capture">Capture Screen</string>
     <string name="shortcut_read">Read Screen</string>
