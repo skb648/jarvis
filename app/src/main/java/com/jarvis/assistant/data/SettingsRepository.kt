@@ -110,10 +110,12 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    // ─── Blocking read (for Application.onCreate) ────────────────
+    // ─── Blocking read (for Application.onCreate / BroadcastReceiver) ───
 
     fun getGeminiApiKeyBlocking(): String = readStringBlocking(GEMINI_API_KEY, "")
     fun getElevenLabsApiKeyBlocking(): String = readStringBlocking(ELEVENLABS_API_KEY, "")
+    fun isWakeWordEnabledBlocking(): Boolean = readBooleanBlocking(WAKE_WORD_ENABLED, false)
+    fun isKeepAliveEnabledBlocking(): Boolean = readBooleanBlocking(KEEP_ALIVE_ENABLED, false)
 
     // ─── Internal Helpers ────────────────────────────────────────
 
@@ -134,6 +136,16 @@ class SettingsRepository(private val context: Context) {
     }
 
     private fun readStringBlocking(key: Preferences.Key<String>, default: String): String {
+        return runBlocking {
+            try {
+                context.dataStore.data.map { it[key] ?: default }.first()
+            } catch (e: Exception) {
+                default
+            }
+        }
+    }
+
+    private fun readBooleanBlocking(key: Preferences.Key<Boolean>, default: Boolean): Boolean {
         return runBlocking {
             try {
                 context.dataStore.data.map { it[key] ?: default }.first()

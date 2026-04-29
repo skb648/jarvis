@@ -20,32 +20,29 @@ import kotlin.math.sqrt
  * AudioEngine — Production-grade silent audio capture engine WITH VAD.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CRITICAL OVERHAUL (v14) — SPEED, SENSITIVITY, AND STABILITY:
+ * CRITICAL OVERHAUL (v15) — ULTRA-SENSITIVE MIC / JARVIS HEARING:
  *
- *  G1: SOFTWARE GAIN BOOST — The raw AudioRecord input is too quiet
- *      for normal speaking volumes on many devices. A configurable
- *      SOFTWARE_GAIN multiplier (default 2.5x) is now applied to
- *      PCM samples BEFORE the VAD and STT pipeline ever sees them.
- *      This makes the mic "hear" normal speaking volume without
- *      requiring the user to shout. Clipping protection is built-in.
+ *  G1: SOFTWARE GAIN BOOST 4.0x — Increased from 2.5x to 4.0x.
+ *      A whisper at 0.003 RMS becomes 0.012 after gain, which now
+ *      crosses the lowered SPEECH_THRESHOLD of 0.008. Clipping
+ *      protection is built-in and AGC further adapts per-frame.
  *
- *  G2: FAST VAD CUTOFF (700ms) — The previous silence timeout of
- *      1500ms caused massive latency after the user stopped speaking.
- *      Reduced to exactly 700ms. The moment the user pauses for
- *      0.7 seconds, recording STOPS and the API request fires
- *      IMMEDIATELY. This eliminates the "waiting too long" problem.
+ *  G2: SILENCE_TIMEOUT 1200ms — Increased from 700ms. The old
+ *      700ms cutoff was murdering slow speakers and people who
+ *      pause between words. 1200ms gives natural speech rhythm
+ *      room to breathe while still being responsive.
  *
  *  G3: CRASH-PROOF AudioRecord LIFECYCLE — The AudioRecord read loop
- *      is now wrapped in a strict try-finally block. Regardless of
+ *      is wrapped in a strict try-finally block. Regardless of
  *      how the loop exits (normal, exception, cancellation), the
  *      AudioRecord.stop() and release() are ALWAYS called in the
  *      finally block. This prevents silent hardware locks, orphaned
  *      mic instances, and random out-of-sync beeps.
  *
- *  G4: LOWERED VAD THRESHOLDS — With software gain boosting signal,
- *      the speech/silence thresholds have been re-tuned so the VAD
- *      triggers more responsively on normal-volume speech without
- *      false-triggering on background noise.
+ *  G4: LOWERED VAD THRESHOLDS — Speech threshold lowered to 0.008
+ *      and silence threshold to 0.004. These catch much quieter
+ *      speech. Combined with 4x gain and AGC, JARVIS can now hear
+ *      whispers that were previously invisible.
  *
  *  G5: ATOMIC command buffer flush — Uses a dedicated buffer swap
  *      instead of synchronizedList to eliminate race conditions
@@ -53,6 +50,31 @@ import kotlin.math.sqrt
  *
  *  G6: Added isCommandBufferReady flag so ViewModel knows when a
  *      command was actually captured vs. empty buffer.
+ *
+ *  G7: MIC AUDIO SOURCE PRIMARY — Changed from VOICE_COMMUNICATION
+ *      to MIC as the primary audio source. VOICE_COMMUNICATION
+ *      applies hardware AEC (Acoustic Echo Cancellation) and NS
+ *      (Noise Suppression) that MUFFLE quiet speech and whispers.
+ *      The MIC source gives raw, unprocessed audio that captures
+ *      the full dynamic range. VOICE_COMMUNICATION is kept as a
+ *      fallback only for devices where MIC source is unavailable.
+ *
+ *  G8: SOFTWARE AGC (Automatic Gain Control) — After applying the
+ *      base SOFTWARE_GAIN, each frame's RMS is analyzed. If still
+ *      below 0.01 after gain, an additional boost (up to 8x) is
+ *      applied for that frame. If RMS is above 0.5, gain is
+ *      reduced to prevent clipping. This makes JARVIS adapt to
+ *      the speaker's volume in real-time — whispers get cranked,
+ *      shouts get dialed back.
+ *
+ *  G9: NOISE GATE — If the post-gain RMS is below NOISE_GATE_THRESHOLD
+ *      (0.002f), the frame is skipped entirely for VAD processing.
+ *      This prevents false VAD triggers from ambient background noise
+ *      while letting even the quietest speech through.
+ *
+ *  G10: MAX_CMD_SECONDS 30 — Increased from 15 for long dictation.
+ *       MIN_RECORDING_MS reduced to 300ms so even very short
+ *       utterances are captured.
  * ═══════════════════════════════════════════════════════════════════════
  */
 class AudioEngine(
@@ -74,30 +96,44 @@ class AudioEngine(
         private const val FRAME_SAMPLES   = 2_048
         private const val FRAME_BYTES     = FRAME_SAMPLES * 2
 
-        private const val MAX_CMD_SECONDS = 15
+        // G10: Increased from 15 for long dictation commands
+        private const val MAX_CMD_SECONDS = 30
         private const val SILENCE_FLOOR   = 0.003f
 
-        // ── G1: SOFTWARE GAIN ────────────────────────────────────────────
-        // Multiplier applied to every PCM sample to boost quiet mic input.
-        // 2.5x makes normal speaking volume clearly audible to VAD/STT
-        // without introducing excessive clipping on louder inputs.
-        // Clipping protection: samples are clamped to [-32768, 32767].
-        private const val SOFTWARE_GAIN = 2.5f
+        // ── G1: SOFTWARE GAIN 4.0x ─────────────────────────────────────
+        // Increased from 2.5x to 4.0x. With 4x gain, a whisper at
+        // 0.003 RMS becomes 0.012 which crosses SPEECH_THRESHOLD (0.008).
+        // Clipping protection is built-in, and AGC further adapts.
+        private const val SOFTWARE_GAIN = 4.0f
 
-        // ── G2: FAST VAD CUTOFF ──────────────────────────────────────────
-        // Exactly 700ms silence → IMMEDIATE stop + fire API request.
-        // Previous value was 1500ms which caused agonizing latency.
-        private const val SILENCE_TIMEOUT_MS  = 700L
+        // ── G2: SILENCE TIMEOUT ────────────────────────────────────────
+        // Increased from 700ms to 1200ms. 700ms was cutting off slow
+        // speakers and people who pause between words.
+        private const val SILENCE_TIMEOUT_MS  = 1200L
 
-        // ── G4: RE-TUNED THRESHOLDS (with gain boost) ────────────────────
-        // These thresholds operate on GAIN-BOOSTED audio, so they can be
-        // slightly higher than v13 to avoid false positives while still
-        // being much more sensitive than the pre-gain values.
-        private const val SPEECH_THRESHOLD    = 0.012f
-        private const val SILENCE_THRESHOLD   = 0.007f
-        private const val MIN_RECORDING_MS    = 400L   // Slightly reduced from 500ms for faster response
+        // ── G4: LOWERED VAD THRESHOLDS (with 4x gain boost) ────────────
+        // These thresholds operate on GAIN-BOOSTED + AGC-processed audio.
+        // Lowered significantly to catch whispers and quiet speech.
+        private const val SPEECH_THRESHOLD    = 0.008f   // was 0.012f
+        private const val SILENCE_THRESHOLD   = 0.004f   // was 0.007f
+
+        // G10: Reduced from 400ms so even very short utterances are captured
+        private const val MIN_RECORDING_MS    = 300L
 
         private const val RMS_SMOOTHING   = 0.3f
+
+        // ── G9: NOISE GATE ─────────────────────────────────────────────
+        // If post-gain RMS is below this, the frame is just background
+        // noise — skip it entirely to prevent false VAD triggers.
+        private const val NOISE_GATE_THRESHOLD = 0.002f
+
+        // ── G8: AGC (Automatic Gain Control) parameters ────────────────
+        // After SOFTWARE_GAIN is applied, if RMS is still below
+        // AGC_TARGET_LOW, an additional boost (up to AGC_MAX_BOOST)
+        // is applied. If RMS is above AGC_TARGET_HIGH, gain is reduced.
+        private const val AGC_TARGET_LOW   = 0.01f
+        private const val AGC_TARGET_HIGH  = 0.5f
+        private const val AGC_MAX_BOOST    = 8.0f   // Maximum additional boost multiplier
 
         private const val AR_ERROR_INVALID_OPERATION = -3
         private const val AR_ERROR_BAD_VALUE        = -2
@@ -107,7 +143,8 @@ class AudioEngine(
         // Software wake word detection constants
         private const val SW_WAKE_MIN_FRAMES_ABOVE = 5
         private const val SW_WAKE_MAX_FRAMES_WINDOW = 30
-        private const val SW_WAKE_SPEECH_THRESHOLD = 0.030f  // Adjusted for gain
+        // Lowered from 0.030f so wake word triggers on quieter speech
+        private const val SW_WAKE_SPEECH_THRESHOLD = 0.020f
         private const val SW_WAKE_COOLDOWN_FRAMES = 150
     }
 
@@ -179,7 +216,7 @@ class AudioEngine(
                 return@launch
             }
 
-            Log.i(TAG, "[startListening] AudioRecord STARTED  source=${ar.audioSource}  sampleRate=$activeSampleRate  bufSize=${ar.bufferSizeInFrames * 2}  state=${ar.state}  gain=${SOFTWARE_GAIN}x  silenceTimeout=${SILENCE_TIMEOUT_MS}ms")
+            Log.i(TAG, "[startListening] AudioRecord STARTED  source=${ar.audioSource}  sampleRate=$activeSampleRate  bufSize=${ar.bufferSizeInFrames * 2}  state=${ar.state}  gain=${SOFTWARE_GAIN}x  silenceTimeout=${SILENCE_TIMEOUT_MS}ms  agcMaxBoost=${AGC_MAX_BOOST}x  noiseGate=${NOISE_GATE_THRESHOLD}")
 
             // ══════════════════════════════════════════════════════════════
             // G3: CRASH-PROOF READ LOOP — strict try-finally
@@ -226,11 +263,17 @@ class AudioEngine(
                     zeroReadCounter = 0
 
                     // ── G1: APPLY SOFTWARE GAIN BEFORE ANY PROCESSING ──────
-                    // Multiply every 16-bit PCM sample by SOFTWARE_GAIN.
+                    // Multiply every 16-bit PCM sample by SOFTWARE_GAIN (4.0x).
                     // This happens BEFORE the rawAudioFlow, VAD, RMS,
                     // wake word detection, and command buffer — everything
                     // downstream sees the amplified signal.
-                    val frame = applySoftwareGain(readBuf, read)
+                    var frame = applySoftwareGain(readBuf, read)
+
+                    // ── G8: APPLY AGC (Automatic Gain Control) ─────────────
+                    // After base gain, analyze RMS and adaptively boost or
+                    // reduce per-frame. Whispers get cranked up to 8x extra,
+                    // loud speech gets dialed back to prevent clipping.
+                    frame = applyAgc(frame)
 
                     rawAudioFlow?.tryEmit(frame)
 
@@ -238,11 +281,20 @@ class AudioEngine(
                     smoothedRms = RMS_SMOOTHING * rawAmp + (1f - RMS_SMOOTHING) * smoothedRms
 
                     if (frameCounter % 22L == 0L) {
-                        Log.d(TAG, "[startListening] RMS Amplitude: raw=$rawAmp smoothed=$smoothedRms read=$read bytes gain=${SOFTWARE_GAIN}x")
+                        Log.d(TAG, "[startListening] RMS Amplitude: raw=$rawAmp smoothed=$smoothedRms read=$read bytes gain=${SOFTWARE_GAIN}x+AGC")
                     }
                     frameCounter++
 
                     withContext(Dispatchers.Main) { onAmplitudeUpdate(smoothedRms) }
+
+                    // ── G9: NOISE GATE ──────────────────────────────────────
+                    // If the post-gain+AGC RMS is below NOISE_GATE_THRESHOLD,
+                    // this frame is just background noise. Skip VAD and
+                    // recording logic to prevent false triggers, but keep
+                    // the loop alive for the next frame.
+                    if (rawAmp < NOISE_GATE_THRESHOLD) {
+                        continue
+                    }
 
                     if (isRecordingCommand) {
                         // G5: Synchronized buffer append
@@ -268,9 +320,9 @@ class AudioEngine(
 
                             if (vadState == VadState.SILENCE_AFTER_SPEECH) {
                                 val silenceDuration = System.currentTimeMillis() - silenceStartTime
-                                // G2: 700ms cutoff — IMMEDIATE flush
+                                // G2: 1200ms cutoff — gives natural speech rhythm room
                                 if (silenceDuration >= SILENCE_TIMEOUT_MS) {
-                                    Log.i(TAG, "[VAD] End-of-speech confirmed (silence=${silenceDuration}ms, recording=${recordingDuration}ms) — IMMEDIATELY flushing command")
+                                    Log.i(TAG, "[VAD] End-of-speech confirmed (silence=${silenceDuration}ms, recording=${recordingDuration}ms) — flushing command")
                                     flushCommandBuffer()
                                 }
                             }
@@ -340,11 +392,11 @@ class AudioEngine(
     /**
      * G1: Apply software gain to PCM audio buffer.
      *
-     * Multiplies each 16-bit PCM sample by [SOFTWARE_GAIN], then clamps
+     * Multiplies each 16-bit PCM sample by [SOFTWARE_GAIN] (4.0x), then clamps
      * the result to the valid 16-bit signed range [-32768, 32767].
      *
      * This boosts quiet microphone input so VAD and STT can hear
-     * normal speaking volumes without the user needing to shout.
+     * normal speaking volumes and whispers without the user needing to shout.
      *
      * The gain is applied IN-PLACE on a COPY of the buffer so the
      * original AudioRecord buffer is not modified (some Android
@@ -375,6 +427,71 @@ class AudioEngine(
     }
 
     /**
+     * G8: Software AGC (Automatic Gain Control).
+     *
+     * After the base SOFTWARE_GAIN is applied, this function analyzes
+     * the frame's RMS and applies an additional adaptive gain:
+     *
+     *   - If RMS < AGC_TARGET_LOW (0.01): Apply additional boost to bring
+     *     the signal up. The boost is calculated as (AGC_TARGET_LOW / rms)
+     *     but capped at AGC_MAX_BOOST (8.0x). This ensures whispers are
+     *     amplified to a level where VAD and STT can process them.
+     *
+     *   - If RMS > AGC_TARGET_HIGH (0.5): Reduce gain to prevent clipping
+     *     and distortion. The reduction factor is (AGC_TARGET_HIGH / rms).
+     *
+     *   - If RMS is in the sweet spot [0.01, 0.5]: No additional gain.
+     *
+     * @param frame PCM frame after base SOFTWARE_GAIN has been applied
+     * @return A new ByteArray with AGC-adjusted gain applied
+     */
+    private fun applyAgc(frame: ByteArray): ByteArray {
+        val currentRms = rms(frame)
+
+        // If RMS is in the sweet spot, no AGC adjustment needed
+        if (currentRms in AGC_TARGET_LOW..AGC_TARGET_HIGH) {
+            return frame
+        }
+
+        // Calculate adaptive gain factor
+        val agcGain: Float = when {
+            currentRms < AGC_TARGET_LOW -> {
+                // Signal too quiet — boost it
+                // Target: bring RMS up to AGC_TARGET_LOW
+                if (currentRms > 0.0001f) {
+                    (AGC_TARGET_LOW / currentRms).coerceAtMost(AGC_MAX_BOOST)
+                } else {
+                    // Extremely quiet — apply max boost
+                    AGC_MAX_BOOST
+                }
+            }
+            currentRms > AGC_TARGET_HIGH -> {
+                // Signal too loud — reduce it
+                // Target: bring RMS down to AGC_TARGET_HIGH
+                AGC_TARGET_HIGH / currentRms
+            }
+            else -> 1.0f // Should not reach here due to range check above
+        }
+
+        // Apply AGC gain to each sample with clipping protection
+        val samples = frame.size / 2
+        val adjusted = ByteArray(frame.size)
+
+        for (i in 0 until samples) {
+            val lo = frame[i * 2].toInt() and 0xFF
+            val hi = frame[i * 2 + 1].toInt()
+            val sample = (hi shl 8) or lo  // Signed 16-bit
+
+            val adjustedSample = (sample * agcGain).toInt().coerceIn(-32768, 32767)
+
+            adjusted[i * 2]     = (adjustedSample and 0xFF).toByte()
+            adjusted[i * 2 + 1] = ((adjustedSample shr 8) and 0xFF).toByte()
+        }
+
+        return adjusted
+    }
+
+    /**
      * G3: Safely stop and release an AudioRecord instance.
      *
      * Catches ALL exceptions (IllegalStateException, RuntimeException)
@@ -401,6 +518,15 @@ class AudioEngine(
         }
     }
 
+    /**
+     * G7: Create AudioRecord with MIC source as PRIMARY.
+     *
+     * The MIC audio source provides raw, unprocessed audio that captures
+     * the full dynamic range including whispers and quiet speech.
+     * VOICE_COMMUNICATION applies hardware AEC (Acoustic Echo Cancellation)
+     * and NS (Noise Suppression) that MUFFLE quiet speech and should
+     * only be used as a fallback.
+     */
     private fun createAudioRecordForSampleRate(sampleRate: Int): AudioRecord? {
         Log.d(TAG, "[createAudioRecord] Trying sampleRate=$sampleRate")
         val minBuf = AudioRecord.getMinBufferSize(sampleRate, CHANNEL_CONFIG, AUDIO_FORMAT)
@@ -411,24 +537,7 @@ class AudioEngine(
         val bufSize = maxOf(minBuf, FRAME_BYTES) * 4
         Log.d(TAG, "[createAudioRecord] minBuf=$minBuf finalBufSize=$bufSize")
 
-        try {
-            val ar = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                sampleRate,
-                CHANNEL_CONFIG,
-                AUDIO_FORMAT,
-                bufSize
-            )
-            if (ar.state == AudioRecord.STATE_INITIALIZED) {
-                Log.i(TAG, "[createAudioRecord] SUCCESS: VOICE_COMMUNICATION @ $sampleRate Hz")
-                return ar
-            }
-            Log.w(TAG, "[createAudioRecord] VOICE_COMMUNICATION not initialized @ $sampleRate Hz")
-            ar.release()
-        } catch (e: Exception) {
-            Log.w(TAG, "[createAudioRecord] VOICE_COMMUNICATION failed @ $sampleRate Hz: ${e.message}")
-        }
-
+        // G7: Try MIC source FIRST — raw, unprocessed audio captures whispers
         try {
             val ar = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
@@ -438,13 +547,33 @@ class AudioEngine(
                 bufSize
             )
             if (ar.state == AudioRecord.STATE_INITIALIZED) {
-                Log.i(TAG, "[createAudioRecord] SUCCESS: MIC @ $sampleRate Hz (fallback)")
+                Log.i(TAG, "[createAudioRecord] SUCCESS: MIC @ $sampleRate Hz (primary — raw audio, no hardware AEC/NS)")
                 return ar
             }
-            Log.e(TAG, "[createAudioRecord] MIC also failed @ $sampleRate Hz")
+            Log.w(TAG, "[createAudioRecord] MIC not initialized @ $sampleRate Hz")
             ar.release()
         } catch (e: Exception) {
-            Log.e(TAG, "[createAudioRecord] MIC threw @ $sampleRate Hz: ${e.message}")
+            Log.w(TAG, "[createAudioRecord] MIC failed @ $sampleRate Hz: ${e.message}")
+        }
+
+        // G7: Fallback to VOICE_COMMUNICATION — has hardware AEC/NS that
+        // may muffle quiet speech, but better than no audio at all
+        try {
+            val ar = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                sampleRate,
+                CHANNEL_CONFIG,
+                AUDIO_FORMAT,
+                bufSize
+            )
+            if (ar.state == AudioRecord.STATE_INITIALIZED) {
+                Log.i(TAG, "[createAudioRecord] SUCCESS: VOICE_COMMUNICATION @ $sampleRate Hz (fallback — hardware AEC/NS active, may muffle whispers)")
+                return ar
+            }
+            Log.e(TAG, "[createAudioRecord] VOICE_COMMUNICATION also failed @ $sampleRate Hz")
+            ar.release()
+        } catch (e: Exception) {
+            Log.e(TAG, "[createAudioRecord] VOICE_COMMUNICATION threw @ $sampleRate Hz: ${e.message}")
         }
 
         return null
@@ -551,7 +680,7 @@ class AudioEngine(
             for (f in frames) { f.copyInto(out, off); off += f.size }
             val durationSec = out.size.toFloat() / (SAMPLE_RATE_PRIMARY * 2)
             isCommandBufferReady = true
-            Log.i(TAG, "[flushCommandBuffer] Command flushed: ${out.size} bytes (~${"%.1f".format(durationSec)}s of PCM, gain=${SOFTWARE_GAIN}x) — delivering to onCommandReady")
+            Log.i(TAG, "[flushCommandBuffer] Command flushed: ${out.size} bytes (~${"%.1f".format(durationSec)}s of PCM, gain=${SOFTWARE_GAIN}x+AGC) — delivering to onCommandReady")
             withContext(Dispatchers.Main) { onCommandReady(out) }
             Log.d(TAG, "[flushCommandBuffer] onCommandReady delivered on Main thread")
         }

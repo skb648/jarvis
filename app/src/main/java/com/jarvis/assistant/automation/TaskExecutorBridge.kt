@@ -67,6 +67,7 @@ object TaskExecutorBridge {
             "go_back" -> executeGoBack()
             "go_home" -> executeGoHome()
             "open_app" -> executeOpenApp(args, context)
+            "search_playstore" -> executeSearchPlayStore(args, context)
             else -> StepResult.Failed("Unknown tool: $toolName")
         }
     }
@@ -347,6 +348,38 @@ object TaskExecutorBridge {
             StepResult.Success("Opened $app")
         } else {
             StepResult.Failed("Could not open $app")
+        }
+    }
+
+    /**
+     * search_playstore — Search for an app on Google Play Store.
+     * Uses the Play Store's search URI scheme to open directly
+     * to search results for the given query.
+     */
+    private fun executeSearchPlayStore(args: Map<String, String>, context: Context): StepResult {
+        val query = args["query"]?.trim() ?: return StepResult.Failed("Missing 'query' argument")
+        return try {
+            val uri = Uri.parse("market://search?q=${Uri.encode(query)}")
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            Log.i(TAG, "[searchPlayStore] Opened Play Store search for: $query")
+            StepResult.Success("Opened Play Store searching for '$query'")
+        } catch (e: Exception) {
+            // Fallback: open Play Store via web URL if market:// URI fails
+            try {
+                val webUri = Uri.parse("https://play.google.com/store/search?q=${Uri.encode(query)}")
+                val webIntent = Intent(Intent.ACTION_VIEW, webUri).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(webIntent)
+                Log.i(TAG, "[searchPlayStore] Opened Play Store via web for: $query")
+                StepResult.Success("Opened Play Store (web) searching for '$query'")
+            } catch (e2: Exception) {
+                Log.e(TAG, "[searchPlayStore] Failed: ${e2.message}")
+                StepResult.Failed("Could not open Play Store: ${e2.message}")
+            }
         }
     }
 

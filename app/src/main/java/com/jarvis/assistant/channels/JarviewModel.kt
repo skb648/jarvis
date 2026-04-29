@@ -3,6 +3,7 @@ package com.jarvis.assistant.channels
 import android.os.Handler
 import android.os.Looper
 import com.jarvis.assistant.services.JarvisAccessibilityService
+import com.jarvis.assistant.services.JarvisForegroundService
 import com.jarvis.assistant.services.JarvisSensoryService
 import com.jarvis.assistant.services.JarvisSpeechService
 import com.jarvis.assistant.keepalive.JarvisKeepAliveService
@@ -35,6 +36,7 @@ object JarviewModel {
     // singleton prevent GC after the service is destroyed, causing memory leaks.
     // Use .get() to access the service instance.
     @Volatile var accessibilityService: WeakReference<JarvisAccessibilityService>? = null
+    @Volatile var foregroundService: WeakReference<JarvisForegroundService>? = null
     @Volatile var speechService: WeakReference<JarvisSpeechService>? = null
     @Volatile var sensoryService: WeakReference<JarvisSensoryService>? = null
     @Volatile var keepAliveService: WeakReference<JarvisKeepAliveService>? = null
@@ -81,6 +83,9 @@ object JarviewModel {
     @Volatile var lastCameraFrameTimestamp: Long = 0L
     @Volatile var sensoryServiceRunning: Boolean = false
     @Volatile var screenTextData: String = ""
+
+    // ─── Foreground Service State ─────────────────────────────────
+    @Volatile var foregroundServiceRunning: Boolean = false
 
     // ─── Speech Service State ─────────────────────────────────────
     @Volatile var speechServiceRunning: Boolean = false
@@ -164,6 +169,7 @@ object JarviewModel {
         "audioAmplitude" to audioAmplitude,
         "audioAmplitudeDb" to audioAmplitudeDb,
         "audioPeakDb" to audioPeakDb,
+        "foregroundServiceRunning" to foregroundServiceRunning,
         "speechServiceRunning" to speechServiceRunning,
         "speechMode" to speechMode,
         "isListening" to isListening,
@@ -189,6 +195,7 @@ object JarviewModel {
     fun reset() {
         eventSink = null
         accessibilityService = null  // WeakReference cleared; GC can reclaim the service
+        foregroundService = null
         speechService = null
         sensoryService = null
         keepAliveService = null
@@ -231,6 +238,7 @@ object JarviewModel {
         lastBrainResponse = ""
         keepAliveRunning = false
         keepAliveStatus = ""
+        foregroundServiceRunning = false
         bypassActive = false
         mqttConnected = false
         mqttBroker = ""

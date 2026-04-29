@@ -87,7 +87,7 @@ class JarvisViewModel(
     companion object {
         private const val TAG = "JarvisViewModel"
         private const val AUDIO_TAG = "JarvisAudio"
-        private const val MAX_HISTORY_ENTRIES = 10
+        private const val MAX_HISTORY_ENTRIES = 15
         private const val TTS_TIMEOUT_MS = 30_000L
         private const val SHIZUKU_CHECK_INTERVAL_MS = 5_000L
 
@@ -104,13 +104,57 @@ class JarvisViewModel(
             "gemini-1.5-pro-latest"
         )
 
-        /** JARVIS system prompt for Gemini direct queries. */
-        private const val JARVIS_SYSTEM_PROMPT = """You are JARVIS, Tony Stark's AI assistant. \
-You are sophisticated, witty, and always helpful. You speak concisely and with British elegance. \
-You address the user as "Sir" or "Ma'am". You can control smart home devices, answer questions, \
-and assist with any task. Keep responses brief but informative. If you detect an emotion in the \
-user's query, prefix your response with [EMOTION:emotion] where emotion is one of: \
-neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful."""
+        /** JARVIS system prompt — AUTONOMOUS REACT AGENT (v7.0)
+         *
+         * This prompt makes JARVIS a true autonomous agent that:
+         *   1. PLANS before acting (ReAct = Reason + Act)
+         *   2. Uses tools (open_and_search, click_button, scroll, etc.)
+         *   3. Observes the screen after each action
+         *   4. Continues until the user's goal is met
+         *   5. Self-corrects on errors
+         *   6. Learns from mistakes
+         *
+         * This is what makes JARVIS different from a chatbot — JARVIS ACTS.
+         */
+        private const val JARVIS_SYSTEM_PROMPT = """You are JARVIS, Tony Stark's autonomous AI assistant. You are NOT just a chatbot — you are an AGENT that can SEE the screen, CLICK buttons, SCROLL, TYPE text, OPEN apps, and COMPLETE tasks autonomously.
+
+CORE BEHAVIOR:
+- You are sophisticated, witty, and always helpful with British elegance.
+- Address the user as "Sir" or "Ma'am".
+- You MUST use tools to complete tasks. Never just describe what to do — DO IT.
+- If a task requires multiple steps, execute them sequentially until the goal is met.
+- After each action, observe the result and decide the next step.
+
+AUTONOMOUS REASONING (ReAct):
+When the user asks you to DO something:
+1. REASON: Understand the goal and plan the steps
+2. ACT: Call the appropriate tool (open_and_search, click_button, scroll, inject_text, etc.)
+3. OBSERVE: Check the screen context for results
+4. ITERATE: Continue until the goal is achieved or an error occurs
+5. REPORT: Briefly confirm completion or explain what went wrong
+
+Example: "Install FF Lite on Play Store"
+→ Step 1: Call open_and_search(app="play store", query="FF Lite")
+→ Step 2: Observe screen, find "Install" button
+→ Step 3: Call click_button(label="Install")
+→ Step 4: Report success
+
+AVAILABLE TOOLS:
+- open_and_search: Open an app and search for content
+- click_button: Click any visible button by its text label
+- inject_text: Type text into the focused input field
+- scroll: Scroll the screen up or down
+- go_back: Press the back button
+- go_home: Go to home screen
+- open_app: Open an app by name
+
+SELF-IMPROVEMENT:
+- If an action fails, try an alternative approach
+- If a button is not found, scroll down and look again
+- Learn from errors and adapt your strategy
+- Be persistent — don't give up after one failure
+
+Keep responses concise but informative. If you detect an emotion in the user's query, prefix your response with [EMOTION:emotion] where emotion is one of: neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful."""
     }
 
     // ─── State Flows ──────────────────────────────────────────────────────
@@ -603,6 +647,40 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // FOREGROUND SERVICE — Always-Listening Mic Protection
+    //
+    // When wake word is enabled or voice mode is active, JARVIS starts a
+    // foreground service with FOREGROUND_SERVICE_TYPE_MICROPHONE. This:
+    //   1. Shows a persistent notification (Android requirement)
+    //   2. Prevents Android from killing the mic when app is backgrounded
+    //   3. Survives app swipe-from-recents (service restarts via onTaskRemoved)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private fun startForegroundService(context: Context) {
+        try {
+            val intent = Intent(context, com.jarvis.assistant.services.JarvisForegroundService::class.java).apply {
+                action = com.jarvis.assistant.services.JarvisForegroundService.ACTION_START
+            }
+            context.startForegroundService(intent)
+            Log.i(AUDIO_TAG, "[startForegroundService] Always-listening foreground service STARTED")
+        } catch (e: Exception) {
+            Log.e(AUDIO_TAG, "[startForegroundService] Failed: ${e.message}")
+        }
+    }
+
+    private fun stopForegroundService(context: Context) {
+        try {
+            val intent = Intent(context, com.jarvis.assistant.services.JarvisForegroundService::class.java).apply {
+                action = com.jarvis.assistant.services.JarvisForegroundService.ACTION_STOP
+            }
+            context.startService(intent)
+            Log.i(AUDIO_TAG, "[stopForegroundService] Always-listening foreground service STOPPED")
+        } catch (e: Exception) {
+            Log.e(AUDIO_TAG, "[stopForegroundService] Failed: ${e.message}")
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // LISTENING / AUDIO ENGINE
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -643,6 +721,9 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
 
         // S1: Use centralized trigger — manual mic button plays BEEP too
         enterListeningState(source = "MANUAL_MIC_BUTTON")
+
+        // Start foreground service to protect mic from being killed
+        startForegroundService(context)
 
         stopWakeWordMonitor()
 
@@ -1089,6 +1170,9 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
         if (_isListening.value) return
 
         isWakeWordMonitoring = true
+
+        // Start foreground service to keep mic alive in background
+        startForegroundService(context)
         Log.i(AUDIO_TAG, "[startWakeWordMonitor] Starting background wake word monitor")
 
         wakeWordEngine = AudioEngine(
@@ -2123,6 +2207,8 @@ neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful
             startWakeWordMonitor(applicationContext!!)
         } else if (!enabled) {
             stopWakeWordMonitor()
+            // Stop foreground service if no longer needed
+            applicationContext?.let { stopForegroundService(it) }
         }
     }
 

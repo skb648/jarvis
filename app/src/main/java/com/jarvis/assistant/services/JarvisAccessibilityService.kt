@@ -13,6 +13,8 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.jarvis.assistant.channels.JarviewModel
 import com.jarvis.assistant.automation.TaskExecutorBridge
+import org.json.JSONArray
+import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -40,6 +42,18 @@ import java.util.concurrent.ScheduledExecutorService
  *
  *  Feature E (Thread Safety): All accessibility actions run on a dedicated
  *      low-latency background thread to prevent UI freezing.
+ *
+ *  Feature F (Omniscient Eye): dumpScreenNodeTree() dumps the ENTIRE
+ *      node tree as structured JSON — text, contentDescription, viewId,
+ *      bounds, className, and interaction flags. Gemini can parse this
+ *      to see the screen with perfect fidelity.
+ *
+ *  Feature G (Scroll Control): scrollNodeByText() finds a scrollable
+ *      container by its text/content and scrolls it forward or backward.
+ *
+ *  Feature H (AI-Optimized Dump): dumpScreenForAI() returns a concise
+ *      text summary combining interactive elements + screen text,
+ *      optimized for Gemini context window efficiency.
  * ═══════════════════════════════════════════════════════════════════════
  */
 class JarvisAccessibilityService : AccessibilityService() {
@@ -199,29 +213,35 @@ class JarvisAccessibilityService : AccessibilityService() {
         val results = mutableListOf<AccessibilityNodeInfo>()
         findNodesByTextRecursive(rootNode, text.lowercase(), results, 0)
 
-        for (node in results) {
-            val clickable = findClickableAncestor(node)
-            if (clickable != null) {
-                val result = clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                Log.i(TAG, "[autoClick] Clicked element with text '$text' — success=$result")
-                JarviewModel.sendEventToUi("auto_click", mapOf(
-                    "text" to text, "success" to result,
-                    "timestamp" to System.currentTimeMillis()
-                ))
-                return result
+        try {
+            for (node in results) {
+                val clickable = findClickableAncestor(node)
+                if (clickable != null) {
+                    val result = clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    Log.i(TAG, "[autoClick] Clicked element with text '$text' — success=$result")
+                    JarviewModel.sendEventToUi("auto_click", mapOf(
+                        "text" to text, "success" to result,
+                        "timestamp" to System.currentTimeMillis()
+                    ))
+                    return result
+                }
             }
-        }
 
-        // Fallback: try clicking the node directly
-        for (node in results) {
-            if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                Log.i(TAG, "[autoClick] Directly clicked node with text '$text'")
-                return true
+            // Fallback: try clicking the node directly
+            for (node in results) {
+                if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    Log.i(TAG, "[autoClick] Directly clicked node with text '$text'")
+                    return true
+                }
             }
-        }
 
-        Log.w(TAG, "[autoClick] No clickable element found with text '$text'")
-        return false
+            Log.w(TAG, "[autoClick] No clickable element found with text '$text'")
+            return false
+        } finally {
+            // MEMORY LEAK FIX: Recycle all AccessibilityNodeInfo objects after use
+            results.forEach { it.recycle() }
+            rootNode.recycle()
+        }
     }
 
     /**
@@ -240,21 +260,26 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     fun clickNodeById(viewId: String): Boolean {
         val nodes = findNodesById(viewId)
-        for (node in nodes) {
-            val clickable = findClickableAncestor(node)
-            if (clickable != null) {
-                val result = clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                JarviewModel.sendEventToUi("node_clicked", mapOf(
-                    "viewId" to viewId, "success" to result,
-                    "timestamp" to System.currentTimeMillis()
-                ))
-                return result
+        try {
+            for (node in nodes) {
+                val clickable = findClickableAncestor(node)
+                if (clickable != null) {
+                    val result = clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    JarviewModel.sendEventToUi("node_clicked", mapOf(
+                        "viewId" to viewId, "success" to result,
+                        "timestamp" to System.currentTimeMillis()
+                    ))
+                    return result
+                }
             }
+            for (node in nodes) {
+                if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            }
+            return false
+        } finally {
+            // MEMORY LEAK FIX: Recycle all nodes after use
+            nodes.forEach { it.recycle() }
         }
-        for (node in nodes) {
-            if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-        }
-        return false
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -283,43 +308,53 @@ class JarvisAccessibilityService : AccessibilityService() {
             return false
         }
 
-        // Strategy 1: Try the accessibility focus
-        val focusedNode = rootNode.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
-        if (focusedNode != null && focusedNode.isEditable) {
-            val result = performTextInjection(focusedNode, content)
-            focusedNode.recycle()
-            if (result) {
-                Log.i(TAG, "[injectTextToFocusedField] Injected into accessibility-focused field")
-                return true
+        try {
+            // Strategy 1: Try the accessibility focus
+            val focusedNode = rootNode.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+            if (focusedNode != null && focusedNode.isEditable) {
+                val result = performTextInjection(focusedNode, content)
+                if (result) {
+                    focusedNode.recycle()
+                    Log.i(TAG, "[injectTextToFocusedField] Injected into accessibility-focused field")
+                    return true
+                }
             }
-        }
-        focusedNode?.recycle()
+            focusedNode?.recycle()
 
-        // Strategy 2: Try the input focus
-        val inputFocusedNode = rootNode.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        if (inputFocusedNode != null && inputFocusedNode.isEditable) {
-            val result = performTextInjection(inputFocusedNode, content)
-            inputFocusedNode.recycle()
-            if (result) {
-                Log.i(TAG, "[injectTextToFocusedField] Injected into input-focused field")
-                return true
+            // Strategy 2: Try the input focus
+            val inputFocusedNode = rootNode.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (inputFocusedNode != null && inputFocusedNode.isEditable) {
+                val result = performTextInjection(inputFocusedNode, content)
+                if (result) {
+                    inputFocusedNode.recycle()
+                    Log.i(TAG, "[injectTextToFocusedField] Injected into input-focused field")
+                    return true
+                }
             }
-        }
-        inputFocusedNode?.recycle()
+            inputFocusedNode?.recycle()
 
-        // Strategy 3: Find ANY editable EditText on screen
-        val editableNodes = mutableListOf<AccessibilityNodeInfo>()
-        findEditableNodes(rootNode, editableNodes, 0)
-        for (node in editableNodes) {
-            val result = performTextInjection(node, content)
-            if (result) {
-                Log.i(TAG, "[injectTextToFocusedField] Injected into first visible editable field")
-                return true
+            // Strategy 3: Find ANY editable EditText on screen
+            val editableNodes = mutableListOf<AccessibilityNodeInfo>()
+            findEditableNodes(rootNode, editableNodes, 0)
+            try {
+                for (node in editableNodes) {
+                    val result = performTextInjection(node, content)
+                    if (result) {
+                        Log.i(TAG, "[injectTextToFocusedField] Injected into first visible editable field")
+                        return true
+                    }
+                }
+            } finally {
+                // MEMORY LEAK FIX: Recycle editable nodes after use
+                editableNodes.forEach { it.recycle() }
             }
-        }
 
-        Log.w(TAG, "[injectTextToFocusedField] No editable field found on screen")
-        return false
+            Log.w(TAG, "[injectTextToFocusedField] No editable field found on screen")
+            return false
+        } finally {
+            // MEMORY LEAK FIX: Recycle root node after all strategies complete
+            rootNode.recycle()
+        }
     }
 
     /**
@@ -328,19 +363,24 @@ class JarvisAccessibilityService : AccessibilityService() {
      */
     fun typeTextById(viewId: String, text: String): Boolean {
         val nodes = findNodesById(viewId)
-        for (node in nodes) {
-            if (node.isEditable) {
-                val args = android.os.Bundle()
-                args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
-                val result = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-                JarviewModel.sendEventToUi("text_typed", mapOf(
-                    "viewId" to viewId, "text" to text, "success" to result,
-                    "timestamp" to System.currentTimeMillis()
-                ))
-                return result
+        try {
+            for (node in nodes) {
+                if (node.isEditable) {
+                    val args = android.os.Bundle()
+                    args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+                    val result = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                    JarviewModel.sendEventToUi("text_typed", mapOf(
+                        "viewId" to viewId, "text" to text, "success" to result,
+                        "timestamp" to System.currentTimeMillis()
+                    ))
+                    return result
+                }
             }
+            return false
+        } finally {
+            // MEMORY LEAK FIX: Recycle nodes after use
+            nodes.forEach { it.recycle() }
         }
-        return false
     }
 
     /**
@@ -417,6 +457,9 @@ class JarvisAccessibilityService : AccessibilityService() {
         val rootNode = rootInActiveWindow ?: return emptyList()
         val nodes = mutableListOf<Map<String, Any?>>()
         traverseNode(rootNode, nodes, 0)
+        // MEMORY LEAK FIX: Recycle root node after building the result list.
+        // Child nodes are recycled inside traverseNode after each recursive call.
+        rootNode.recycle()
         return nodes
     }
 
@@ -428,6 +471,9 @@ class JarvisAccessibilityService : AccessibilityService() {
         val rootNode = rootInActiveWindow ?: return emptyList()
         val nodes = mutableListOf<Map<String, Any?>>()
         traverseInteractiveNodes(rootNode, nodes, 0)
+        // MEMORY LEAK FIX: Recycle root node after building the result list.
+        // Child nodes are recycled inside traverseInteractiveNodes after each recursive call.
+        rootNode.recycle()
         return nodes
     }
 
@@ -441,6 +487,8 @@ class JarvisAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             node.getChild(i)?.let { child ->
                 traverseNode(child, list, depth + 1)
+                // MEMORY LEAK FIX: Recycle child node after extracting data from its subtree
+                child.recycle()
             }
         }
     }
@@ -460,6 +508,8 @@ class JarvisAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             node.getChild(i)?.let { child ->
                 traverseInteractiveNodes(child, list, depth + 1)
+                // MEMORY LEAK FIX: Recycle child node after extracting data from its subtree
+                child.recycle()
             }
         }
     }
@@ -472,6 +522,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         val rootNode = rootInActiveWindow ?: return ""
         val textBuilder = StringBuilder()
         collectText(rootNode, textBuilder, 0)
+        rootNode.recycle()
         return textBuilder.toString().trim()
     }
 
@@ -521,7 +572,246 @@ class JarvisAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             node.getChild(i)?.let { child ->
                 collectText(child, builder, depth + 1)
+                child.recycle()
             }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Feature F: OMNISCIENT EYE — Full node tree dump as JSON
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * dumpScreenNodeTree() — The "Omniscient Eye"
+     *
+     * Traverses the ENTIRE accessibility node tree from rootInActiveWindow
+     * and extracts ALL visible text, content descriptions, view IDs, bounds,
+     * class names, and interaction flags into a structured JSON string.
+     *
+     * This gives Gemini a complete, machine-parseable view of everything
+     * on screen — every button label, every text field, every scrollable
+     * container, with precise bounds for gesture targeting.
+     *
+     * @return A JSON string with structure:
+     *   {
+     *     "package": "com.example.app",
+     *     "activity": "com.example.MainActivity",
+     *     "timestamp": 1234567890,
+     *     "nodeCount": 42,
+     *     "nodes": [
+     *       {
+     *         "text": "Login",
+     *         "contentDescription": "",
+     *         "viewIdResourceName": "com.example:id/login_btn",
+     *         "className": "android.widget.Button",
+     *         "bounds": {"left":0, "top":100, "right":200, "bottom":150},
+     *         "isClickable": true,
+     *         "isEditable": false,
+     *         "isScrollable": false,
+     *         "isCheckable": false
+     *       },
+     *       ...
+     *     ]
+     *   }
+     */
+    fun dumpScreenNodeTree(): String {
+        val rootNode = rootInActiveWindow ?: return JSONObject().apply {
+            put("error", "No active window")
+            put("nodes", JSONArray())
+        }.toString()
+
+        try {
+            val nodesArray = JSONArray()
+            dumpNodeRecursive(rootNode, nodesArray, 0)
+
+            val result = JSONObject().apply {
+                put("package", JarviewModel.foregroundApp)
+                put("activity", JarviewModel.foregroundActivity)
+                put("timestamp", System.currentTimeMillis())
+                put("nodeCount", nodesArray.length())
+                put("nodes", nodesArray)
+            }
+            return result.toString()
+        } finally {
+            rootNode.recycle()
+        }
+    }
+
+    /**
+     * Recursively traverse the node tree and build a JSONArray of node descriptors.
+     * Only includes nodes that are visible to the user.
+     * Child nodes are recycled after their subtree has been processed.
+     */
+    private fun dumpNodeRecursive(node: AccessibilityNodeInfo, jsonArray: JSONArray, depth: Int) {
+        if (depth > MAX_TRAVERSAL_DEPTH) return
+        if (!node.isVisibleToUser) return
+
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+
+        val nodeJson = JSONObject().apply {
+            put("text", node.text?.toString() ?: "")
+            put("contentDescription", node.contentDescription?.toString() ?: "")
+            put("viewIdResourceName", node.viewIdResourceName ?: "")
+            put("className", node.className?.toString() ?: "")
+            put("bounds", JSONObject().apply {
+                put("left", bounds.left)
+                put("top", bounds.top)
+                put("right", bounds.right)
+                put("bottom", bounds.bottom)
+            })
+            put("isClickable", node.isClickable)
+            put("isEditable", node.isEditable)
+            put("isScrollable", node.isScrollable)
+            put("isCheckable", node.isCheckable)
+        }
+        jsonArray.put(nodeJson)
+
+        for (i in 0 until node.childCount) {
+            node.getChild(i)?.let { child ->
+                dumpNodeRecursive(child, jsonArray, depth + 1)
+                child.recycle()
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Feature G: SCROLL CONTROL — Scroll a container by text
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Find a scrollable node by text and perform ACTION_SCROLL_FORWARD or
+     * ACTION_SCROLL_BACKWARD on it.
+     *
+     * This searches for a node whose text or contentDescription matches the
+     * query, then walks up the tree to find a scrollable ancestor. This is
+     * useful for scrolling a specific list or container that contains the
+     * target text.
+     *
+     * @param text Text to search for (case-insensitive) within the scrollable container
+     * @param direction "forward" (or "down") to scroll forward, "backward" (or "up") to scroll backward
+     * @return true if a scrollable ancestor was found and the scroll action succeeded
+     */
+    fun scrollNodeByText(text: String, direction: String = "forward"): Boolean {
+        val rootNode = rootInActiveWindow ?: return false
+        val results = mutableListOf<AccessibilityNodeInfo>()
+        findNodesByTextRecursive(rootNode, text.lowercase(), results, 0)
+
+        try {
+            for (node in results) {
+                val scrollable = findScrollableAncestor(node)
+                if (scrollable != null) {
+                    val action = when (direction) {
+                        "forward", "down" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                        "backward", "up" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                        else -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                    }
+                    val result = scrollable.performAction(action)
+                    Log.i(TAG, "[scrollNodeByText] Scrolled '$direction' on container with text '$text' — success=$result")
+                    JarviewModel.sendEventToUi("scroll_node", mapOf(
+                        "text" to text,
+                        "direction" to direction,
+                        "success" to result,
+                        "timestamp" to System.currentTimeMillis()
+                    ))
+                    return result
+                }
+            }
+
+            Log.w(TAG, "[scrollNodeByText] No scrollable container found with text '$text'")
+            return false
+        } finally {
+            results.forEach { it.recycle() }
+            rootNode.recycle()
+        }
+    }
+
+    /**
+     * Walk up the tree from a node to find the nearest scrollable ancestor.
+     * Intermediate parent nodes obtained via .parent are recycled along the way.
+     */
+    private fun findScrollableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var current = node
+        var depth = 0
+        while (depth < MAX_CLICKABLE_ANCESTOR_DEPTH) {
+            if (current.isScrollable) return current
+            val parent = current.parent ?: return null
+            current = parent
+            depth++
+        }
+        return null
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Feature H: AI-OPTIMIZED DUMP — Concise screen summary for Gemini
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * dumpScreenForAI() — Returns a concise text description optimized for
+     * AI context, combining the structured JSON approach with the interactive-
+     * only approach for efficiency.
+     *
+     * Output format:
+     *   1. Package and activity header
+     *   2. Interactive elements section (clickable/editable/scrollable/checkable)
+     *      with labels, types, capabilities, and bounds
+     *   3. Full screen text section (all visible text content)
+     *
+     * This is the ideal method to call when feeding screen context into
+     * Gemini — it provides both the structural information needed for
+     * action planning AND the text content needed for understanding.
+     *
+     * @return A concise, AI-parseable text description of the current screen
+     */
+    fun dumpScreenForAI(): String {
+        val rootNode = rootInActiveWindow ?: return "No active window."
+
+        try {
+            val sb = StringBuilder()
+            sb.append("Package: ${JarviewModel.foregroundApp}\n")
+            sb.append("Activity: ${JarviewModel.foregroundActivity}\n\n")
+
+            // Section 1: Interactive elements (most useful for action planning)
+            val interactiveMaps = mutableListOf<Map<String, Any?>>()
+            traverseInteractiveNodes(rootNode, interactiveMaps, 0)
+
+            sb.append("=== Interactive Elements ===\n")
+            for (nodeMap in interactiveMaps.take(40)) {
+                val text = nodeMap["text"] as? String ?: ""
+                val contentDesc = nodeMap["contentDescription"] as? String ?: ""
+                val label = text.ifBlank { contentDesc }.ifBlank { "(unlabeled)" }
+                val type = (nodeMap["className"] as? String ?: "").substringAfterLast(".")
+                val viewId = nodeMap["viewIdResourceName"] as? String ?: ""
+
+                val capabilities = mutableListOf<String>()
+                if (nodeMap["isClickable"] as? Boolean == true) capabilities.add("click")
+                if (nodeMap["isEditable"] as? Boolean == true) capabilities.add("edit")
+                if (nodeMap["isScrollable"] as? Boolean == true) capabilities.add("scroll")
+                if (nodeMap["isCheckable"] as? Boolean == true) capabilities.add("check")
+
+                val bounds = "[${nodeMap["boundsLeft"]},${nodeMap["boundsTop"]}," +
+                        "${nodeMap["boundsRight"]},${nodeMap["boundsBottom"]}]"
+
+                val idSuffix = if (viewId.isNotBlank()) " id=${viewId.substringAfterLast("/")}" else ""
+                val capStr = if (capabilities.isNotEmpty()) capabilities.joinToString("/") else ""
+                sb.append("  $type \"$label\" $capStr $bounds$idSuffix\n")
+            }
+
+            // Section 2: Full screen text (for comprehension / understanding)
+            sb.append("\n=== Screen Text ===\n")
+            val textBuilder = StringBuilder()
+            collectText(rootNode, textBuilder, 0)
+            val screenText = textBuilder.toString().trim()
+            if (screenText.isNotEmpty()) {
+                sb.append(screenText.take(3000)) // Limit for token efficiency
+                if (screenText.length > 3000) sb.append("\n... (truncated)")
+            } else {
+                sb.append("(no text visible)")
+            }
+
+            return sb.toString()
+        } finally {
+            rootNode.recycle()
         }
     }
 
@@ -529,6 +819,22 @@ class JarvisAccessibilityService : AccessibilityService() {
     // Node Search Helpers
     // ═══════════════════════════════════════════════════════════════════════
 
+    /**
+     * Find all AccessibilityNodeInfo objects whose text or contentDescription
+     * contains the given query (case-insensitive).
+     *
+     * **IMPORTANT: Callers MUST recycle every AccessibilityNodeInfo in the
+     * returned list when done.** Failing to do so causes memory leaks.
+     * Example:
+     * ```
+     * val nodes = findNodesByText("login")
+     * try {
+     *     // use nodes...
+     * } finally {
+     *     nodes.forEach { it.recycle() }
+     * }
+     * ```
+     */
     fun findNodesByText(text: String): List<AccessibilityNodeInfo> {
         val rootNode = rootInActiveWindow ?: return emptyList()
         val results = mutableListOf<AccessibilityNodeInfo>()
@@ -555,6 +861,22 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Find all AccessibilityNodeInfo objects whose viewIdResourceName
+     * contains the given query (case-insensitive).
+     *
+     * **IMPORTANT: Callers MUST recycle every AccessibilityNodeInfo in the
+     * returned list when done.** Failing to do so causes memory leaks.
+     * Example:
+     * ```
+     * val nodes = findNodesById("login_btn")
+     * try {
+     *     // use nodes...
+     * } finally {
+     *     nodes.forEach { it.recycle() }
+     * }
+     * ```
+     */
     fun findNodesById(viewId: String): List<AccessibilityNodeInfo> {
         val rootNode = rootInActiveWindow ?: return emptyList()
         val results = mutableListOf<AccessibilityNodeInfo>()

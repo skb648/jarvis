@@ -129,6 +129,17 @@
             </intent-filter>
         </service>
 
+        <!-- ─── Foreground Service (Always Listening, Microphone) ── -->
+        <service
+            android:name=".services.JarvisForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone">
+            <intent-filter>
+                <action android:name="com.jarvis.assistant.FOREGROUND_START" />
+                <action android:name="com.jarvis.assistant.FOREGROUND_STOP" />
+            </intent-filter>
+        </service>
+
         <!-- ─── Keep-Alive Service (Foreground, Special Use) ──────── -->
         <service
             android:name=".keepalive.JarvisKeepAliveService"

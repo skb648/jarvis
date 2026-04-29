@@ -160,6 +160,23 @@ object GeminiFunctionCaller {
                     put("required", org.json.JSONArray().put("app"))
                 })
             })
+
+            // search_playstore — Search the Google Play Store
+            put(org.json.JSONObject().apply {
+                put("name", "search_playstore")
+                put("description", "Search for an app on the Google Play Store. Use this when the user wants to install or find an app. " +
+                        "Opens the Play Store with the search query pre-filled.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("query", org.json.JSONObject().apply {
+                            put("type", "string")
+                            put("description", "The app name or search query for Play Store (e.g., 'FF Lite', 'WhatsApp')")
+                        })
+                    })
+                    put("required", org.json.JSONArray().put("query"))
+                })
+            })
         })
     }
 
@@ -242,6 +259,7 @@ IMPORTANT: When the user asks you to DO something (not just answer a question), 
 - scroll: When they want to scroll ("Scroll down")
 - go_back / go_home: When they want to navigate
 - open_app: When they just want to open an app
+- search_playstore: When they want to install or find an app ("Install FF Lite")
 
 For MULTI-STEP commands like "Open YouTube, search for X, and play the first video":
 1. Call open_and_search first
