@@ -543,7 +543,7 @@ IMPORTANT RULES:
                     roundCounter + 1
                 )
                 when (nextResult) {
-                    is ProcessResult.ToolExecuted -> nextResult.aiMessage ?: "Executed ${followUpResponse.name}"
+                    is ProcessResult.ToolExecuted -> nextResult.aiResponse ?: "Executed ${followUpResponse.name}"
                     is ProcessResult.TextOnly -> nextResult.response
                     is ProcessResult.MultiStep -> nextResult.steps.map { it.first }.joinToString(", ")
                     is ProcessResult.Error -> nextResult.message
@@ -559,7 +559,7 @@ IMPORTANT RULES:
      * Send the tool execution result back to Gemini so it can continue
      * the conversation or plan the next step.
      */
-    private fun sendToolResultBack(
+    private suspend fun sendToolResultBack(
         originalQuery: String,
         toolName: String,
         toolArgs: Map<String, String>,

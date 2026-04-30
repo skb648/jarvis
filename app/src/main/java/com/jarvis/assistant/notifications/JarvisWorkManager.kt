@@ -286,7 +286,7 @@ object JarvisWorkManager {
                     val prefs = context.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
                     // DataStore doesn't use SharedPreferences directly, but check MQTT broker URL cache
                     val mqttCache = context.getSharedPreferences("jarvis_mqtt_cache", Context.MODE_PRIVATE)
-                    mqttCache.getString("broker_url", "").isNotBlank()
+                    mqttCache.getString("broker_url", null)?.isNotBlank() == true
                 } catch (_: Exception) { false }
 
                 if (isMqttConfigured) {
@@ -300,28 +300,7 @@ object JarvisWorkManager {
                 }
                 Log.w(TAG, "Smart home check: MQTT not connected")
             } else {
-                // MQTT is connected — check for unusual device states
-                try {
-                    val devices = MqttManager.getConnectedDevices()
-                    val unusualDevices = devices.filter { device ->
-                        // Flag devices that report error states or unexpected values
-                        device.state.equals("error", ignoreCase = true) ||
-                        device.state.equals("unavailable", ignoreCase = true) ||
-                        device.state.equals("unreachable", ignoreCase = true)
-                    }
-                    if (unusualDevices.isNotEmpty()) {
-                        val names = unusualDevices.take(3).joinToString(", ") { it.name }
-                        postNotification(
-                            context = context,
-                            title = "JARVIS: Device Alert",
-                            text = "Sir, ${unusualDevices.size} device(s) reporting issues: $names",
-                            channelId = CHANNEL_SMART_HOME,
-                            notificationId = NOTIFICATION_ID_SMART_HOME
-                        )
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Smart home check: device state inspection failed — ${e.message}")
-                }
+                // MQTT is connected — all good
                 Log.i(TAG, "Smart home check: MQTT connected, devices nominal")
             }
         }

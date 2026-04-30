@@ -420,7 +420,7 @@ class VisionManager {
 
     private fun startBackgroundThread() {
         backgroundThread = HandlerThread("VisionCamera").apply { start() }
-        backgroundHandler = Handler(backgroundThread?.looper)
+        backgroundHandler = backgroundThread?.looper?.let { Handler(it) }
     }
 
     private fun stopBackgroundThread() {

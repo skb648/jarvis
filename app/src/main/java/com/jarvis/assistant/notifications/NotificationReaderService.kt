@@ -7,7 +7,7 @@ import android.content.IntentFilter
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
-import androidx.localbroadcastmanager.content.LocalBroadcastManager
+// LocalBroadcastManager is deprecated — using regular BroadcastReceiver instead
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -128,7 +128,7 @@ class NotificationReaderService : NotificationListenerService() {
             if (packageName == "com.jarvis.assistant") return
 
             // Skip ongoing/foreground notifications (media players, downloads, etc.)
-            if (notification.isOngoing) return
+            if (notification.flags and android.app.Notification.FLAG_ONGOING_EVENT != 0) return
 
             // Extract notification text
             val extras = notification.extras ?: return
@@ -175,7 +175,8 @@ class NotificationReaderService : NotificationListenerService() {
                 putExtra(EXTRA_NOTIFICATION_CONTENT, content)
                 putExtra(EXTRA_NOTIFICATION_PACKAGE, packageName)
             }
-            LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+            // Use regular broadcast instead of deprecated LocalBroadcastManager
+            sendBroadcast(intent)
 
         } catch (e: Exception) {
             Log.e(TAG, "[onNotificationPosted] Error parsing notification: ${e.message}")
