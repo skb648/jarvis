@@ -126,6 +126,8 @@ class MainActivity : ComponentActivity() {
         val engineStatusText by viewModel.engineStatusText.collectAsState()
         val apiKeySaveResult by viewModel.apiKeySaveResult.collectAsState()
         val apiKeyTestResult by viewModel.apiKeyTestResult.collectAsState()
+        val chatSessions by viewModel.chatSessions.collectAsState()
+        val currentSessionId by viewModel.currentSessionIdFlow.collectAsState()
 
         JarvisNavGraph(
             brainState = brainState,
@@ -168,7 +170,7 @@ class MainActivity : ComponentActivity() {
             onQuickAction = { action ->
                 when (action) {
                     "voice"    -> viewModel.startListening(context)
-                    "capture"  -> viewModel.sendMessage("take a screenshot", context)
+                    "capture"  -> viewModel.sendMessage("capture and describe what you see", context)
                     "chat"     -> { /* handled by NavGraph navigation */ }
                     "devices"  -> { /* handled by NavGraph navigation */ }
                 }
@@ -199,7 +201,13 @@ class MainActivity : ComponentActivity() {
             onConsumeApiKeySaveResult = { viewModel.consumeApiKeySaveResult() },
             onTestApiKeys = { gemini, eleven -> viewModel.testApiKeys(gemini, eleven) },
             apiKeyTestResult = apiKeyTestResult,
-            onClearApiKeyTestResult = { viewModel.clearApiKeyTestResult() }
+            onClearApiKeyTestResult = { viewModel.clearApiKeyTestResult() },
+            // Chat session drawer
+            chatSessions = chatSessions,
+            currentSessionId = currentSessionId,
+            onLoadSession = { viewModel.loadSession(it) },
+            onNewChat = { viewModel.startNewChat() },
+            onClearHistory = { viewModel.clearAllHistory() }
         )
     }
 

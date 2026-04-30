@@ -20,7 +20,8 @@ pub struct AudioAnalysis {
 }
 
 /// Calculate RMS (Root Mean Square) of audio samples.
-/// Used for real-time amplitude visualization (orb pulsing).
+/// Returns the LINEAR RMS value in the 0..1 range, suitable for
+/// orb visualization on the Kotlin side. Kotlin expects 0..1 amplitude.
 pub fn calculate_rms(audio_data: &[u8]) -> f64 {
     // Assume 16-bit PCM samples (little-endian)
     let samples: Vec<f64> = audio_data
@@ -42,7 +43,14 @@ pub fn calculate_rms(audio_data: &[u8]) -> f64 {
     let sum_squares: f64 = samples.iter().map(|s| s * s).sum();
     let rms = (sum_squares / samples.len() as f64).sqrt();
 
-    // Convert to dB scale
+    // Return linear RMS in 0..1 range
+    rms
+}
+
+/// Calculate RMS in dB scale. Kept as a separate function for
+/// cases where dB is explicitly needed (e.g., audio analysis reporting).
+pub fn calculate_rms_db(audio_data: &[u8]) -> f64 {
+    let rms = calculate_rms(audio_data);
     20.0 * (rms + 1e-10).log10()
 }
 
@@ -60,9 +68,8 @@ pub fn analyze_audio_chunk(audio_data: &[u8], sample_rate: u32) -> Result<AudioA
         });
     }
 
-    // Calculate volume in dB
-    let rms = calculate_rms(audio_data);
-    let volume_db = rms;
+    // Calculate volume in dB (using the dedicated dB function)
+    let volume_db = calculate_rms_db(audio_data);
 
     // Calculate total energy
     let energy: f64 = samples.iter().map(|s| s * s).sum::<f64>() / samples.len() as f64;

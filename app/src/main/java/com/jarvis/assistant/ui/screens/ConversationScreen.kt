@@ -444,9 +444,6 @@ private fun ChatSessionItem(
                         .width(3.dp)
                         .height(40.dp)
                         .clip(RoundedCornerShape(2.dp))
-                        .then(
-                            Modifier.clip(RoundedCornerShape(2.dp))
-                        )
                 ) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         drawRect(JarvisCyan)

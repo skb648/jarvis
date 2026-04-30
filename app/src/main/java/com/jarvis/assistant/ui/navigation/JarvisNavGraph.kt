@@ -101,7 +101,13 @@ fun JarvisNavGraph(
     // A3: API key test
     onTestApiKeys: (String, String) -> Unit = { _, _ -> },
     apiKeyTestResult: String = "",
-    onClearApiKeyTestResult: () -> Unit = {}
+    onClearApiKeyTestResult: () -> Unit = {},
+    // Chat session drawer state & callbacks
+    chatSessions: List<ChatSession> = emptyList(),
+    currentSessionId: Long = -1L,
+    onLoadSession: (ChatSession) -> Unit = {},
+    onNewChat: () -> Unit = {},
+    onClearHistory: () -> Unit = {}
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -220,7 +226,13 @@ fun JarvisNavGraph(
                     onSendMessage = onSendMessage,
                     // CRITICAL FIX: Voice button in Chat screen now ACTUALLY
                     // starts/stops the microphone instead of just toggling a UI flag
-                    onToggleVoice = onToggleVoice
+                    onToggleVoice = onToggleVoice,
+                    // Chat session drawer
+                    chatSessions = chatSessions,
+                    currentSessionId = currentSessionId,
+                    onLoadSession = onLoadSession,
+                    onNewChat = onNewChat,
+                    onClearHistory = onClearHistory
                 )
             }
             composable("smarthome") {

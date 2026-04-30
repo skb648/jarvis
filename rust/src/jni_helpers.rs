@@ -14,13 +14,11 @@ pub fn jstring_to_string(env: &mut JNIEnv, jstr: &JString) -> String {
     match env.get_string(jstr) {
         Ok(java_str) => {
             let rust_string: String = java_str.into();
-            // Diagnostic: log the exact byte length and char length to detect
-            // null terminators or garbage trailing bytes from JNI conversion
+            // Diagnostic: log string length only (never log content — may contain API keys)
             log::info!(
-                "JNI string conversion — bytes={}, chars={}, first_4='{}'",
+                "JNI string conversion — bytes={}, chars={}",
                 rust_string.len(),
-                rust_string.chars().count(),
-                if rust_string.len() >= 4 { &rust_string[..4] } else { &rust_string }
+                rust_string.chars().count()
             );
             // Strip any trailing null bytes that might leak from JNI
             let trimmed = rust_string.trim_end_matches('\0').to_string();

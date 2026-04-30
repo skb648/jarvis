@@ -22,11 +22,20 @@ import com.jarvis.assistant.actions.ActionHandler
 import com.jarvis.assistant.audio.AudioEngine
 import com.jarvis.assistant.automation.GeminiFunctionCaller
 import com.jarvis.assistant.automation.TaskExecutorBridge
+import com.jarvis.assistant.brief.DailyBriefGenerator
 import com.jarvis.assistant.channels.JarviewModel
 import com.jarvis.assistant.data.SettingsRepository
 import com.jarvis.assistant.jni.RustBridge
+import com.jarvis.assistant.location.LocationAwarenessManager
+import com.jarvis.assistant.macros.MacroEngine
+import com.jarvis.assistant.memory.ConversationMemory
+import com.jarvis.assistant.mood.MoodDetector
+import com.jarvis.assistant.notifications.NotificationData
+import com.jarvis.assistant.notifications.NotificationReaderService
+import com.jarvis.assistant.monitor.ProactiveDeviceMonitor
 import com.jarvis.assistant.overlay.JarvisOverlayManager
 import com.jarvis.assistant.router.CommandRouter
+import com.jarvis.assistant.search.WebSearchEngine
 import com.jarvis.assistant.shizuku.ShizukuManager
 import com.jarvis.assistant.smarthome.HomeAssistantBridge
 import com.jarvis.assistant.smarthome.MqttManager
@@ -34,6 +43,7 @@ import com.jarvis.assistant.ui.orb.BrainState
 import com.jarvis.assistant.ui.screens.ChatMessage
 import com.jarvis.assistant.ui.screens.DeviceType
 import com.jarvis.assistant.ui.screens.SmartDevice
+import com.jarvis.assistant.vision.VisionManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
@@ -155,6 +165,8 @@ SELF-IMPROVEMENT:
 - Learn from errors and adapt your strategy
 - Be persistent — don't give up after one failure
 
+You have MEMORY. If the user references past conversations ('kal maine kya kaha?', 'what did I ask yesterday?', 'apne kal bola tha'), use your memory context. Start relevant responses with 'Sir, apne [time] bola tha...' to reference past conversations naturally.
+
 Keep responses concise but informative. If you detect an emotion in the user's query, prefix your response with [EMOTION:emotion] where emotion is one of: neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful."""
     }
 
@@ -248,6 +260,13 @@ Keep responses concise but informative. If you detect an emotion in the user's q
     private val _apiKeyTestResult = MutableStateFlow("")
     val apiKeyTestResult: StateFlow<String> = _apiKeyTestResult.asStateFlow()
 
+    // ── Chat session state for drawer ──────────────────────────────────────
+    private val _chatSessions = MutableStateFlow<List<com.jarvis.assistant.ui.screens.ChatSession>>(emptyList())
+    val chatSessions: StateFlow<List<com.jarvis.assistant.ui.screens.ChatSession>> = _chatSessions.asStateFlow()
+
+    private val _currentSessionIdFlow = MutableStateFlow(-1L)
+    val currentSessionIdFlow: StateFlow<Long> = _currentSessionIdFlow.asStateFlow()
+
     val deviceCount: Int get() = _devices.value.size
     val activeDeviceCount: Int get() = _devices.value.count { it.isOn }
 
@@ -328,8 +347,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
     // FIX: isProcessing gate ensures only ONE query is in-flight at a time.
     // Subsequent VAD triggers are dropped until the current query completes.
     // ═══════════════════════════════════════════════════════════════════════
-    @Volatile
-    private var isProcessing = false
+    private val isProcessing = java.util.concurrent.atomic.AtomicBoolean(false)
 
     // ═══════════════════════════════════════════════════════════════════════
     // TASK QUEUE — Multi-Step Task Execution
@@ -341,6 +359,26 @@ Keep responses concise but informative. If you detect an emotion in the user's q
 
     private val taskQueue = mutableListOf<Pair<String, Map<String, String>>>()
     @Volatile private var isTaskQueueRunning = false
+
+    // ─── New Feature Systems ───────────────────────────────────────────
+
+    private val visionManager = VisionManager()
+    private val webSearchEngine = WebSearchEngine()
+
+    private val _notificationsEnabled = MutableStateFlow(false)
+    val notificationsEnabled: StateFlow<Boolean> = _notificationsEnabled.asStateFlow()
+
+    // ─── Feature: Mood Detection ───────────────────────────────────────────
+    private val _detectedMood = MutableStateFlow(MoodDetector.MoodResult("neutral", 0.3f, null))
+    val detectedMood: StateFlow<MoodDetector.MoodResult> = _detectedMood.asStateFlow()
+
+    // ─── Feature: Device Status Alerts ─────────────────────────────────────
+    private val _deviceAlert = MutableStateFlow("")
+    val deviceAlert: StateFlow<String> = _deviceAlert.asStateFlow()
+
+    // ─── Feature: Location Context ─────────────────────────────────────────
+    private val _locationContext = MutableStateFlow("")
+    val locationContext: StateFlow<String> = _locationContext.asStateFlow()
 
     // ─── Overlay Manager ─────────────────────────────────────────────────
 
@@ -440,6 +478,21 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                     initNativeTts(ctx)
                     // Load chat history from Room DB — JARVIS never forgets
                     loadChatHistoryFromDb()
+                    // Feature: Start Proactive Device Monitor
+                    ProactiveDeviceMonitor.startMonitoring(ctx)
+                    ProactiveDeviceMonitor.onAlertCallback = { alertMsg ->
+                        viewModelScope.launch(Dispatchers.Main) {
+                            _deviceAlert.value = alertMsg
+                            addAssistantMessage(alertMsg, "stressed")
+                        }
+                    }
+                    // Feature: Load location context
+                    viewModelScope.launch(Dispatchers.IO) {
+                        val locCtx = LocationAwarenessManager.getLocationContext(ctx)
+                        if (locCtx.isNotBlank()) {
+                            _locationContext.value = locCtx
+                        }
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -471,6 +524,17 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                     _apiKeySaveResult.value = ApiKeySaveResult.FAILURE
                     return@launch
                 }
+
+                // Cache API key to SharedPreferences for WorkManager access
+                try {
+                    val ctx = getApplicationContext()
+                    if (ctx != null) {
+                        ctx.getSharedPreferences("jarvis_settings_apikey_cache", Context.MODE_PRIVATE)
+                            .edit()
+                            .putString("gemini_api_key", trimmedGemini)
+                            .apply()
+                    }
+                } catch (_: Exception) {}
 
                 // Step 2: Apply keys to RustBridge engine
                 if (RustBridge.isNativeReady()) {
@@ -858,12 +922,12 @@ Keep responses concise but informative. If you detect an emotion in the user's q
         Log.d(AUDIO_TAG, "[handleCommandReady] launched with ${pcmBytes.size} bytes at ${sampleRate}Hz")
 
         // Processing lock — drop duplicate VAD triggers
-        if (isProcessing) {
+        if (isProcessing.get()) {
             Log.w(AUDIO_TAG, "[handleCommandReady] DROPPED — already processing (isProcessing=true)")
             _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
             return
         }
-        isProcessing = true
+        isProcessing.set(true)
 
         // ═══════════════════════════════════════════════════════════════════
         // S2: TONE_PROP_ACK AT EXACT TRANSITION TO PROCESSING
@@ -908,6 +972,30 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                 }
             }
 
+            // Feature: Mood Detection from voice tone
+            try {
+                val moodResult = MoodDetector.detectMoodFromAudio(pcmBytes, sampleRate)
+                _detectedMood.value = moodResult
+                Log.d(AUDIO_TAG, "[handleCommandReady] Mood detected: ${moodResult.mood} (confidence=${moodResult.confidence})")
+
+                // Auto-suggest actions for stressed/sad moods
+                if (moodResult.mood == "stressed" || moodResult.mood == "sad") {
+                    if (moodResult.confidence > 0.3f) {
+                        val actionMsg = when (moodResult.suggestedAction) {
+                            "play_calm_music" -> "Sir, aap ${moodResult.mood} lag rahe ho. Shall I play some calming music?"
+                            "play_uplifting_music" -> "Sir, lagta hai mood thoda off hai. Kuch achha gaana sunau?"
+                            "suggest_break" -> "Sir, aap stressed lag rahe ho. Chaliye thoda break lete hain."
+                            else -> null
+                        }
+                        if (actionMsg != null) {
+                            Log.i(AUDIO_TAG, "[handleCommandReady] Mood action suggestion: $actionMsg")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(AUDIO_TAG, "[handleCommandReady] Mood detection failed: ${e.message}")
+            }
+
             Log.d(AUDIO_TAG, "[handleCommandReady] Starting Gemini multimodal transcription at ${sampleRate}Hz")
             val transcription = transcribeViaGeminiFallback(pcmBytes, sampleRate)
 
@@ -922,12 +1010,12 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                 } else {
                     Log.e(AUDIO_TAG, "[handleCommandReady] No application context")
                     _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
-                    isProcessing = false
+                    isProcessing.set(false)
                 }
             } else {
                 Log.w(AUDIO_TAG, "[handleCommandReady] Transcription is EMPTY")
                 addAssistantMessage("I couldn't make that out, Sir. Please try speaking louder or closer to the microphone.", "confused")
-                isProcessing = false
+                isProcessing.set(false)
                 if (_isVoiceMode.value) {
                     restartListeningAfterTts()
                 } else {
@@ -1227,7 +1315,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
     // ═══════════════════════════════════════════════════════════════════════
 
     fun processQuery(query: String, context: Context, skipUserMessage: Boolean = false) {
-        Log.d(AUDIO_TAG, "[processQuery] query=\"$query\" brainState=${_brainState.value} isProcessing=$isProcessing")
+        Log.d(AUDIO_TAG, "[processQuery] query=\"$query\" brainState=${_brainState.value} isProcessing=${isProcessing.get()}")
         if (_brainState.value == BrainState.THINKING || _brainState.value == BrainState.SPEAKING) {
             Log.w(AUDIO_TAG, "[processQuery] Already ${_brainState.value} — forcing state reset for new query")
             // Stop any in-progress TTS playback so the new query can proceed
@@ -1262,18 +1350,71 @@ Keep responses concise but informative. If you detect an emotion in the user's q
 
                 when (routeResult) {
                     is CommandRouter.RouteResult.Handled  -> handleSystemCommandResult(routeResult, context)
-                    is CommandRouter.RouteResult.NeedsAI  -> handleAIQuery(routeResult.query, context)
+                    is CommandRouter.RouteResult.NeedsAI  -> {
+                        // MEMORY: Get relevant past conversations and prepend to context
+                        val memoryContext = withContext(Dispatchers.IO) {
+                            ConversationMemory.getRelevantMemory(query, context)
+                        }
+                        handleAIQuery(routeResult.query, context, memoryContext)
+                    }
+                    is CommandRouter.RouteResult.VisionCommand -> {
+                        captureAndAnalyzeVision(context, routeResult.prompt)
+                    }
+                    is CommandRouter.RouteResult.NotificationCommand -> {
+                        val notifText = getNotificationsText(5, routeResult.appFilter)
+                        _emotion.value = "calm"
+                        _lastResponse.value = notifText
+                        _isTyping.value = false
+                        addAssistantMessage(notifText, "calm")
+                        _brainState.value = BrainState.SPEAKING
+                        _audioAmplitude.value = 0.5f
+                        trySynthesizeAndPlay(notifText, context)
+                    }
+                    // Feature: Macro Commands
+                    is CommandRouter.RouteResult.MacroCommand -> {
+                        val macroResult = if (routeResult.macroName == "__create__") {
+                            MacroEngine.createCustomMacro(query, context)
+                        } else {
+                            MacroEngine.executeMacro(routeResult.macroName, context)
+                        }
+                        _emotion.value = "confident"
+                        _lastResponse.value = macroResult
+                        _isTyping.value = false
+                        addAssistantMessage(macroResult, "confident")
+                        _brainState.value = BrainState.SPEAKING
+                        _audioAmplitude.value = 0.5f
+                        trySynthesizeAndPlay(macroResult, context)
+                    }
+                    // Feature: Daily Brief
+                    is CommandRouter.RouteResult.DailyBriefCommand -> {
+                        requestDailyBrief(context)
+                    }
+                    // Feature: Location Commands
+                    is CommandRouter.RouteResult.LocationCommand -> {
+                        handleLocationCommand(routeResult.locationType, context)
+                    }
+                    // Feature: Device Status
+                    is CommandRouter.RouteResult.DeviceStatusCommand -> {
+                        val statusReport = ProactiveDeviceMonitor.getDeviceStatusReport(context)
+                        _emotion.value = "calm"
+                        _lastResponse.value = statusReport
+                        _isTyping.value = false
+                        addAssistantMessage(statusReport, "calm")
+                        _brainState.value = BrainState.SPEAKING
+                        _audioAmplitude.value = 0.5f
+                        trySynthesizeAndPlay(statusReport, context)
+                    }
                 }
             } catch (e: CancellationException) {
                 _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
-                isProcessing = false
+                isProcessing.set(false)
                 return@launch
             } catch (e: Exception) {
                 Log.e(TAG, "[processQuery] pipeline error", e)
                 _brainState.value     = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
                 _isTyping.value       = false
                 _audioAmplitude.value = 0f
-                isProcessing = false
+                isProcessing.set(false)
                 addAssistantMessage("Error: ${e.message?.take(200) ?: "Unknown"}", "stressed")
                 toast(context, "Query error: ${e.message?.take(100)}")
             } finally {
@@ -1303,13 +1444,49 @@ Keep responses concise but informative. If you detect an emotion in the user's q
         }
     }
 
-    private suspend fun handleAIQuery(query: String, context: Context) {
+    private suspend fun handleAIQuery(query: String, context: Context, memoryContext: String = "") {
         try {
             _brainState.value     = BrainState.THINKING
             _audioAmplitude.value = 0.1f
 
             val historyJson    = buildHistoryJson()
             val screenContext  = JarviewModel.screenTextData
+
+            // Feature: Include mood context in system prompt
+            val moodContext = MoodDetector.getMoodContextString(_detectedMood.value)
+
+            // Feature: Include location context in system prompt
+            val locationCtx = _locationContext.value
+            val locationBehaviorCtx = try {
+                val ctx = getApplicationContext()
+                if (ctx != null) {
+                    val loc = LocationAwarenessManager.getCurrentLocation(ctx)
+                    if (loc != null) {
+                        val locType = LocationAwarenessManager.detectLocationType(loc, ctx)
+                        LocationAwarenessManager.getLocationBehaviorContext(locType)
+                    } else ""
+                } else ""
+            } catch (_: Exception) { "" }
+
+            // MEMORY: Prepend memory context to history if available
+            val enhancedHistoryJson = if (memoryContext.isNotBlank() || moodContext.isNotBlank() || locationBehaviorCtx.isNotBlank()) {
+                // Inject memory context into the history as a system-level context
+                val contextParts = mutableListOf<String>()
+                if (memoryContext.isNotBlank()) contextParts.add("[MEMORY CONTEXT]: $memoryContext")
+                if (moodContext.isNotBlank()) contextParts.add("[MOOD CONTEXT]: $moodContext")
+                if (locationBehaviorCtx.isNotBlank()) contextParts.add("[LOCATION CONTEXT]: $locationBehaviorCtx")
+                if (locationCtx.isNotBlank()) contextParts.add("[CURRENT LOCATION]: $locationCtx")
+
+                val contextEntry = """{"role":"user","content":"${contextParts.joinToString(" | ")}"}"""
+                val contextReply = """{"role":"model","content":"Understood. I will use this context (memory, mood, location) to adjust my responses naturally."}"""
+                if (historyJson.length > 2) {
+                    historyJson.dropLast(1) + "," + contextEntry + "," + contextReply + "]"
+                } else {
+                    "[$contextEntry,$contextReply]"
+                }
+            } else {
+                historyJson
+            }
 
             // ═══════════════════════════════════════════════════════════════════
             // UPGRADE (v6.0): GEMINI FUNCTION CALLING
@@ -1333,7 +1510,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                             query = query,
                             apiKey = _geminiApiKey.value,
                             context = context,
-                            historyJson = historyJson
+                            historyJson = enhancedHistoryJson
                         )
                     }
 
@@ -1419,7 +1596,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
             var rawResponse = withContext(Dispatchers.IO) {
                 if (RustBridge.isNativeReady()) {
                     try {
-                        RustBridge.processQuery(query, screenContext, historyJson)
+                        RustBridge.processQuery(query, screenContext, historyJson, JARVIS_SYSTEM_PROMPT)
                     } catch (e: Exception) {
                         Log.e(TAG, "[handleAIQuery] JNI processQuery failed", e)
                         "[ERROR] AI processing failed: ${e.message?.take(200) ?: "Unknown"}"
@@ -1439,7 +1616,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
             if (isRustError && _geminiApiKey.value.isNotBlank()) {
                 Log.w(AUDIO_TAG, "[handleAIQuery] Rust failed, falling back to processQueryViaGeminiDirect")
                 val directResponse = withContext(Dispatchers.IO) {
-                    processQueryViaGeminiDirect(query, historyJson)
+                    processQueryViaGeminiDirect(query, enhancedHistoryJson)
                 }
                 if (directResponse.isNotBlank() && !directResponse.startsWith("[ERROR]")) {
                     rawResponse = directResponse
@@ -1461,7 +1638,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                 _isTyping.value     = false
                 _audioAmplitude.value = 0f
                 _lastResponse.value = parsed
-                isProcessing = false
+                isProcessing.set(false)
                 addAssistantMessage(parsed, "stressed")
                 toast(context, "AI error: ${parsed.take(80)}")
                 if (_isVoiceMode.value) {
@@ -1501,7 +1678,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
             _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
             _isTyping.value   = false
             _audioAmplitude.value = 0f
-            isProcessing = false
+            isProcessing.set(false)
             addAssistantMessage("Processing error, Sir.", "stressed")
             toast(context, "AI processing error: ${e.message?.take(80)}")
             if (_isVoiceMode.value) {
@@ -1816,7 +1993,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
             Log.e(AUDIO_TAG, "[trySynthesizeAndPlay] UNEXPECTED EXCEPTION: ${e.message}", e)
             _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
             _audioAmplitude.value = 0f
-            isProcessing = false  // Release processing lock
+            isProcessing.set(false)  // Release processing lock
             toast(context, "TTS error: ${e.message?.take(80)}")
             fallbackToNativeTts(text, context)
         }
@@ -1859,7 +2036,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                         _audioAmplitude.value = 0f
                         amplitudePulseJob?.cancel()
                         amplitudePulseJob = null
-                        isProcessing = false  // Release processing lock
+                        isProcessing.set(false)  // Release processing lock
                         if (_isVoiceMode.value) {
                             _brainState.value = BrainState.LISTENING
                             restartListeningAfterTts()
@@ -1873,7 +2050,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                         _audioAmplitude.value = 0f
                         amplitudePulseJob?.cancel()
                         amplitudePulseJob = null
-                        isProcessing = false  // Release processing lock on error
+                        isProcessing.set(false)  // Release processing lock on error
                         _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
                     }
                 })
@@ -1898,14 +2075,14 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                 Log.e(AUDIO_TAG, "[fallbackToNativeTts] Android TTS not available")
                 _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
                 _audioAmplitude.value = 0f
-                isProcessing = false  // CRITICAL FIX (v14): Release processing lock — prevents permanent voice lockout
+                isProcessing.set(false)  // CRITICAL FIX (v14): Release processing lock — prevents permanent voice lockout
                 toast(context, "Text-to-speech unavailable — no voice output")
             }
         } catch (e: Exception) {
             Log.e(AUDIO_TAG, "[fallbackToNativeTts] Exception: ${e.message}")
             _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
             _audioAmplitude.value = 0f
-            isProcessing = false  // CRITICAL FIX (v14): Release processing lock on exception
+            isProcessing.set(false)  // CRITICAL FIX (v14): Release processing lock on exception
         }
     }
 
@@ -1962,6 +2139,212 @@ Keep responses concise but informative. If you detect an emotion in the user's q
     // ═══════════════════════════════════════════════════════════════════════
 
     fun sendMessage(text: String, context: Context) = processQuery(text, context, skipUserMessage = false)
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // VISION MODE — Camera + AI Vision
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Capture a photo and analyze it with Gemini Vision.
+     * Triggered by vision commands like "kya hai yeh", "what is this", "dekh kya hai".
+     */
+    fun captureAndAnalyzeVision(context: Context, prompt: String = "What do you see?") {
+        viewModelScope.launch(Dispatchers.Main) {
+            try {
+                _brainState.value = BrainState.THINKING
+                _isTyping.value = true
+                addAssistantMessage("Let me take a look, Sir...", "calm")
+
+                val result = withContext(Dispatchers.IO) {
+                    visionManager.captureAndAnalyze(context, prompt, _geminiApiKey.value)
+                }
+
+                _emotion.value = "surprised"
+                _lastResponse.value = result
+                _isTyping.value = false
+                addAssistantMessage(result, "surprised")
+                _brainState.value = BrainState.SPEAKING
+                _audioAmplitude.value = 0.5f
+                trySynthesizeAndPlay(result, context)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "[captureAndAnalyzeVision] Error: ${e.message}")
+                _brainState.value = BrainState.IDLE
+                _isTyping.value = false
+                addAssistantMessage("Sir, I couldn't analyze the image: ${e.message?.take(100)}", "stressed")
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Feature: DAILY BRIEF
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Request a daily brief. Generates the brief and speaks it.
+     * Triggered by "good morning", "daily brief", "aaj ka plan".
+     */
+    fun requestDailyBrief(context: Context) {
+        viewModelScope.launch(Dispatchers.Main) {
+            try {
+                _brainState.value = BrainState.THINKING
+                _isTyping.value = true
+                addAssistantMessage("Let me prepare your daily brief, Sir...", "calm")
+
+                val brief = withContext(Dispatchers.IO) {
+                    DailyBriefGenerator.generateBrief(context, _geminiApiKey.value)
+                }
+
+                _emotion.value = "calm"
+                _lastResponse.value = brief
+                _isTyping.value = false
+                addAssistantMessage(brief, "calm")
+                _brainState.value = BrainState.SPEAKING
+                _audioAmplitude.value = 0.5f
+                trySynthesizeAndPlay(brief, context)
+
+                // Also post as notification
+                withContext(Dispatchers.IO) {
+                    DailyBriefGenerator.postBriefNotification(context, brief)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "[requestDailyBrief] Error: ${e.message}")
+                _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+                _isTyping.value = false
+                addAssistantMessage("Sir, I couldn't prepare your daily brief. ${e.message?.take(100)}", "stressed")
+            }
+        }
+    }
+
+    /**
+     * Schedule morning brief at a given time.
+     */
+    fun scheduleMorningBrief(context: Context, hour: Int, minute: Int) {
+        DailyBriefGenerator.scheduleMorningBrief(context, hour, minute)
+        addAssistantMessage("Morning brief scheduled for $hour:${String.format("%02d", minute)}, Sir.", "calm")
+    }
+
+    /**
+     * Cancel scheduled morning brief.
+     */
+    fun cancelMorningBrief(context: Context) {
+        DailyBriefGenerator.cancelMorningBrief(context)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Feature: LOCATION COMMANDS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Handle location-setting commands like "yeh mera ghar hai" / "this is my office".
+     */
+    private fun handleLocationCommand(locationType: String, context: Context) {
+        viewModelScope.launch(Dispatchers.Main) {
+            try {
+                val location = withContext(Dispatchers.IO) {
+                    LocationAwarenessManager.getCurrentLocation(context)
+                }
+
+                if (location == null) {
+                    val msg = "Sir, I need location permission to save your ${locationType} location. Please grant it in Settings."
+                    _emotion.value = "confused"
+                    _lastResponse.value = msg
+                    addAssistantMessage(msg, "confused")
+                    _brainState.value = BrainState.SPEAKING
+                    trySynthesizeAndPlay(msg, context)
+                    return@launch
+                }
+
+                when (locationType) {
+                    "home" -> {
+                        LocationAwarenessManager.setHomeLocation(location.latitude, location.longitude, context)
+                        val msg = "Sir, your home location has been saved. I'll adjust my behavior when you're at home."
+                        _emotion.value = "happy"
+                        _lastResponse.value = msg
+                        addAssistantMessage(msg, "happy")
+                    }
+                    "office" -> {
+                        LocationAwarenessManager.setOfficeLocation(location.latitude, location.longitude, context)
+                        val msg = "Sir, your office location has been saved. I'll be more professional when you're at work."
+                        _emotion.value = "happy"
+                        _lastResponse.value = msg
+                        addAssistantMessage(msg, "happy")
+                    }
+                }
+
+                // Update location context
+                val locCtx = withContext(Dispatchers.IO) {
+                    LocationAwarenessManager.getLocationContext(context)
+                }
+                if (locCtx.isNotBlank()) {
+                    _locationContext.value = locCtx
+                }
+
+                _brainState.value = BrainState.SPEAKING
+                _audioAmplitude.value = 0.5f
+                trySynthesizeAndPlay(_lastResponse.value, context)
+            } catch (e: Exception) {
+                Log.e(TAG, "[handleLocationCommand] Error: ${e.message}")
+                addAssistantMessage("Sir, I couldn't save that location. ${e.message?.take(100)}", "stressed")
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // WEB SEARCH — Live Internet Search
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Perform a live web search and return results.
+     */
+    suspend fun performWebSearch(query: String): String {
+        return withContext(Dispatchers.IO) {
+            try {
+                val apiKey = settingsRepository.getWebSearchApiKey()
+                val cx = settingsRepository.getWebSearchCx()
+                webSearchEngine.search(query, apiKey, cx)
+            } catch (e: Exception) {
+                Log.e(TAG, "[performWebSearch] Error: ${e.message}")
+                "Search failed: ${e.message?.take(100)}"
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // NOTIFICATION READER — Read and Announce Notifications
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Read recent notifications, optionally filtered by app.
+     * Returns formatted text suitable for TTS.
+     */
+    fun getNotificationsText(count: Int = 5, packageFilter: String? = null): String {
+        val notifications = NotificationReaderService.getRecentNotifications(count, packageFilter)
+        if (notifications.isEmpty()) {
+            return "Sir, koi naya notification nahi hai."
+        }
+
+        val sb = StringBuilder()
+        for (notif in notifications) {
+            val svc = NotificationReaderService.getInstance()
+            sb.appendLine(svc?.formatForTTS(notif) ?: "${notif.appName}: ${notif.title} - ${notif.content}")
+        }
+        return sb.toString().trimEnd()
+    }
+
+    /**
+     * Enable or disable the notification reader.
+     */
+    fun setNotificationsEnabled(enabled: Boolean) {
+        _notificationsEnabled.value = enabled
+        NotificationReaderService.setNotificationsEnabled(enabled)
+        viewModelScope.launch(Dispatchers.IO) {
+            settingsRepository.setNotificationsEnabled(enabled)
+        }
+    }
 
     fun toggleVoiceMode(context: Context) {
         Log.d(AUDIO_TAG, "[toggleVoiceMode] voiceMode=${_isVoiceMode.value} isListening=${_isListening.value}")
@@ -2282,17 +2665,47 @@ Keep responses concise but informative. If you detect an emotion in the user's q
     // Current active session ID for Room DB
     @Volatile
     private var currentSessionId: Long = -1L
+        set(value) {
+            field = value
+            _currentSessionIdFlow.value = value
+        }
 
     private fun addUserMessage(text: String) {
         _messages.value += ChatMessage(id = nextMessageId++, content = text, isFromUser = true)
         // Persist to Room DB
         persistMessage("user", text, "neutral")
+        // MEMORY: Extract and store memory tags from user message
+        extractMemoryTagsAsync(text)
     }
 
     private fun addAssistantMessage(text: String, emotion: String) {
         _messages.value += ChatMessage(id = nextMessageId++, content = text, isFromUser = false, emotion = emotion)
         // Persist to Room DB
         persistMessage("model", text, emotion)
+    }
+
+    /**
+     * Extract memory tags from a user message asynchronously.
+     * Tags are stored in the memory_tags table for semantic recall.
+     */
+    private fun extractMemoryTagsAsync(userMessage: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val ctx = getApplicationContext() ?: return@launch
+                val dao = com.jarvis.assistant.data.local.JarvisDatabase.getInstance(ctx).messageDao()
+                // Find the most recent user message to get its ID
+                if (currentSessionId < 0) return@launch
+                val messages = dao.getLastMessages(currentSessionId, 1)
+                val latestMsg = messages.lastOrNull { it.role == "user" } ?: return@launch
+                // Get last assistant message for context
+                val lastAssistantMsg = messages.lastOrNull { it.role == "model" }?.content ?: ""
+                ConversationMemory.extractAndStoreTags(
+                    userMessage, lastAssistantMsg, latestMsg.id, ctx
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "[extractMemoryTagsAsync] Error: ${e.message}")
+            }
+        }
     }
 
     /**
@@ -2352,6 +2765,9 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                 }
 
                 Log.d(TAG, "[persistMessage] Persisted $role message to session $currentSessionId (total: $count)")
+
+                // Refresh sessions list so the drawer shows updated data
+                loadChatSessions()
             } catch (e: Exception) {
                 Log.e(TAG, "[persistMessage] Failed to persist: ${e.message}")
             }
@@ -2387,8 +2803,138 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                         Log.i(TAG, "[loadChatHistory] Loaded ${chatMessages.size} messages from session '${session.title}'")
                     }
                 }
+
+                // Also load sessions list for the drawer
+                loadChatSessions()
             } catch (e: Exception) {
                 Log.e(TAG, "[loadChatHistory] Failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Load all chat sessions from Room DB for the drawer.
+     * Maps SessionEntity objects to ChatSession UI models.
+     */
+    fun loadChatSessions() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val ctx = getApplicationContext() ?: return@launch
+                val dao = com.jarvis.assistant.data.local.JarvisDatabase.getInstance(ctx).messageDao()
+
+                val sessions = dao.getAllSessions()
+                val chatSessions = sessions.map { entity ->
+                    // Load a few messages for preview
+                    val msgs = dao.getLastMessages(entity.id, 50)
+                    val chatMessages = msgs.map { msg ->
+                        ChatMessage(
+                            id = msg.id,
+                            content = msg.content,
+                            isFromUser = msg.role == "user",
+                            emotion = msg.emotion,
+                            timestamp = msg.timestamp
+                        )
+                    }
+                    com.jarvis.assistant.ui.screens.ChatSession(
+                        id = entity.id,
+                        title = entity.title,
+                        preview = entity.preview,
+                        timestamp = entity.lastActivityTimestamp,
+                        messages = chatMessages
+                    )
+                }
+                _chatSessions.value = chatSessions
+                Log.d(TAG, "[loadChatSessions] Loaded ${chatSessions.size} sessions")
+            } catch (e: Exception) {
+                Log.e(TAG, "[loadChatSessions] Failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Start a new chat session.
+     * Creates a new session in Room DB, clears current messages, updates currentSessionId.
+     */
+    fun startNewChat() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val ctx = getApplicationContext() ?: return@launch
+                val dao = com.jarvis.assistant.data.local.JarvisDatabase.getInstance(ctx).messageDao()
+
+                // Create a new session
+                val sessionId = dao.insertSession(
+                    com.jarvis.assistant.data.local.SessionEntity(
+                        title = "New Chat",
+                        preview = "",
+                        messageCount = 0
+                    )
+                )
+                currentSessionId = sessionId
+                _messages.value = emptyList()
+                nextMessageId = 0L
+                Log.i(TAG, "[startNewChat] Created new session: $sessionId")
+
+                // Refresh sessions list
+                loadChatSessions()
+            } catch (e: Exception) {
+                Log.e(TAG, "[startNewChat] Failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Load a specific chat session from Room DB.
+     * Switches the current session and loads all its messages.
+     */
+    fun loadSession(session: com.jarvis.assistant.ui.screens.ChatSession) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val ctx = getApplicationContext() ?: return@launch
+                val dao = com.jarvis.assistant.data.local.JarvisDatabase.getInstance(ctx).messageDao()
+
+                currentSessionId = session.id
+
+                // Load all messages for this session
+                val messages = dao.getAllMessagesForSession(session.id)
+                val chatMessages = messages.map { entity ->
+                    ChatMessage(
+                        id = nextMessageId++,
+                        content = entity.content,
+                        isFromUser = entity.role == "user",
+                        emotion = entity.emotion,
+                        timestamp = entity.timestamp
+                    )
+                }
+                _messages.value = chatMessages
+                Log.i(TAG, "[loadSession] Loaded ${chatMessages.size} messages from session '${session.title}'")
+
+                // Refresh sessions list to update selection
+                loadChatSessions()
+            } catch (e: Exception) {
+                Log.e(TAG, "[loadSession] Failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Clear all chat history — deletes all sessions and messages from Room DB.
+     */
+    fun clearAllHistory() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val ctx = getApplicationContext() ?: return@launch
+                val dao = com.jarvis.assistant.data.local.JarvisDatabase.getInstance(ctx).messageDao()
+
+                dao.deleteAllSessions()
+                currentSessionId = -1L
+                _messages.value = emptyList()
+                nextMessageId = 0L
+                Log.i(TAG, "[clearAllHistory] All sessions and messages deleted")
+
+                // Refresh sessions list (now empty)
+                loadChatSessions()
+            } catch (e: Exception) {
+                Log.e(TAG, "[clearAllHistory] Failed: ${e.message}")
             }
         }
     }
@@ -2498,7 +3044,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                 amplitudePulseJob?.cancel()
                 amplitudePulseJob = null
                 currentTtsTempPath = null
-                isProcessing = false  // Release processing lock
+                isProcessing.set(false)  // Release processing lock
                 try {
                     tmp.delete()
                     Log.d(AUDIO_TAG, "[playMp3AudioAsync] Temp file deleted on completion")
@@ -2531,7 +3077,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                         fallbackToNativeTts(fallbackText, context)
                     }
                 } else {
-                    isProcessing = false
+                    isProcessing.set(false)
                     toast(context, "MediaPlayer error: what=$what extra=$extra")
                 }
                 true
@@ -2590,7 +3136,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
     override fun onCleared() {
         super.onCleared()
         Log.d(AUDIO_TAG, "[onCleared] ViewModel cleared")
-        isProcessing = false  // Reset processing lock
+        isProcessing.set(false)  // Reset processing lock
         amplitudePulseJob?.cancel()
         amplitudePulseJob = null
         releaseMediaPlayer()
@@ -2619,6 +3165,12 @@ Keep responses concise but informative. If you detect an emotion in the user's q
         } catch (_: Exception) {}
 
         ShizukuManager.setOnShizukuStateChangedListener {}
+
+        // Feature: Stop proactive device monitor
+        try {
+            ProactiveDeviceMonitor.onAlertCallback = null
+            ProactiveDeviceMonitor.stopMonitoring()
+        } catch (_: Exception) {}
 
         // FIX #4: Release ToneGenerator
         try {

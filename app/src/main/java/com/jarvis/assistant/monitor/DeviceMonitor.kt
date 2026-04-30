@@ -156,23 +156,68 @@ object DeviceMonitor {
         )
     }
 
+    /**
+     * Compute CPU usage by reading /proc/stat twice with a 1-second gap.
+     *
+     * A single read of /proc/stat is meaningless — it shows cumulative
+     * time since boot. The difference between two samples gives the
+     * actual CPU usage over the measurement interval.
+     *
+     * Returns CPU usage as a percentage (0.0 - 100.0), or -1f on error.
+     */
     private fun getCpuUsage(): Float {
         return try {
-            val reader = RandomAccessFile("/proc/stat", "r")
-            val line = reader.readLine()
-            reader.close()
-
-            val parts = line.split("\\s+".toRegex())
-            if (parts.size > 8) {
-                val idle = parts[4].toLong()
-                val total = parts.subList(1, 8).sumOf { it.toLong() }
-                if (total > 0) {
-                    ((total - idle) * 100f) / total
-                } else 0f
-            } else 0f
+            val stat1 = readProcStat()
+            Thread.sleep(1000)
+            val stat2 = readProcStat()
+            computeCpuUsage(stat1, stat2)
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to compute CPU usage", e)
             -1f
         }
+    }
+
+    /**
+     * Read and parse /proc/stat, returning a list of CPU time values.
+     * Format: cpu  user nice system idle iowait irq softirq steal guest guest_nice
+     * Returns a list of Long values (index 0 = user, index 7 = guest_nice).
+     */
+    private fun readProcStat(): List<Long> {
+        val reader = RandomAccessFile("/proc/stat", "r")
+        val line = reader.readLine()
+        reader.close()
+
+        val parts = line.split("\\s+".toRegex())
+        // parts[0] = "cpu", parts[1..8+] = time values
+        return parts.drop(1).map { it.toLongOrNull() ?: 0L }
+    }
+
+    /**
+     * Compute CPU usage percentage from two /proc/stat samples.
+     *
+     * Formula: usage = (delta_busy / delta_total) * 100
+     * Where: delta_busy = delta_total - delta_idle
+     */
+    private fun computeCpuUsage(stat1: List<Long>, stat2: List<Long>): Float {
+        val idle1 = stat1.getOrElse(3) { 0L }
+        val idle2 = stat2.getOrElse(3) { 0L }
+
+        // iowait is also idle time (index 4)
+        val iowait1 = stat1.getOrElse(4) { 0L }
+        val iowait2 = stat2.getOrElse(4) { 0L }
+
+        val totalIdle1 = idle1 + iowait1
+        val totalIdle2 = idle2 + iowait2
+
+        val total1 = stat1.sum()
+        val total2 = stat2.sum()
+
+        val deltaIdle = totalIdle2 - totalIdle1
+        val deltaTotal = total2 - total1
+
+        return if (deltaTotal > 0) {
+            ((deltaTotal - deltaIdle) * 100f) / deltaTotal
+        } else 0f
     }
 
     private fun getMaxCpuFrequency(): Int {

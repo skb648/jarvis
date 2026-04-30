@@ -392,7 +392,12 @@ class JarvisAccessibilityService : AccessibilityService() {
             // First, ensure the node is focused
             if (!node.isFocused) {
                 node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-                Thread.sleep(50) // Brief delay for focus to take effect
+                // Use handler.postDelayed instead of Thread.sleep to avoid blocking
+                val focusLatch = java.util.concurrent.CountDownLatch(1)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    focusLatch.countDown()
+                }, 50)
+                focusLatch.await(100, java.util.concurrent.TimeUnit.MILLISECONDS)
             }
 
             // Clear existing text first
@@ -733,12 +738,24 @@ class JarvisAccessibilityService : AccessibilityService() {
     private fun findScrollableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         var current = node
         var depth = 0
+        var prev: AccessibilityNodeInfo? = null
         while (depth < MAX_CLICKABLE_ANCESTOR_DEPTH) {
-            if (current.isScrollable) return current
-            val parent = current.parent ?: return null
+            if (current.isScrollable) {
+                // Recycle intermediate parent nodes we traversed through
+                prev?.recycle()
+                return current
+            }
+            val parent = current.parent ?: run {
+                prev?.recycle()
+                return null
+            }
+            // Recycle the previous intermediate node (not the starting node)
+            if (depth > 0) prev?.recycle()
+            prev = parent
             current = parent
             depth++
         }
+        prev?.recycle()
         return null
     }
 
@@ -855,8 +872,13 @@ class JarvisAccessibilityService : AccessibilityService() {
             results.add(node)
         }
         for (i in 0 until node.childCount) {
-            node.getChild(i)?.let { child ->
-                findNodesByTextRecursive(child, query, results, depth + 1)
+            val child = node.getChild(i)
+            try {
+                if (child != null) {
+                    findNodesByTextRecursive(child, query, results, depth + 1)
+                }
+            } finally {
+                child?.recycle()
             }
         }
     }
@@ -896,8 +918,13 @@ class JarvisAccessibilityService : AccessibilityService() {
             results.add(node)
         }
         for (i in 0 until node.childCount) {
-            node.getChild(i)?.let { child ->
-                findNodesByIdRecursive(child, query, results, depth + 1)
+            val child = node.getChild(i)
+            try {
+                if (child != null) {
+                    findNodesByIdRecursive(child, query, results, depth + 1)
+                }
+            } finally {
+                child?.recycle()
             }
         }
     }
@@ -905,12 +932,24 @@ class JarvisAccessibilityService : AccessibilityService() {
     private fun findClickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         var current = node
         var depth = 0
+        var prev: AccessibilityNodeInfo? = null
         while (depth < MAX_CLICKABLE_ANCESTOR_DEPTH) {
-            if (current.isClickable) return current
-            val parent = current.parent ?: return null
+            if (current.isClickable) {
+                // Recycle intermediate parent nodes we traversed through
+                prev?.recycle()
+                return current
+            }
+            val parent = current.parent ?: run {
+                prev?.recycle()
+                return null
+            }
+            // Recycle the previous intermediate node (not the starting node)
+            if (depth > 0) prev?.recycle()
+            prev = parent
             current = parent
             depth++
         }
+        prev?.recycle()
         return null
     }
 

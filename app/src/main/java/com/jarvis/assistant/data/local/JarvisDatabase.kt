@@ -33,13 +33,14 @@ import androidx.room.RoomDatabase
  * ═══════════════════════════════════════════════════════════════════════
  */
 @Database(
-    entities = [MessageEntity::class, SessionEntity::class],
-    version = 1,
+    entities = [MessageEntity::class, SessionEntity::class, com.jarvis.assistant.memory.MemoryTag::class],
+    version = 2,
     exportSchema = false
 )
 abstract class JarvisDatabase : RoomDatabase() {
 
     abstract fun messageDao(): MessageDao
+    abstract fun memoryDao(): com.jarvis.assistant.memory.MemoryDao
 
     companion object {
         private const val DATABASE_NAME = "jarvis_brain"

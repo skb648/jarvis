@@ -26,6 +26,9 @@ class JarvisApp : Application() {
 
         Log.i(TAG, "JARVIS Application starting...")
 
+        // 0. Initialize PrivacyVault for encrypted API key storage
+        settingsRepository.initPrivacyVault(this)
+
         // 1. Initialize Shizuku (needed before Rust init for permission checks)
         ShizukuManager.init()
 

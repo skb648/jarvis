@@ -37,7 +37,7 @@ Java_com_jarvis_assistant_jni_RustBridge_nativeInitialize(
 
 JNIEXPORT jstring JNICALL
 Java_com_jarvis_assistant_jni_RustBridge_nativeProcessQuery(
-    JNIEnv *env, jclass clazz, jstring query, jstring context, jstring historyJson) {
+    JNIEnv *env, jclass clazz, jstring query, jstring context, jstring historyJson, jstring systemPrompt) {
     LOGI("STUB: nativeProcessQuery called — Rust core not available, use Kotlin HTTP fallback");
     // FIX v13: Return [ERROR] prefix so Kotlin fallback logic is triggered.
     // The ViewModel checks for [ERROR] to decide whether to fall back to
@@ -48,7 +48,7 @@ Java_com_jarvis_assistant_jni_RustBridge_nativeProcessQuery(
 
 JNIEXPORT jstring JNICALL
 Java_com_jarvis_assistant_jni_RustBridge_nativeProcessQueryWithImage(
-    JNIEnv *env, jclass clazz, jstring query, jstring imageBase64, jstring mimeType) {
+    JNIEnv *env, jclass clazz, jstring query, jstring imageBase64, jstring mimeType, jstring systemPrompt) {
     LOGI("STUB: nativeProcessQueryWithImage called — Rust core not available");
     return (*env)->NewStringUTF(env, "[ERROR] Vision queries require the Rust core. Please build with rust/build.sh.");
 }

@@ -82,10 +82,12 @@ pub extern "system" fn Java_com_jarvis_assistant_jni_RustBridge_nativeProcessQue
     query: JString<'local>,
     context: JString<'local>,
     history_json: JString<'local>,
+    system_prompt: JString<'local>,
 ) -> jstring {
     let query_str = jni_helpers::jstring_to_string(&mut env, &query);
     let context_str = jni_helpers::jstring_to_string(&mut env, &context);
     let history_str = jni_helpers::jstring_to_string(&mut env, &history_json);
+    let system_prompt_str = jni_helpers::jstring_to_string(&mut env, &system_prompt);
 
     // SAFETY: block_on() is called from a JNI thread (Kotlin Dispatchers.IO),
     // which is independent of the Tokio runtime's worker thread pool. The Tokio
@@ -94,7 +96,7 @@ pub extern "system" fn Java_com_jarvis_assistant_jni_RustBridge_nativeProcessQue
     // thread blocks independently while waiting for the async result.
     let rt = runtime();
     let result =
-        rt.block_on(async { gemini::process_query(&query_str, &context_str, &history_str).await });
+        rt.block_on(async { gemini::process_query(&query_str, &context_str, &history_str, &system_prompt_str).await });
 
     match result {
         Ok(response) => jni_helpers::string_to_jstring(&mut env, &response).into_raw(),
@@ -114,16 +116,18 @@ pub extern "system" fn Java_com_jarvis_assistant_jni_RustBridge_nativeProcessQue
     query: JString<'local>,
     image_base64: JString<'local>,
     mime_type: JString<'local>,
+    system_prompt: JString<'local>,
 ) -> jstring {
     let query_str = jni_helpers::jstring_to_string(&mut env, &query);
     let image_b64 = jni_helpers::jstring_to_string(&mut env, &image_base64);
     let mime = jni_helpers::jstring_to_string(&mut env, &mime_type);
+    let system_prompt_str = jni_helpers::jstring_to_string(&mut env, &system_prompt);
 
     // SAFETY: Same rationale as nativeProcessQuery — JNI thread is independent
     // of the Tokio worker pool; no deadlock risk.
     let rt = runtime();
     let result = rt
-        .block_on(async { gemini::process_query_with_image(&query_str, &image_b64, &mime).await });
+        .block_on(async { gemini::process_query_with_image(&query_str, &image_b64, &mime, &system_prompt_str).await });
 
     match result {
         Ok(response) => jni_helpers::string_to_jstring(&mut env, &response).into_raw(),

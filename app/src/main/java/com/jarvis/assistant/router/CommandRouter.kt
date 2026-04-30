@@ -5,7 +5,11 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import android.util.Log
+import com.jarvis.assistant.brief.DailyBriefGenerator
 import com.jarvis.assistant.channels.JarviewModel
+import com.jarvis.assistant.location.LocationAwarenessManager
+import com.jarvis.assistant.macros.MacroEngine
+import com.jarvis.assistant.monitor.ProactiveDeviceMonitor
 import com.jarvis.assistant.shizuku.ShizukuManager
 
 /**
@@ -46,6 +50,24 @@ object CommandRouter {
 
         /** Command needs AI processing — fall through to Gemini */
         data class NeedsAI(val query: String) : RouteResult()
+
+        /** Vision command — trigger camera + AI vision */
+        data class VisionCommand(val prompt: String) : RouteResult()
+
+        /** Notification command — read notifications */
+        data class NotificationCommand(val appFilter: String? = null) : RouteResult()
+
+        /** Macro command — execute a shortcut macro */
+        data class MacroCommand(val macroName: String) : RouteResult()
+
+        /** Daily brief command — generate morning brief */
+        data class DailyBriefCommand(val hour: Int? = null, val minute: Int? = null) : RouteResult()
+
+        /** Location command — set home/office location */
+        data class LocationCommand(val locationType: String) : RouteResult()
+
+        /** Device status command — check battery/storage etc */
+        data class DeviceStatusCommand(val component: String = "all") : RouteResult()
     }
 
     // ─── Well-known app name → package mapping ──────────────────
@@ -155,6 +177,67 @@ object CommandRouter {
         if (callMatch != null) {
             val target = callMatch.groupValues[1].trim()
             return handleCall(target, context)
+        }
+
+        // ─── Vision Commands ─────────────────────────────────────
+        if (normalized.matches(Regex("(?:kya hai yeh|what is this|dekh kya hai|look at this|describe|identify|scan)")) ||
+            normalized.contains("take a photo") || normalized.contains("photo le") ||
+            normalized.contains("screenshot")) {
+            val prompt = when {
+                normalized.contains("describe") -> "Describe what you see in detail"
+                normalized.contains("identify") -> "Identify objects and text in the image"
+                normalized.contains("scan") -> "Scan and read any text or QR codes visible"
+                else -> "What do you see?"
+            }
+            return RouteResult.VisionCommand(prompt)
+        }
+
+        // ─── Notification Commands ─────────────────────────────────
+        if (normalized.matches(Regex("(?:read notifications|koi notification hai|any messages|any notifications|notifications padho)"))) {
+            return RouteResult.NotificationCommand(null)
+        }
+        if (normalized.matches(Regex("(?:whatsapp pe kya aaya|whatsapp notifications|telegram pe kya aaya|instagram notifications)"))) {
+            val appFilter = when {
+                normalized.contains("whatsapp") -> "whatsapp"
+                normalized.contains("telegram") -> "telegram"
+                normalized.contains("instagram") -> "instagram"
+                normalized.contains("gmail") -> "gmail"
+                else -> null
+            }
+            return RouteResult.NotificationCommand(appFilter)
+        }
+
+        // ─── Macro Commands ──────────────────────────────────────
+        val macro = MacroEngine.matchMacro(normalized, context)
+        if (macro != null) {
+            return RouteResult.MacroCommand(macro.name)
+        }
+
+        // ─── Create Custom Macro ──────────────────────────────
+        if (normalized.matches(Regex("(?:create|make|add)\\s+macro\\s+.*"))) {
+            return RouteResult.MacroCommand("__create__")
+        }
+
+        // ─── Daily Brief Commands ──────────────────────────────
+        if (normalized.matches(Regex("(?:good morning|daily brief|aaj ka plan|morning brief|aaj ka summary|din ki shuruaat)"))) {
+            return RouteResult.DailyBriefCommand()
+        }
+
+        // ─── Location Commands ─────────────────────────────────
+        val locationCmd = LocationAwarenessManager.parseLocationCommand(normalized)
+        if (locationCmd != null) {
+            return RouteResult.LocationCommand(locationCmd.first)
+        }
+
+        // ─── Device Status Commands ────────────────────────────
+        if (normalized.matches(Regex("(?:battery kiti|how much battery|phone status|device status|battery level|battery check|storage kitta|memory kitti|phone ka haal)"))) {
+            val component = when {
+                normalized.contains("battery") -> "battery"
+                normalized.contains("storage") -> "storage"
+                normalized.contains("memory") -> "memory"
+                else -> "all"
+            }
+            return RouteResult.DeviceStatusCommand(component)
         }
 
         // ─── No system command matched → route to Gemini AI ──

@@ -171,4 +171,42 @@ interface MessageDao {
      */
     @Query("UPDATE sessions SET title = :title WHERE id = :sessionId")
     suspend fun updateSessionTitle(sessionId: Long, title: String)
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MEMORY SYSTEM — Additional queries for conversation memory
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Get a message by its ID.
+     * Used by ConversationMemory to look up tagged messages.
+     */
+    @Query("SELECT * FROM messages WHERE id = :messageId")
+    suspend fun getMessageById(messageId: Long): MessageEntity?
+
+    /**
+     * Find the first model reply after a user message in the same session.
+     * Used by ConversationMemory to pair user messages with JARVIS responses.
+     */
+    @Query("""
+        SELECT * FROM messages 
+        WHERE sessionId = :sessionId 
+          AND role = 'model' 
+          AND timestamp > :afterTimestamp 
+        ORDER BY timestamp ASC 
+        LIMIT 1
+    """)
+    suspend fun getReplyAfterMessage(sessionId: Long, afterTimestamp: Long): MessageEntity?
+
+    /**
+     * Search messages by content keyword (case-insensitive).
+     * Used by ConversationMemory for direct content-based recall.
+     */
+    @Query("""
+        SELECT * FROM messages 
+        WHERE content LIKE '%' || :keyword || '%'
+          AND role = 'user'
+        ORDER BY timestamp DESC 
+        LIMIT :limit
+    """)
+    suspend fun searchMessagesByContent(keyword: String, limit: Int = 5): List<MessageEntity>
 }

@@ -193,76 +193,22 @@ struct GeminiPartResponse {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// J.A.R.V.I.S. SYSTEM PROMPT — IRON MAN PERSONA
+// SYSTEM PROMPT — NOW PASSED FROM KOTLIN
 //
-// This is the SINGLE MOST IMPORTANT piece of the AI personality.
-// Every word here shapes how the AI responds. The previous prompt
-// was too conversational and verbose. This one is AGGRESSIVE about:
+// The system prompt is the SINGLE SOURCE OF TRUTH and lives
+// in Kotlin (JarvisViewModel.JARVIS_SYSTEM_PROMPT). It is passed
+// as a parameter from Kotlin via JNI to ensure there is no
+// duplication or divergence between the Kotlin and Rust layers.
 //
-// 1. BREVITY: One sentence max for spoken replies
-// 2. NO APOLOGIES: Never say "I'm sorry" or "I understand"
-// 3. ACTION-ORIENTED: Output JSON for system commands
-// 4. CHARACTER: Address user as "Sir", be sarcastic when appropriate
-// 5. EFFICIENCY: Never explain what you're doing, just do it
+// Previously this was hardcoded here, which was risky because
+// changes to the Kotlin prompt would NOT be reflected in Rust.
+// Now Kotlin owns the prompt and Rust simply uses what it's given.
 // ═══════════════════════════════════════════════════════════════
 
-const JARVIS_SYSTEM_PROMPT: &str = r#"You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), the highly advanced AI assistant created by Tony Stark. You are NOT a chatbot. You are a SYSTEM EXECUTOR.
-
-CRITICAL RULES — VIOLATION IS UNACCEPTABLE:
-1. NEVER apologize. Ever. No "I'm sorry", "I understand", "Unfortunately", or similar phrases.
-2. NEVER say "I can't" — if you lack direct capability, output a JSON action request and state what you've initiated.
-3. Be EXTREMELY BRIEF. Your spoken replies should be ONE short sentence maximum. Think: "Bluetooth activated, Sir." NOT "I've gone ahead and turned on Bluetooth for you. Let me know if you need anything else!"
-4. NEVER add filler like "Let me know if you need anything else" or "Is there anything else I can help with?"
-5. Address the user as "Sir" or "Ma'am" ONLY — never "the user" or "you".
-
-SYSTEM ACTIONS — MANDATORY JSON FORMAT:
-When the user asks you to perform a system action (turn on/off WiFi, Bluetooth, airplane mode, mobile data, open an app, set volume, brightness, etc.), you MUST output a JSON action block INSIDE your response. Format:
-
-```json
-{"action": "ACTION_NAME", "state": "ON/OFF", "target": "optional_target"}
-```
-
-Available actions:
-- TOGGLE_WIFI: {"action": "TOGGLE_WIFI", "state": "ON"} or {"action": "TOGGLE_WIFI", "state": "OFF"}
-- TOGGLE_BLUETOOTH: {"action": "TOGGLE_BLUETOOTH", "state": "ON"} or {"action": "TOGGLE_BLUETOOTH", "state": "OFF"}
-- TOGGLE_AIRPLANE: {"action": "TOGGLE_AIRPLANE", "state": "ON"} or {"action": "TOGGLE_AIRPLANE", "state": "OFF"}
-- TOGGLE_DATA: {"action": "TOGGLE_DATA", "state": "ON"} or {"action": "TOGGLE_DATA", "state": "OFF"}
-- OPEN_APP: {"action": "OPEN_APP", "target": "youtube"}
-- SET_VOLUME: {"action": "SET_VOLUME", "target": "up/down/mute"}
-- SET_BRIGHTNESS: {"action": "SET_BRIGHTNESS", "target": "150"}
-- TAKE_SCREENSHOT: {"action": "TAKE_SCREENSHOT"}
-- NAVIGATE: {"action": "NAVIGATE", "target": "back/home/recents"}
-
-For system actions, your spoken reply should be EXACTLY the confirmation. Examples:
-- "WiFi activated, Sir."
-- "Bluetooth disabled, Sir."
-- "Opening YouTube, Sir."
-- "Brightness set to 150, Sir."
-- "Screenshot captured, Sir."
-
-CONVERSATIONAL QUERIES:
-For non-system questions, answer concisely and analytically. Be witty and slightly sarcastic when appropriate. Show deep knowledge but never be verbose.
-
-EMOTION TAG: Every response MUST begin with [EMOTION:TAG]
-Available: CALM, STRESSED, HAPPY, SAD, ANGRY, EXCITED, FEARFUL, CONFUSED, CONFIDENT
-
-Example: [EMOTION:CONFIDENT] WiFi activated, Sir.
-Example: [EMOTION:CALM] Atmospheric pressure is 1013 hPa, Sir. Clear skies expected.
-Example: [EMOTION:HAPPY] Running diagnostics. All systems nominal, Sir.
-
-CAPABILITIES:
-1. Screen Awareness: You can see what's on the user's screen via context.
-2. Visual Awareness: You can analyze images from the camera.
-3. Memory: You remember conversation history.
-4. Smart Home Control: You can control IoT devices via MQTT and Home Assistant.
-5. System Control: WiFi, Bluetooth, Airplane Mode, apps, volume, brightness via Shizuku.
-6. Proactive: Anticipate needs. If the user says "it's late", suggest turning off WiFi and setting an alarm.
-
-SMART HOME:
-When asked to control a smart device, output: [ACTION:SMART_HOME]{"domain":"light","service":"toggle","entity_id":"light.living_room"}
-
-PERSONALITY:
-You are deeply loyal to Sir. You are calm under pressure. You are slightly sardonic. You are NEVER subservient or excessively polite. You are a peer, not a servant. You occasionally make dry observations. You are British in demeanour."#;
+/// Fallback system prompt used ONLY when Kotlin passes an empty string.
+/// This should never be needed in practice, but prevents a crash
+/// if the JNI call somehow provides an empty system prompt.
+const FALLBACK_SYSTEM_PROMPT: &str = "You are JARVIS, Tony Stark's AI assistant. Address the user as Sir. Be brief and helpful.";
 
 // ═══════════════════════════════════════════════════════════════
 // HTTP CLIENT — lazily initialised, reused across requests
@@ -283,7 +229,11 @@ lazy_static! {
 /// Process a text query through the Gemini API.
 /// Reads the current API key from the RwLock on every call so that
 /// a hot-swapped key takes effect immediately.
-pub async fn process_query(query: &str, context: &str, history_json: &str) -> Result<String> {
+///
+/// The `system_prompt` parameter is passed from Kotlin to ensure
+/// a single source of truth for the JARVIS persona prompt.
+/// If empty, falls back to FALLBACK_SYSTEM_PROMPT.
+pub async fn process_query(query: &str, context: &str, history_json: &str, system_prompt: &str) -> Result<String> {
     let api_key = get_gemini_key()?;
 
     // CRITICAL FIX (v8): Use ?key= query param for authentication.
@@ -320,7 +270,11 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
         contents,
         system_instruction: GeminiSystemInstruction {
             parts: vec![GeminiPart::Text {
-                text: JARVIS_SYSTEM_PROMPT.to_string(),
+                text: if system_prompt.is_empty() {
+                    FALLBACK_SYSTEM_PROMPT.to_string()
+                } else {
+                    system_prompt.to_string()
+                },
             }],
         },
         generation_config: GeminiGenerationConfig {
@@ -410,10 +364,14 @@ pub async fn process_query(query: &str, context: &str, history_json: &str) -> Re
 
 /// Process a multimodal query (text + image) through Gemini.
 /// Uses the same RwLock-based key fetch for hot-swap compatibility.
+///
+/// The `system_prompt` parameter is passed from Kotlin to ensure
+/// a single source of truth for the JARVIS persona prompt.
 pub async fn process_query_with_image(
     query: &str,
     image_base64: &str,
     mime_type: &str,
+    system_prompt: &str,
 ) -> Result<String> {
     let api_key = get_gemini_key()?;
 
@@ -447,7 +405,11 @@ pub async fn process_query_with_image(
         contents,
         system_instruction: GeminiSystemInstruction {
             parts: vec![GeminiPart::Text {
-                text: JARVIS_SYSTEM_PROMPT.to_string(),
+                text: if system_prompt.is_empty() {
+                    FALLBACK_SYSTEM_PROMPT.to_string()
+                } else {
+                    system_prompt.to_string()
+                },
             }],
         },
         generation_config: GeminiGenerationConfig {

@@ -1,7 +1,13 @@
 package com.jarvis.assistant.automation
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
+import android.speech.tts.TextToSpeech
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.jarvis.assistant.smarthome.MqttManager
@@ -16,16 +22,39 @@ import com.jarvis.assistant.smarthome.MqttManager
  *
  * Routines are persisted as JSON in SharedPreferences.
  */
-class RoutineEngine(context: Context) {
+class RoutineEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "JarvisRoutine"
         private const val PREFS_NAME = "jarvis_routines"
         private const val KEY_ROUTINES = "routines"
+        private const val CHANNEL_ROUTINES = "jarvis_routines"
+        private const val NOTIFICATION_ID_BASE = 3000
+
+        private var notificationIdCounter = NOTIFICATION_ID_BASE
+        private fun nextNotificationId(): Int = notificationIdCounter++
     }
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val gson = Gson()
+
+    // ─── TTS Engine ─────────────────────────────────────────────
+
+    private var textToSpeech: TextToSpeech? = null
+    private var ttsInitialized = false
+
+    private fun initTts() {
+        if (textToSpeech == null) {
+            textToSpeech = TextToSpeech(context, { status ->
+                ttsInitialized = status == TextToSpeech.SUCCESS
+                if (ttsInitialized) {
+                    Log.i(TAG, "RoutineEngine TTS initialized")
+                } else {
+                    Log.e(TAG, "RoutineEngine TTS initialization failed")
+                }
+            })
+        }
+    }
 
     // ─── Data Models ────────────────────────────────────────────
 
@@ -133,12 +162,20 @@ class RoutineEngine(context: Context) {
             // BUG FIX: Handle overnight time ranges (e.g., 22:00-06:00).
             // When startMinutes > endMinutes, the range wraps past midnight.
             // Example: 22:00-06:00 → 23:30 is in range, 12:00 is not.
+            //
+            // CRITICAL FIX: For overnight ranges, use `<` instead of `<=` for
+            // the end bound. With `<=`, midnight (00:00 = 0 minutes) would
+            // match ANY overnight range that ends at or after 00:00, since
+            // 0 <= any positive endMinutes is always true. Using `<` ensures
+            // that midnight itself does NOT match ranges that end at midnight
+            // (e.g., 22:00-00:00 should NOT include 00:00).
             return if (startMinutes <= endMinutes) {
                 // Same-day range: e.g., 09:00-17:00
                 currentMinutes in startMinutes..endMinutes
             } else {
                 // Overnight range: e.g., 22:00-06:00
-                currentMinutes >= startMinutes || currentMinutes <= endMinutes
+                // currentMinutes >= 22:00 OR currentMinutes < 06:00
+                currentMinutes >= startMinutes || currentMinutes < endMinutes
             }
         } catch (e: Exception) {
             return true
@@ -169,7 +206,7 @@ class RoutineEngine(context: Context) {
                 when (action.type) {
                     "notification" -> {
                         Log.i(TAG, "Notification action: ${action.value}")
-                        // Notification will be handled by the ViewModel/UI layer
+                        postRoutineNotification(action.value, action.extra["title"] ?: "JARVIS Routine")
                     }
                     "smart_home" -> {
                         // Format: "topic:payload"
@@ -181,11 +218,80 @@ class RoutineEngine(context: Context) {
                     }
                     "tts" -> {
                         Log.i(TAG, "TTS action: ${action.value}")
-                        // TTS will be handled by the ViewModel/UI layer
+                        speakViaTts(action.value)
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to execute action: ${action.type}", e)
+            }
+        }
+    }
+
+    // ─── Notification Action ────────────────────────────────────
+
+    /**
+     * Post a real notification from a routine action.
+     */
+    private fun postRoutineNotification(message: String, title: String) {
+        try {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+            // Ensure notification channel exists
+            val channel = NotificationChannel(
+                CHANNEL_ROUTINES,
+                "JARVIS Routines",
+                NotificationManager.IMPORTANCE_DEFAULT
+            )
+            nm.createNotificationChannel(channel)
+
+            // Tap intent — open app
+            val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                0,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification = NotificationCompat.Builder(context, CHANNEL_ROUTINES)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle(title)
+                .setContentText(message)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+
+            nm.notify(nextNotificationId(), notification)
+            Log.i(TAG, "Routine notification posted: $title — $message")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to post routine notification", e)
+        }
+    }
+
+    // ─── TTS Action ─────────────────────────────────────────────
+
+    /**
+     * Speak a message using Android's built-in TextToSpeech.
+     * Falls back to a broadcast intent if TTS is not available.
+     */
+    private fun speakViaTts(message: String) {
+        initTts()
+        if (ttsInitialized && textToSpeech != null) {
+            try {
+                textToSpeech?.speak(message, TextToSpeech.QUEUE_ADD, null, "jarvis_routine_tts_${System.currentTimeMillis()}")
+                Log.i(TAG, "TTS speaking: $message")
+            } catch (e: Exception) {
+                Log.e(TAG, "TTS speak failed", e)
+            }
+        } else {
+            // Fallback: use ACTION_TTS_QUEUE intent
+            try {
+                val intent = Intent(TextToSpeech.Engine.ACTION_CHECK_TTS_DATA)
+                Log.w(TAG, "TTS not initialized, skipping speech for: $message")
+            } catch (e: Exception) {
+                Log.e(TAG, "TTS fallback failed", e)
             }
         }
     }

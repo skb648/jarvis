@@ -10,9 +10,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -20,6 +17,7 @@ import android.os.IBinder
 import android.util.Log
 import com.jarvis.assistant.MainActivity
 import com.jarvis.assistant.channels.JarviewModel
+import kotlinx.coroutines.*
 
 /**
  * JARVIS Sensory Service — Foreground service for audio amplitude monitoring
@@ -44,9 +42,6 @@ class JarvisSensoryService : Service() {
         const val ACTION_DISABLE_SCREEN = "com.jarvis.assistant.DISABLE_SCREEN"
 
         // Audio configuration
-        private const val SAMPLE_RATE = 16000
-        private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
-        private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val AMPLITUDE_UPDATE_INTERVAL_MS = 50L // 20fps
     }
 
@@ -54,15 +49,12 @@ class JarvisSensoryService : Service() {
     private var audioEnabled = true
     private var screenTextEnabled = true
 
-    // Audio recording
-    private var audioRecord: AudioRecord? = null
-    private var audioThread: Thread? = null
-    private var isAudioRecording = false
-    private var bufferSize = 0
+    // Audio amplitude polling — reads from JarviewModel instead of creating a competing AudioRecord
+    private var audioPollingJob: Job? = null
 
     // Screen text polling
-    private var screenTextThread: Thread? = null
-    private var isScreenTextPolling = false
+    private var screenTextJob: Job? = null
+    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     private lateinit var bgHandlerThread: HandlerThread
     private lateinit var bgHandler: Handler
@@ -100,13 +92,6 @@ class JarvisSensoryService : Service() {
         super.onCreate()
         bgHandlerThread = HandlerThread("JarvisSensoryBg").also { it.start() }
         bgHandler = Handler(bgHandlerThread.looper)
-        bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-        // BUG FIX (BUG-26): Validate buffer size before creating AudioRecord
-        if (bufferSize <= 0) {
-            Log.e(TAG, "AudioRecord.getMinBufferSize returned $bufferSize — audio recording not available")
-            bufferSize = 0
-        }
-
         // Register command receiver
         val filter = IntentFilter().apply {
             addAction(ACTION_ENABLE_AUDIO)
@@ -160,151 +145,82 @@ class JarvisSensoryService : Service() {
         unregisterReceiver(commandReceiver)
         isRunning = false
         JarviewModel.sensoryServiceRunning = false
+        serviceScope.cancel()
         bgHandlerThread.quitSafely()
         Log.i(TAG, "Sensory service destroyed")
     }
 
     // ─── Audio Amplitude Monitoring ─────────────────────────────
+    // Instead of creating our own AudioRecord (which conflicts with AudioEngine),
+    // we read the amplitude from JarviewModel.audioAmplitude which is updated
+    // by AudioEngine's callback. This avoids the dual-AudioRecord conflict.
 
     private fun startAudioAmplitude() {
-        if (isAudioRecording || !audioEnabled) return
+        if (audioPollingJob?.isActive == true || !audioEnabled) return
 
-        try {
-            // BUG FIX: Use VOICE_COMMUNICATION instead of VOICE_RECOGNITION.
-            // VOICE_RECOGNITION triggers system beeps on Samsung, Xiaomi, and
-            // other OEM skins. VOICE_COMMUNICATION is zero-beep and includes
-            // echo cancellation / noise suppression — better for voice.
-            // Falls back to MIC if VOICE_COMMUNICATION fails.
-            audioRecord = try {
-                AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                    SAMPLE_RATE,
-                    CHANNEL_CONFIG,
-                    AUDIO_FORMAT,
-                    bufferSize
-                )
-            } catch (e: Exception) {
-                Log.w(TAG, "VOICE_COMMUNICATION failed, falling back to MIC: ${e.message}")
-                AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    SAMPLE_RATE,
-                    CHANNEL_CONFIG,
-                    AUDIO_FORMAT,
-                    bufferSize
-                )
+        audioPollingJob = serviceScope.launch {
+            Log.d(TAG, "Audio amplitude polling started (reading from JarviewModel)")
+            while (isActive && audioEnabled) {
+                // Amplitude is already being set by AudioEngine via onAmplitudeUpdate.
+                // We just forward it to the UI at 20fps.
+                val amplitude = JarviewModel.audioAmplitude.toFloat()
+                JarviewModel.audioRms = amplitude.toDouble()
+                delay(AMPLITUDE_UPDATE_INTERVAL_MS)
             }
-
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e(TAG, "AudioRecord not initialized")
-                return
-            }
-
-            audioRecord?.startRecording()
-            isAudioRecording = true
-
-            audioThread = Thread({
-                val buffer = ShortArray(bufferSize / 2)
-                while (isAudioRecording && !Thread.interrupted()) {
-                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
-                    if (read > 0) {
-                        // Calculate RMS
-                        var sum = 0.0
-                        for (i in 0 until read) {
-                            sum += buffer[i].toDouble() * buffer[i].toDouble()
-                        }
-                        val rms = Math.sqrt(sum / read.toDouble())
-                        val peak = buffer.copyOf(read).maxOf { Math.abs(it.toInt()) }
-
-                        // Convert to dB
-                        val db = 20.0 * Math.log10(rms / 32767.0 + 0.0001)
-
-                        // Update JarviewModel for UI
-                        JarviewModel.audioAmplitude = db
-                        JarviewModel.audioRms = rms
-                        JarviewModel.audioPeak = peak.toDouble()
-                    }
-
-                    try {
-                        Thread.sleep(AMPLITUDE_UPDATE_INTERVAL_MS)
-                    } catch (e: InterruptedException) {
-                        break
-                    }
-                }
-            }, "JarvisAudioAmplitude").also { it.start() }
-
-            Log.d(TAG, "Audio amplitude monitoring started at ${1000.0 / AMPLITUDE_UPDATE_INTERVAL_MS}fps")
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Missing RECORD_AUDIO permission", e)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start audio amplitude", e)
         }
+        Log.d(TAG, "Audio amplitude monitoring started via JarviewModel at ${1000.0 / AMPLITUDE_UPDATE_INTERVAL_MS}fps")
     }
 
     private fun stopAudioAmplitude() {
-        isAudioRecording = false
-        audioThread?.interrupt()
-        audioThread = null
-        try {
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error releasing AudioRecord", e)
-        }
-        audioRecord = null
+        audioPollingJob?.cancel()
+        audioPollingJob = null
     }
 
     // ─── Screen Text Polling ────────────────────────────────────
 
     private fun startScreenTextPolling() {
-        if (isScreenTextPolling || !screenTextEnabled) return
+        if (screenTextJob?.isActive == true || !screenTextEnabled) return
 
-        isScreenTextPolling = true
-        screenTextThread = Thread({
-            while (isScreenTextPolling && !Thread.interrupted()) {
+        screenTextJob = serviceScope.launch {
+            Log.d(TAG, "Screen text polling started (coroutine-based)")
+            while (isActive && screenTextEnabled) {
                 try {
-                    // Read screen text from AccessibilityService via JarviewModel
-                    val accessibilityService = JarviewModel.accessibilityService?.get()
-                    if (accessibilityService != null) {
-                        // BUG FIX (BUG-2): Accessibility tree MUST be accessed on the main thread.
-                        // rootInActiveWindow throws IllegalStateException if called from a background thread.
-                        // We use a blocking queue to get the result from the main thread.
-                        val screenTextResult = java.util.concurrent.LinkedBlockingQueue<String>(1)
-                        Handler(android.os.Looper.getMainLooper()).post {
+                    val screenText = withContext(Dispatchers.Main) {
+                        val accessibilityService = JarviewModel.accessibilityService?.get()
+                        if (accessibilityService != null) {
                             try {
-                                val text = accessibilityService.extractScreenText()
-                                screenTextResult.offer(text ?: "")
+                                accessibilityService.extractScreenText() ?: ""
                             } catch (e: Exception) {
                                 Log.w(TAG, "extractScreenText on main thread failed: ${e.message}")
-                                screenTextResult.offer("")
+                                ""
                             }
+                        } else {
+                            ""
                         }
-                        // Wait up to 3 seconds for the main thread to produce a result
-                        val screenText = screenTextResult.poll(3, java.util.concurrent.TimeUnit.SECONDS) ?: ""
-                        val currentApp = JarviewModel.foregroundApp
-
-                        JarviewModel.screenTextData = screenText
-                        JarviewModel.sendEventToUi("screen_text", mapOf(
-                            "text" to screenText,
-                            "app" to currentApp
-                        ))
                     }
+                    val currentApp = JarviewModel.foregroundApp
 
-                    Thread.sleep(2000) // Poll every 2 seconds
-                } catch (e: InterruptedException) {
+                    JarviewModel.screenTextData = screenText
+                    JarviewModel.sendEventToUi("screen_text", mapOf(
+                        "text" to screenText,
+                        "app" to currentApp
+                    ))
+
+                    delay(2000) // Poll every 2 seconds
+                } catch (e: CancellationException) {
                     break
                 } catch (e: Exception) {
                     Log.w(TAG, "Screen text polling error", e)
+                    delay(2000)
                 }
             }
-        }, "JarvisScreenText").also { it.start() }
-
+        }
         Log.d(TAG, "Screen text polling started")
     }
 
     private fun stopScreenTextPolling() {
-        isScreenTextPolling = false
-        screenTextThread?.interrupt()
-        screenTextThread = null
+        screenTextJob?.cancel()
+        screenTextJob = null
     }
 
     // ─── Foreground Notification ────────────────────────────────

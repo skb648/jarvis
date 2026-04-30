@@ -61,9 +61,13 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
+    <!-- ─── Notification Listener Permission ─────────────────────── -->
+    <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" />
+
     <!-- Hardware features -->
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <application
@@ -194,6 +198,16 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/jarvis_widget_info" />
         </receiver>
+
+        <!-- ─── Notification Reader Service ────────────────────────── -->
+        <service
+            android:name=".notifications.NotificationReaderService"
+            android:exported="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
 
         <!-- ─── Shizuku Provider ──────────────────────────────────── -->
         <provider

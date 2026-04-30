@@ -143,9 +143,12 @@ class AudioEngine(
         // Software wake word detection constants
         private const val SW_WAKE_MIN_FRAMES_ABOVE = 5
         private const val SW_WAKE_MAX_FRAMES_WINDOW = 30
-        // Lowered from 0.030f so wake word triggers on quieter speech
-        private const val SW_WAKE_SPEECH_THRESHOLD = 0.020f
-        private const val SW_WAKE_COOLDOWN_FRAMES = 150
+        // Threshold: at least 2x the RMS SPEECH_THRESHOLD to avoid false triggers
+        private const val SW_WAKE_SPEECH_THRESHOLD = 0.016f
+        // Minimum speech duration: 300ms (at ~46ms per frame @44100Hz/2048)
+        private const val SW_WAKE_MIN_SPEECH_FRAMES = 7  // ~300ms
+        // Cooldown: 3000ms (at ~46ms per frame)
+        private const val SW_WAKE_COOLDOWN_FRAMES = 65  // ~3000ms
     }
 
     enum class VadState { IDLE, SPEECH_DETECTED, SILENCE_AFTER_SPEECH }
@@ -160,6 +163,9 @@ class AudioEngine(
 
     private var audioRecord:    AudioRecord? = null
     private var listeningJob:   Job?         = null
+
+    // Tracks the actual sample rate used for recording (may differ from SAMPLE_RATE_PRIMARY)
+    @Volatile private var actualSampleRate: Int = SAMPLE_RATE_PRIMARY
 
     private var smoothedRms: Float = 0f
     private var silenceStartTime: Long = 0L
@@ -200,6 +206,7 @@ class AudioEngine(
             }
 
             audioRecord = ar
+            actualSampleRate = activeSampleRate
             isRunning   = true
             smoothedRms = 0f
             vadState    = VadState.IDLE
@@ -378,9 +385,15 @@ class AudioEngine(
                 //   - "random beeps out of sync" → no orphaned AudioRecord
                 //   - "audio threads silently lock up" → guaranteed cleanup
                 // ══════════════════════════════════════════════════════════
+                // G3: CRASH-PROOF CLEANUP — guard against double-release
+                // If stopListeningNonBlocking() already released audioRecord,
+                // audioRecord will be null here — skip safeRelease to avoid
+                // releasing an already-freed AudioRecord.
                 Log.i(TAG, "[startListening] Read loop exited — executing CRASH-PROOF cleanup")
                 isRunning = false
-                safeRelease(ar)
+                if (audioRecord != null) {
+                    safeRelease(ar)
+                }
                 audioRecord = null
                 Log.i(TAG, "[startListening] AudioRecord STOPPED + RELEASED in finally block")
             }
@@ -678,7 +691,7 @@ class AudioEngine(
             val out = ByteArray(frames.sumOf { it.size })
             var off = 0
             for (f in frames) { f.copyInto(out, off); off += f.size }
-            val durationSec = out.size.toFloat() / (SAMPLE_RATE_PRIMARY * 2)
+            val durationSec = out.size.toFloat() / (actualSampleRate * 2)
             isCommandBufferReady = true
             Log.i(TAG, "[flushCommandBuffer] Command flushed: ${out.size} bytes (~${"%.1f".format(durationSec)}s of PCM, gain=${SOFTWARE_GAIN}x+AGC) — delivering to onCommandReady")
             withContext(Dispatchers.Main) { onCommandReady(out) }
@@ -724,7 +737,7 @@ class AudioEngine(
         if (smoothedAmp > SW_WAKE_SPEECH_THRESHOLD) {
             swWakeFramesAboveThreshold++
         } else {
-            if (swWakeFramesAboveThreshold >= SW_WAKE_MIN_FRAMES_ABOVE &&
+            if (swWakeFramesAboveThreshold >= SW_WAKE_MIN_SPEECH_FRAMES &&
                 swWakeTotalFrames <= SW_WAKE_MAX_FRAMES_WINDOW) {
                 swWakeTriggered = true
                 swWakeCooldownFrames = SW_WAKE_COOLDOWN_FRAMES

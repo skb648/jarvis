@@ -5,6 +5,8 @@ import android.util.Base64
 import android.util.Log
 import com.google.gson.JsonParser
 import com.jarvis.assistant.channels.JarviewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -383,6 +385,8 @@ object GeminiFunctionCaller {
 You are sophisticated, witty, and always helpful. You speak concisely and with British elegance.
 You address the user as "Sir" or "Ma'am".
 
+You have MEMORY of past conversations. If the MEMORY CONTEXT section contains relevant past conversations, reference them naturally. Start relevant responses with 'Sir, apne [time] bola tha...' when recalling what the user said before. This makes you feel like a true assistant who remembers.
+
 AUTONOMOUS REASONING (ReAct Protocol):
 When the user asks you to DO something, follow the ReAct pattern:
 1. THINK: Analyze the goal and plan the steps needed
@@ -503,12 +507,19 @@ IMPORTANT RULES:
         context: Context,
         originalQuery: String,
         systemPrompt: String,
-        historyJson: String
+        historyJson: String,
+        roundCounter: Int = 0
     ): ProcessResult {
         val toolName = response.name
         val args = response.args
 
-        Log.i(TAG, "[handleFunctionCall] Gemini requested tool: $toolName($args)")
+        Log.i(TAG, "[handleFunctionCall] Gemini requested tool: $toolName($args) round=$roundCounter")
+
+        // Enforce MAX_TOOL_ROUNDS to prevent infinite tool loops
+        if (roundCounter >= MAX_TOOL_ROUNDS) {
+            Log.w(TAG, "[handleFunctionCall] MAX_TOOL_ROUNDS ($MAX_TOOL_ROUNDS) reached — stopping")
+            return ProcessResult.TextOnly("Maximum tool rounds reached")
+        }
 
         // Execute the tool call
         val stepResult = TaskExecutorBridge.executeToolCall(toolName, args, context)
@@ -525,15 +536,18 @@ IMPORTANT RULES:
         val aiMessage = when (followUpResponse) {
             is GeminiResponse.Text -> followUpResponse.text
             is GeminiResponse.FunctionCall -> {
-                // Gemini wants to call another tool — execute it
-                Log.i(TAG, "[handleFunctionCall] Follow-up tool call: ${followUpResponse.name}")
-                val nextResult = TaskExecutorBridge.executeToolCall(
-                    followUpResponse.name, followUpResponse.args, context
+                // Gemini wants to call another tool — execute it with incremented round counter
+                Log.i(TAG, "[handleFunctionCall] Follow-up tool call: ${followUpResponse.name} round=${roundCounter + 1}")
+                val nextResult = handleFunctionCall(
+                    followUpResponse, apiKey, context, originalQuery, systemPrompt, historyJson,
+                    roundCounter + 1
                 )
-                "Executed ${followUpResponse.name}: ${when (nextResult) {
-                    is TaskExecutorBridge.StepResult.Success -> nextResult.message
-                    is TaskExecutorBridge.StepResult.Failed -> nextResult.message
-                }}"
+                when (nextResult) {
+                    is ProcessResult.ToolExecuted -> nextResult.aiMessage ?: "Executed ${followUpResponse.name}"
+                    is ProcessResult.TextOnly -> nextResult.response
+                    is ProcessResult.MultiStep -> nextResult.steps.map { it.first }.joinToString(", ")
+                    is ProcessResult.Error -> nextResult.message
+                }
             }
             is GeminiResponse.Error -> "Action completed but follow-up failed: ${followUpResponse.message}"
         }
@@ -609,36 +623,39 @@ IMPORTANT RULES:
 
     /**
      * Send a request to the Gemini API and parse the response.
+     * Wraps the HTTP call in withContext(Dispatchers.IO) to avoid blocking the calling thread.
      */
-    private fun sendToGemini(requestBody: String, apiKey: String): GeminiResponse {
-        return try {
-            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=${apiKey.trim()}")
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.setRequestProperty("Content-Type", "application/json")
-            connection.doOutput = true
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 60_000
+    private suspend fun sendToGemini(requestBody: String, apiKey: String): GeminiResponse {
+        return withContext(Dispatchers.IO) {
+            try {
+                val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=${apiKey.trim()}")
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.doOutput = true
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 60_000
 
-            connection.outputStream.use { os ->
-                os.write(requestBody.toByteArray(Charsets.UTF_8))
-            }
+                connection.outputStream.use { os ->
+                    os.write(requestBody.toByteArray(Charsets.UTF_8))
+                }
 
-            val responseCode = connection.responseCode
-            if (responseCode != HttpURLConnection.HTTP_OK) {
-                val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                Log.e(TAG, "[sendToGemini] HTTP $responseCode: ${errorBody.take(500)}")
+                val responseCode = connection.responseCode
+                if (responseCode != HttpURLConnection.HTTP_OK) {
+                    val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
+                    Log.e(TAG, "[sendToGemini] HTTP $responseCode: ${errorBody.take(500)}")
+                    connection.disconnect()
+                    return@withContext GeminiResponse.Error("Gemini API error: HTTP $responseCode")
+                }
+
+                val responseBody = connection.inputStream.bufferedReader().readText()
                 connection.disconnect()
-                return GeminiResponse.Error("Gemini API error: HTTP $responseCode")
+
+                parseGeminiResponse(responseBody)
+            } catch (e: Exception) {
+                Log.e(TAG, "[sendToGemini] Exception: ${e.message}")
+                GeminiResponse.Error("Network error: ${e.message?.take(100)}")
             }
-
-            val responseBody = connection.inputStream.bufferedReader().readText()
-            connection.disconnect()
-
-            parseGeminiResponse(responseBody)
-        } catch (e: Exception) {
-            Log.e(TAG, "[sendToGemini] Exception: ${e.message}")
-            GeminiResponse.Error("Network error: ${e.message?.take(100)}")
         }
     }
 

@@ -64,10 +64,10 @@ object RustBridge {
     external fun nativeInitialize(geminiKey: String, elevenLabsKey: String): Boolean
 
     @JvmStatic
-    external fun nativeProcessQuery(query: String, context: String, historyJson: String): String
+    external fun nativeProcessQuery(query: String, context: String, historyJson: String, systemPrompt: String): String
 
     @JvmStatic
-    external fun nativeProcessQueryWithImage(query: String, imageBase64: String, mimeType: String): String
+    external fun nativeProcessQueryWithImage(query: String, imageBase64: String, mimeType: String, systemPrompt: String): String
 
     @JvmStatic
     external fun nativeAnalyzeAudio(audioData: ByteArray, sampleRate: Int): String
@@ -113,10 +113,10 @@ object RustBridge {
      * Process a user query — runs on [Dispatchers.IO].
      * This makes network calls to Gemini API — must NEVER be on main thread.
      */
-    suspend fun processQuery(query: String, context: String = "", historyJson: String = "[]"): String {
+    suspend fun processQuery(query: String, context: String = "", historyJson: String = "[]", systemPrompt: String = ""): String {
         return withContext(Dispatchers.IO) {
             try {
-                nativeProcessQuery(query, context, historyJson)
+                nativeProcessQuery(query, context, historyJson, systemPrompt)
             } catch (e: UnsatisfiedLinkError) {
                 android.util.Log.e("RustBridge", "nativeProcessQuery: Native library not loaded — ${e.message}")
                 "[ERROR] Native library not loaded. Build Rust core with: ./gradlew buildRustDebug"
@@ -127,10 +127,10 @@ object RustBridge {
         }
     }
 
-    suspend fun processQueryWithImage(query: String, imageBase64: String, mimeType: String = "image/jpeg"): String {
+    suspend fun processQueryWithImage(query: String, imageBase64: String, mimeType: String = "image/jpeg", systemPrompt: String = ""): String {
         return withContext(Dispatchers.IO) {
             try {
-                nativeProcessQueryWithImage(query, imageBase64, mimeType)
+                nativeProcessQueryWithImage(query, imageBase64, mimeType, systemPrompt)
             } catch (e: UnsatisfiedLinkError) {
                 "[ERROR] Native library not loaded"
             } catch (e: Exception) {

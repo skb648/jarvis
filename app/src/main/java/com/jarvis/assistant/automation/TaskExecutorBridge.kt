@@ -6,6 +6,7 @@ import android.net.Uri
 import android.util.Log
 import com.jarvis.assistant.actions.AppRegistry
 import com.jarvis.assistant.services.JarvisAccessibilityService
+import kotlinx.coroutines.delay
 import java.lang.ref.WeakReference
 
 /**
@@ -56,7 +57,7 @@ object TaskExecutorBridge {
      * @param context Android context for launching intents
      * @return StepResult indicating success or failure
      */
-    fun executeToolCall(toolName: String, args: Map<String, String>, context: Context): StepResult {
+    suspend fun executeToolCall(toolName: String, args: Map<String, String>, context: Context): StepResult {
         Log.i(TAG, "[executeToolCall] tool=$toolName args=$args")
 
         return when (toolName) {
@@ -141,7 +142,7 @@ object TaskExecutorBridge {
      * to bypass manual clicking whenever possible. Falls back to opening the
      * app and then using accessibility to type in the search field.
      */
-    private fun executeOpenAndSearch(args: Map<String, String>, context: Context): StepResult {
+    private suspend fun executeOpenAndSearch(args: Map<String, String>, context: Context): StepResult {
         val app = args["app"]?.lowercase()?.trim() ?: return StepResult.Failed("Missing 'app' argument")
         val query = args["query"]?.trim() ?: return StepResult.Failed("Missing 'query' argument")
 
@@ -159,7 +160,7 @@ object TaskExecutorBridge {
                 // After app launches, try to find and click the search field
                 // This requires the accessibility service
                 return try {
-                    Thread.sleep(2000) // Wait for app to load
+                    delay(2000) // Wait for app to load
                     val svc = accessibilityService?.get()
                     if (svc != null) {
                         // Try to find and click search icon/field
@@ -170,12 +171,12 @@ object TaskExecutorBridge {
                                 svc.clickNodeById("search_bar")
 
                         if (searchClicked) {
-                            Thread.sleep(500)
+                            delay(500)
                             // Inject the query into the now-focused search field
                             val injected = svc.injectTextToFocusedField(query)
                             if (injected) {
                                 // Press Enter/Search
-                                Thread.sleep(300)
+                                delay(300)
                                 svc.autoClick("search") || svc.autoClick("Search")
                                 StepResult.Success("Opened $app and searched for '$query'")
                             } else {
@@ -515,17 +516,23 @@ object TaskExecutorBridge {
     }
 
     /**
-     * search_web — Search the web using the Gemini API.
-     * Since we can't directly access the web from the Android app without
-     * additional setup, we return a prompt telling Gemini to use its
-     * built-in knowledge. For a full implementation, a web search API
-     * would be needed.
+     * search_web — Search the web using the integrated WebSearchEngine.
+     * Uses Google Custom Search API if configured, otherwise falls back to DuckDuckGo.
      */
     private fun executeSearchWeb(args: Map<String, String>): StepResult {
         val query = args["query"]?.trim() ?: return StepResult.Failed("Missing 'query' argument")
-        // Web search is handled by Gemini's native knowledge
-        // For full web search, integrate a search API (e.g., Google Custom Search, Brave Search)
-        return StepResult.Success("Web search requested for: '$query'. Using Gemini's knowledge base. For real-time results, integrate a web search API.")
+        
+        // Run the search synchronously within the coroutine context
+        // Since executeToolCall is a suspend fun, we can call suspend functions
+        return try {
+            val result = kotlinx.coroutines.runBlocking {
+                com.jarvis.assistant.search.WebSearchEngine().search(query)
+            }
+            StepResult.Success(result)
+        } catch (e: Exception) {
+            Log.e(TAG, "[executeSearchWeb] Error: ${e.message}")
+            StepResult.Failed("Web search failed: ${e.message}")
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
