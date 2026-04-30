@@ -124,9 +124,7 @@ interface MessageDao {
     @Transaction
     suspend fun deleteSession(sessionId: Long) {
         deleteMessagesForSession(sessionId)
-        @Query("DELETE FROM sessions WHERE id = :sessionId")
-        suspend fun deleteSessionRow(sessionId: Long)
-        deleteSessionRow(sessionId)
+        deleteSessionById(sessionId)
     }
 
     /**
@@ -135,10 +133,20 @@ interface MessageDao {
     @Transaction
     suspend fun deleteAllSessions() {
         deleteAllMessages()
-        @Query("DELETE FROM sessions")
-        suspend fun deleteAllSessionRows()
         deleteAllSessionRows()
     }
+
+    /**
+     * Internal: Delete a session row by ID.
+     */
+    @Query("DELETE FROM sessions WHERE id = :sessionId")
+    suspend fun deleteSessionById(sessionId: Long)
+
+    /**
+     * Internal: Delete all session rows.
+     */
+    @Query("DELETE FROM sessions")
+    suspend fun deleteAllSessionRows()
 
     /**
      * Update session metadata (title, preview, message count, timestamp).
