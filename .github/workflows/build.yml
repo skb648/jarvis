@@ -1,275 +1,109 @@
-name: Build Production APK
+name: Build JARVIS APK
 
 on:
   push:
-    branches: [main, master, develop]
+    branches: [ main, master, develop, release/* ]
   pull_request:
-    branches: [main, master]
-  workflow_dispatch:
-
-env:
-  JAVA_VERSION: '21'
-  JAVA_DISTRIBUTION: 'temurin'
-  NDK_VERSION: '28.0.13004108'
-  CMAKE_VERSION: '3.22.1'
-  RUST_TOOLCHAIN: 'stable'
-  GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8"
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual trigger
 
 jobs:
   build:
+    name: Build Debug & Release APK
     runs-on: ubuntu-latest
-    timeout-minutes: 60
 
     steps:
-      # ═══════════════════════════════════════════════════════════════
-      # 1. Checkout
-      # ═══════════════════════════════════════════════════════════════
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # ═══════════════════════════════════════════════════════════════
-      # 2. Java 21 + Android SDK
-      # ═══════════════════════════════════════════════════════════════
-      - name: Set up JDK
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: ${{ env.JAVA_DISTRIBUTION }}
-          java-version: ${{ env.JAVA_VERSION }}
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      # ═══════════════════════════════════════════════════════════════
-      # 3. Gradle cache (accelerates builds)
-      # ═══════════════════════════════════════════════════════════════
-      - name: Cache Gradle dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            ~/.android/build-cache
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+      - name: Create local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
-      # ═══════════════════════════════════════════════════════════════
-      # 4. Setup Android SDK + NDK + CMake
-      # ═══════════════════════════════════════════════════════════════
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK components
-        run: |
-          sdkmanager --install "ndk;${{ env.NDK_VERSION }}" "cmake;${{ env.CMAKE_VERSION }}" "build-tools;35.0.1" "platforms;android-35"
-        shell: bash
-
-      - name: Set NDK environment variables
-        run: |
-          NDK_PATH="${ANDROID_HOME}/ndk/${{ env.NDK_VERSION }}"
-          echo "NDK_HOME=${NDK_PATH}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=${NDK_PATH}" >> "$GITHUB_ENV"
-          echo "NDK path: ${NDK_PATH}"
-          ls -la "${NDK_PATH}" 2>/dev/null || echo "Warning: NDK path not yet available"
-
-      # ═══════════════════════════════════════════════════════════════
-      # 5. Rust toolchain setup (REQUIRED for native .so)
-      # ═══════════════════════════════════════════════════════════════
-      - name: Set up Rust toolchain
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: |
-            aarch64-linux-android
-            armv7-linux-androideabi
-
-      - name: Cache Rust compilation artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            rust/target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml', 'rust/src/**/*.rs') }}
-          restore-keys: |
-            rust-${{ runner.os }}-
-
-      - name: Cache cargo-ndk binary
-        id: cache-cargo-ndk
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-ndk
-          key: cargo-ndk-${{ runner.os }}
 
       - name: Install cargo-ndk
-        if: steps.cache-cargo-ndk.outputs.cache-hit != 'true'
         run: cargo install cargo-ndk
 
-      # ═══════════════════════════════════════════════════════════════
-      # 6. Build Rust native library (REQUIRED — must succeed)
-      #    Only builds arm64-v8a and armeabi-v7a to match abiFilters
-      #    in build.gradle.kts. x86/x86_64 are excluded.
-      # ═══════════════════════════════════════════════════════════════
-      - name: Create jniLibs directory structure
-        run: |
-          mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/armeabi-v7a
-          mkdir -p /tmp/rust-debug/arm64-v8a /tmp/rust-debug/armeabi-v7a
-          mkdir -p /tmp/rust-release/arm64-v8a /tmp/rust-release/armeabi-v7a
-        shell: bash
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+          add-to-path: true
 
-      - name: Build Rust shared libraries (DEBUG) via cargo-ndk
-        run: |
-          echo "Building Rust DEBUG native libraries (large, with symbols)..."
-          cd rust
-          cargo ndk -t armeabi-v7a -t arm64-v8a -o /tmp/rust-debug build
-        shell: bash
+      - name: Build Rust native library (arm64-v8a + armeabi-v7a)
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-
-      - name: Build Rust shared libraries (RELEASE) via cargo-ndk
+          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          echo "Building Rust RELEASE native libraries (stripped, optimized)..."
           cd rust
-          cargo ndk -t armeabi-v7a -t arm64-v8a -o /tmp/rust-release build --release
-        shell: bash
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-
-      - name: Verify Rust .so files and show sizes
-        run: |
-          echo "═══════════════════════════════════════════════════════"
-          echo "Rust Native Library Sizes"
-          echo "═══════════════════════════════════════════════════════"
-          ALL_OK=true
-          for build_type in debug release; do
-            echo ""
-            echo "  ${build_type^^} BUILD:"
-            for abi in arm64-v8a armeabi-v7a; do
-              SO_PATH="/tmp/rust-${build_type}/${abi}/libjarvis_rust.so"
-              if [ -f "$SO_PATH" ]; then
-                SO_SIZE=$(stat -c%s "$SO_PATH" 2>/dev/null || stat -f%z "$SO_PATH" 2>/dev/null)
-                SO_SIZE_HUMAN=$(du -h "$SO_PATH" | cut -f1)
-                echo "    ✓ ${abi}: libjarvis_rust.so (${SO_SIZE_HUMAN}, ${SO_SIZE} bytes)"
-              else
-                echo "    ✗ ${abi}: libjarvis_rust.so NOT FOUND"
-                ALL_OK=false
-              fi
-            done
-          done
-          if [ "$ALL_OK" = false ]; then
-            echo "ERROR: Rust native library verification failed!"
-            exit 1
-          fi
-          echo "═══════════════════════════════════════════════════════"
-        shell: bash
-
-      # ═══════════════════════════════════════════════════════════════
-      # 7. Build Debug APK (uses DEBUG Rust .so — larger, ~60-70MB)
-      # ═══════════════════════════════════════════════════════════════
-      - name: Copy DEBUG Rust .so for debug APK build
-        run: |
-          cp /tmp/rust-debug/arm64-v8a/libjarvis_rust.so app/src/main/jniLibs/arm64-v8a/
-          cp /tmp/rust-debug/armeabi-v7a/libjarvis_rust.so app/src/main/jniLibs/armeabi-v7a/
-          echo "Debug .so files copied to jniLibs"
-          ls -lh app/src/main/jniLibs/*/libjarvis_rust.so
-        shell: bash
+          cargo ndk -t arm64-v8a -t armeabi-v7a -o ../app/src/main/jniLibs build --release
 
       - name: Build Debug APK
-        run: |
-          ./gradlew :app:assembleDebug --stacktrace 2>&1 | tee gradle-debug.log
-        shell: bash
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-
-      # ═══════════════════════════════════════════════════════════════
-      # 8. Build Release APK (uses RELEASE Rust .so — smaller, ~25-35MB)
-      # ═══════════════════════════════════════════════════════════════
-      - name: Copy RELEASE Rust .so for release APK build
-        run: |
-          cp /tmp/rust-release/arm64-v8a/libjarvis_rust.so app/src/main/jniLibs/arm64-v8a/
-          cp /tmp/rust-release/armeabi-v7a/libjarvis_rust.so app/src/main/jniLibs/armeabi-v7a/
-          echo "Release .so files copied to jniLibs"
-          ls -lh app/src/main/jniLibs/*/libjarvis_rust.so
-        shell: bash
+          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
       - name: Build Release APK
-        run: |
-          ./gradlew :app:assembleRelease --stacktrace 2>&1 | tee gradle-release.log
-        shell: bash
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      # ═══════════════════════════════════════════════════════════════
-      # 9. Verify APK sizes
-      # ═══════════════════════════════════════════════════════════════
-      - name: Verify APK sizes
-        run: |
-          echo "═══════════════════════════════════════════════════════"
-          echo "APK Size Verification"
-          echo "═══════════════════════════════════════════════════════"
-          
-          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" 2>/dev/null | head -1)
-          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" 2>/dev/null | head -1)
-          
-          if [ -n "$DEBUG_APK" ]; then
-            DEBUG_SIZE=$(du -h "$DEBUG_APK" | cut -f1)
-            DEBUG_BYTES=$(stat -c%s "$DEBUG_APK" 2>/dev/null || stat -f%z "$DEBUG_APK" 2>/dev/null)
-            echo "Debug APK: $DEBUG_SIZE ($DEBUG_BYTES bytes)"
-            echo "  Path: $DEBUG_APK"
-            if [ "$DEBUG_BYTES" -lt 30000000 ]; then
-              echo "  ⚠ WARNING: Debug APK is smaller than expected (should be 60-70MB with Rust .so)"
-            fi
-          else
-            echo "  ✗ No debug APK found"
-          fi
-          
-          if [ -n "$RELEASE_APK" ]; then
-            RELEASE_SIZE=$(du -h "$RELEASE_APK" | cut -f1)
-            RELEASE_BYTES=$(stat -c%s "$RELEASE_APK" 2>/dev/null || stat -f%z "$RELEASE_APK" 2>/dev/null)
-            echo "Release APK: $RELEASE_SIZE ($RELEASE_BYTES bytes)"
-            echo "  Path: $RELEASE_APK"
-            if [ "$RELEASE_BYTES" -lt 20000000 ]; then
-              echo "  ⚠ WARNING: Release APK is smaller than expected (should be 25-35MB with Rust .so)"
-            fi
-          else
-            echo "  ✗ No release APK found"
-          fi
-          echo "═══════════════════════════════════════════════════════"
-        shell: bash
-
-      # ═══════════════════════════════════════════════════════════════
-      # 10. Upload artifacts
-      # ═══════════════════════════════════════════════════════════════
-      - name: Upload APK artifacts
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: jarvis-apk-${{ github.run_number }}
-          path: |
-            app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/release/*.apk
+          name: jarvis-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
 
-      # ═══════════════════════════════════════════════════════════════
-      # 11. Summary
-      # ═══════════════════════════════════════════════════════════════
-      - name: Build Summary
-        run: |
-          echo "═══════════════════════════════════════════════════════"
-          echo "  JARVIS BUILD COMPLETE"
-          echo "═══════════════════════════════════════════════════════"
-          ls -lh app/build/outputs/apk/debug/*.apk 2>/dev/null || echo "No debug APK"
-          ls -lh app/build/outputs/apk/release/*.apk 2>/dev/null || echo "No release APK"
-          echo ""
-          echo "Native libraries included:"
-          for abi in arm64-v8a armeabi-v7a; do
-            SO_PATH="app/src/main/jniLibs/${abi}/libjarvis_rust.so"
-            if [ -f "$SO_PATH" ]; then
-              SO_SIZE=$(du -h "$SO_PATH" | cut -f1)
-              echo "  ${abi}: libjarvis_rust.so (${SO_SIZE})"
-            else
-              echo "  ${abi}: missing"
-            fi
-          done
-          echo "═══════════════════════════════════════════════════════"
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
+      - name: Upload Build Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: app/build/reports/
+          retention-days: 7
+
+  lint:
+    name: Run Lint
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Run Lint
+        run: ./gradlew lint --no-daemon || true

@@ -62,12 +62,19 @@ object TaskExecutorBridge {
         return when (toolName) {
             "open_and_search" -> executeOpenAndSearch(args, context)
             "click_button" -> executeClickButton(args)
+            "click_ui_element" -> executeClickUiElement(args)
             "inject_text" -> executeInjectText(args)
             "scroll" -> executeScroll(args)
+            "scroll_screen" -> executeScrollScreen(args)
             "go_back" -> executeGoBack()
             "go_home" -> executeGoHome()
+            "perform_global_action" -> executeGlobalAction(args)
             "open_app" -> executeOpenApp(args, context)
             "search_playstore" -> executeSearchPlayStore(args, context)
+            "dispatch_gesture" -> executeDispatchGesture(args)
+            "dump_screen" -> executeDumpScreen()
+            "diagnose_system" -> executeDiagnoseSystem(args)
+            "search_web" -> executeSearchWeb(args)
             else -> StepResult.Failed("Unknown tool: $toolName")
         }
     }
@@ -381,6 +388,144 @@ object TaskExecutorBridge {
                 StepResult.Failed("Could not open Play Store: ${e2.message}")
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // NEW AUTONOMOUS AGENT TOOL IMPLEMENTATIONS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * click_ui_element — Click a UI element by text label or view ID.
+     * Enhanced version of click_button that also supports view IDs.
+     */
+    private fun executeClickUiElement(args: Map<String, String>): StepResult {
+        val textOrId = args["text_or_id"]?.trim() ?: return StepResult.Failed("Missing 'text_or_id' argument")
+
+        val svc = accessibilityService?.get()
+            ?: return StepResult.Failed("Accessibility service not connected")
+
+        // Try clicking by text first, then by ID
+        val clickedByText = svc.autoClick(textOrId)
+        if (clickedByText) {
+            return StepResult.Success("Clicked UI element with text '$textOrId'")
+        }
+
+        // If text click failed, try by view ID
+        val clickedById = svc.clickNodeById(textOrId)
+        if (clickedById) {
+            return StepResult.Success("Clicked UI element with ID '$textOrId'")
+        }
+
+        return StepResult.Failed("Could not find or click UI element '$textOrId'. Try dump_screen to see available elements.")
+    }
+
+    /**
+     * scroll_screen — Enhanced scroll with left/right support.
+     */
+    private fun executeScrollScreen(args: Map<String, String>): StepResult {
+        val direction = args["direction"]?.lowercase()?.trim() ?: "down"
+        if (direction !in listOf("up", "down", "left", "right")) {
+            return StepResult.Failed("Invalid scroll direction: $direction (use 'up', 'down', 'left', or 'right')")
+        }
+
+        val svc = accessibilityService?.get()
+            ?: return StepResult.Failed("Accessibility service not connected")
+
+        val scrolled = svc.performScroll(direction)
+        return if (scrolled) {
+            StepResult.Success("Scrolled $direction")
+        } else {
+            StepResult.Failed("Could not scroll $direction — no scrollable container found")
+        }
+    }
+
+    /**
+     * perform_global_action — Execute system navigation actions.
+     */
+    private fun executeGlobalAction(args: Map<String, String>): StepResult {
+        val actionType = args["action_type"]?.lowercase()?.trim()
+            ?: return StepResult.Failed("Missing 'action_type' argument")
+
+        val svc = accessibilityService?.get()
+            ?: return StepResult.Failed("Accessibility service not connected")
+
+        val result = when (actionType) {
+            "back" -> svc.goBack()
+            "home" -> svc.goHome()
+            "recents" -> svc.openRecents()
+            "notifications" -> svc.openNotifications()
+            "quick_settings" -> svc.openQuickSettings()
+            "power_dialog" -> svc.openPowerDialog()
+            "screenshot" -> svc.takeScreenshot()
+            else -> return StepResult.Failed("Unknown global action: $actionType")
+        }
+
+        return if (result) {
+            StepResult.Success("Performed global action: $actionType")
+        } else {
+            StepResult.Failed("Could not perform global action: $actionType")
+        }
+    }
+
+    /**
+     * dispatch_gesture — Tap or swipe at exact coordinates.
+     */
+    private fun executeDispatchGesture(args: Map<String, String>): StepResult {
+        val x = args["x"]?.toIntOrNull() ?: return StepResult.Failed("Missing or invalid 'x' coordinate")
+        val y = args["y"]?.toIntOrNull() ?: return StepResult.Failed("Missing or invalid 'y' coordinate")
+        val action = args["action"]?.lowercase()?.trim() ?: "tap"
+
+        val svc = accessibilityService?.get()
+            ?: return StepResult.Failed("Accessibility service not connected")
+
+        val result = when (action) {
+            "tap" -> svc.performTap(x, y)
+            "long_press" -> svc.performLongPress(x, y)
+            "swipe_up" -> svc.performSwipe(x, y + 300, x, y - 300)
+            "swipe_down" -> svc.performSwipe(x, y - 300, x, y + 300)
+            else -> return StepResult.Failed("Unknown gesture action: $action")
+        }
+
+        return if (result) {
+            StepResult.Success("Dispatched gesture: $action at ($x, $y)")
+        } else {
+            StepResult.Failed("Could not dispatch gesture: $action at ($x, $y)")
+        }
+    }
+
+    /**
+     * dump_screen — Read the current screen for AI context.
+     * Returns a structured description of all visible interactive elements.
+     */
+    private fun executeDumpScreen(): StepResult {
+        val svc = accessibilityService?.get()
+            ?: return StepResult.Failed("Accessibility service not connected — cannot read screen")
+
+        val screenContext = svc.dumpScreenForAI()
+        return StepResult.Success(screenContext)
+    }
+
+    /**
+     * diagnose_system — Read JARVIS's own crash logs for self-diagnosis.
+     */
+    private fun executeDiagnoseSystem(args: Map<String, String>): StepResult {
+        val issueType = args["issue_type"]?.trim() ?: "general"
+        val report = com.jarvis.assistant.monitor.SelfDiagnosticManager.diagnoseIssue(issueType)
+        return StepResult.Success(report)
+    }
+
+    /**
+     * search_web — Search the web using the Gemini API.
+     * Since we can't directly access the web from the Android app without
+     * additional setup, we return a prompt telling Gemini to use its
+     * built-in knowledge. For a full implementation, a web search API
+     * would be needed.
+     */
+    private fun executeSearchWeb(args: Map<String, String>): StepResult {
+        val query = args["query"]?.trim() ?: return StepResult.Failed("Missing 'query' argument")
+        // Web search is handled by Gemini's native knowledge
+        // For full web search, integrate a search API (e.g., Google Custom Search, Brave Search)
+        return StepResult.Success("Web search requested for: '$query'. Using Gemini's knowledge base. For real-time results, integrate a web search API.")
     }
 
     // ═══════════════════════════════════════════════════════════════════════

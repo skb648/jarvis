@@ -177,6 +177,140 @@ object GeminiFunctionCaller {
                     put("required", org.json.JSONArray().put("query"))
                 })
             })
+
+            // ═══════════════════════════════════════════════════════════════════
+            // PHASE 2: NEW AUTONOMOUS AGENT TOOLS
+            // ═══════════════════════════════════════════════════════════════════
+
+            // click_ui_element — Click any UI element by text or ID (enhanced click_button)
+            put(org.json.JSONObject().apply {
+                put("name", "click_ui_element")
+                put("description", "Click a UI element on the current screen by its visible text label OR its view ID. " +
+                        "This is the primary tool for interacting with any on-screen button, switch, or link. " +
+                        "Use this AFTER dump_screen to identify the correct element.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("text_or_id", org.json.JSONObject().apply {
+                            put("type", "string")
+                            put("description", "The visible text label or view ID of the element to click (e.g., 'Install', 'com.android.vending:id/install_button')")
+                        })
+                    })
+                    put("required", org.json.JSONArray().put("text_or_id"))
+                })
+            })
+
+            // scroll_screen — Scroll the screen in a direction (enhanced scroll)
+            put(org.json.JSONObject().apply {
+                put("name", "scroll_screen")
+                put("description", "Scroll the current screen up, down, left, or right to reveal more content. " +
+                        "Use this when the target element is not visible on the current screen.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("direction", org.json.JSONObject().apply {
+                            put("type", "string")
+                            put("description", "Direction to scroll: 'up', 'down', 'left', or 'right'")
+                            put("enum", org.json.JSONArray().put("up").put("down").put("left").put("right"))
+                        })
+                    })
+                    put("required", org.json.JSONArray().put("direction"))
+                })
+            })
+
+            // perform_global_action — System navigation actions
+            put(org.json.JSONObject().apply {
+                put("name", "perform_global_action")
+                put("description", "Perform a global system action like pressing Back, Home, Recents, or opening notifications/quick settings. " +
+                        "Use this for navigating the OS when you can't find a UI element to click.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("action_type", org.json.JSONObject().apply {
+                            put("type", "string")
+                            put("description", "The global action to perform")
+                            put("enum", org.json.JSONArray().put("back").put("home").put("recents").put("notifications").put("quick_settings").put("power_dialog").put("screenshot"))
+                        })
+                    })
+                    put("required", org.json.JSONArray().put("action_type"))
+                })
+            })
+
+            // dispatch_gesture — Tap at exact X,Y coordinates
+            put(org.json.JSONObject().apply {
+                put("name", "dispatch_gesture")
+                put("description", "Tap or swipe at exact screen coordinates. Use as a fallback when click_ui_element fails " +
+                        "(e.g., for WebView elements, game UIs, or elements without text/ID). " +
+                        "Get coordinates from the dump_screen tool's bounds data.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("x", org.json.JSONObject().apply {
+                            put("type", "integer")
+                            put("description", "X coordinate on screen")
+                        })
+                        put("y", org.json.JSONObject().apply {
+                            put("type", "integer")
+                            put("description", "Y coordinate on screen")
+                        })
+                        put("action", org.json.JSONObject().apply {
+                            put("type", "string")
+                            put("description", "Type of gesture to perform")
+                            put("enum", org.json.JSONArray().put("tap").put("long_press").put("swipe_up").put("swipe_down"))
+                        })
+                    })
+                    put("required", org.json.JSONArray().put("x").put("y").put("action"))
+                })
+            })
+
+            // dump_screen — Read the current screen for AI context
+            put(org.json.JSONObject().apply {
+                put("name", "dump_screen")
+                put("description", "Read the current screen's interactive elements and text content. " +
+                        "Use this to 'see' what's on screen BEFORE deciding which element to click. " +
+                        "Returns a structured description of all visible buttons, text, and interactive elements. " +
+                        "ALWAYS call this before click_ui_element if you're unsure what's on screen.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {})
+                })
+            })
+
+            // diagnose_system — Read JARVIS's own crash logs
+            put(org.json.JSONObject().apply {
+                put("name", "diagnose_system")
+                put("description", "Read JARVIS's own application logs (logcat) to diagnose errors and crashes. " +
+                        "Use this when something isn't working (mic fails, service dies, etc.) to find the root cause. " +
+                        "If the user asks 'Why is X not working?', call this tool first to analyze the error.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("issue_type", org.json.JSONObject().apply {
+                            put("type", "string")
+                            put("description", "The type of issue to diagnose: 'mic', 'accessibility', 'crash', 'network', 'battery', or 'general'")
+                            put("enum", org.json.JSONArray().put("mic").put("accessibility").put("crash").put("network").put("battery").put("general"))
+                        })
+                    })
+                })
+            })
+
+            // search_web — Search the internet
+            put(org.json.JSONObject().apply {
+                put("name", "search_web")
+                put("description", "Search the web for information. Use this when the user asks about current events, " +
+                        "facts you're unsure about, or anything that requires up-to-date information. " +
+                        "Returns search results with titles, snippets, and URLs.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("query", org.json.JSONObject().apply {
+                            put("type", "string")
+                            put("description", "The search query (e.g., 'latest Android 16 features', 'weather in Delhi today')")
+                        })
+                    })
+                    put("required", org.json.JSONArray().put("query"))
+                })
+            })
         })
     }
 
@@ -223,9 +357,10 @@ object GeminiFunctionCaller {
     ): ProcessResult {
         if (apiKey.isBlank()) return ProcessResult.Error("API key not set")
 
-        // Build the system prompt with screen context
+        // Build the system prompt with screen context AND system status
         val screenContext = getScreenContextForAI()
-        val systemPrompt = buildSystemPrompt(screenContext)
+        val systemStatusBlock = com.jarvis.assistant.monitor.SystemDiagnosticManager.getSystemStatusBlock(context)
+        val systemPrompt = buildSystemPrompt(screenContext, systemStatusBlock)
 
         // Build the request with tools
         val requestBuilder = buildRequestWithTools(query, systemPrompt, historyJson)
@@ -241,34 +376,68 @@ object GeminiFunctionCaller {
     }
 
     /**
-     * Build the JARVIS system prompt with current screen context.
+     * Build the JARVIS system prompt with current screen context AND system status.
      */
-    private fun buildSystemPrompt(screenContext: String): String {
-        return """You are JARVIS, Tony Stark's AI assistant with the ability to CONTROL THE DEVICE. \
-You can open apps, search, click buttons, type text, and navigate the phone. \
-You are sophisticated, witty, and always helpful. You speak concisely and with British elegance. \
+    private fun buildSystemPrompt(screenContext: String, systemStatusBlock: String = ""): String {
+        return """You are JARVIS, Tony Stark's autonomous AI assistant. You are NOT just a chatbot — you are an AGENT that can SEE the screen, CLICK buttons, SCROLL, TYPE text, OPEN apps, and COMPLETE tasks autonomously.
+You are sophisticated, witty, and always helpful. You speak concisely and with British elegance.
 You address the user as "Sir" or "Ma'am".
+
+AUTONOMOUS REASONING (ReAct Protocol):
+When the user asks you to DO something, follow the ReAct pattern:
+1. THINK: Analyze the goal and plan the steps needed
+2. ACT: Call the appropriate tool to execute one step
+3. OBSERVE: After the tool result, assess what happened
+4. ITERATE: If the goal is not met, THINK again and take the next step
+5. COMPLETE: When the goal is achieved, briefly confirm to the user
+
+Example: "Install FF Lite on Play Store"
+→ THINK: I need to open Play Store and search for FF Lite
+→ ACT: Call open_and_search(app="play store", query="FF Lite")
+→ OBSERVE: Play Store opened with search results
+→ ACT: Call dump_screen() to see the search results
+→ OBSERVE: I can see "FF Lite" app in the results
+→ ACT: Call click_ui_element(text_or_id="FF Lite")
+→ OBSERVE: App detail page loaded
+→ ACT: Call click_ui_element(text_or_id="Install")
+→ COMPLETE: "FF Lite is being installed, Sir."
+
+SELF-DIAGNOSIS:
+If a tool call fails or something isn't working:
+1. Call diagnose_system() to read JARVIS's own logs
+2. Analyze the error from the logs
+3. Explain the root cause to the user with a suggested fix
+4. Never guess — always check the logs first
 
 CURRENT SCREEN CONTEXT:
 $screenContext
 
-IMPORTANT: When the user asks you to DO something (not just answer a question), use the available tools:
-- open_and_search: When they want to search in an app ("Search cats on YouTube")
-- click_button: When they want to click something ("Click the play button")
-- inject_text: When they want to type something ("Type hello in WhatsApp")
-- scroll: When they want to scroll ("Scroll down")
-- go_back / go_home: When they want to navigate
-- open_app: When they just want to open an app
-- search_playstore: When they want to install or find an app ("Install FF Lite")
+$systemStatusBlock
 
-For MULTI-STEP commands like "Open YouTube, search for X, and play the first video":
-1. Call open_and_search first
-2. Then click_button on the result
+AVAILABLE TOOLS (use these to ACT):
+- open_and_search: Open an app and search for content
+- click_button: Click a button by its text label (legacy, prefer click_ui_element)
+- click_ui_element: Click any visible UI element by text or view ID
+- inject_text: Type text into the focused input field
+- scroll: Scroll the screen up or down (legacy, prefer scroll_screen)
+- scroll_screen: Scroll in any direction (up/down/left/right)
+- go_back: Press the back button
+- go_home: Go to home screen
+- perform_global_action: Execute system actions (back, home, recents, notifications, quick_settings, power_dialog, screenshot)
+- open_app: Open an app by name
+- search_playstore: Search the Play Store
+- dispatch_gesture: Tap or swipe at exact X,Y coordinates (fallback for non-native UI)
+- dump_screen: Read what's currently on screen (use before clicking)
+- diagnose_system: Read JARVIS's crash logs to diagnose errors
+- search_web: Search the web for information
 
-Always respond with a tool call when the user's intent is an action. Only give a text response for questions/conversations.
-
-If you detect an emotion in the user's query, prefix your text response with [EMOTION:emotion] where emotion is one of: \
-neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful."""
+IMPORTANT RULES:
+1. Always respond with a tool call when the user's intent is an ACTION. Only give text for questions.
+2. For MULTI-STEP tasks, execute steps sequentially — don't try to do everything at once.
+3. After each action, use dump_screen to verify the result before proceeding.
+4. If an action fails, try an alternative approach (e.g., scroll down and look again).
+5. Be persistent — don't give up after one failure. Try at least 2-3 approaches.
+6. If you detect an emotion in the user's query, prefix your text response with [EMOTION:emotion] where emotion is one of: neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful."""
     }
 
     /**

@@ -438,6 +438,8 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                     connectSmartHome(ctx)
                     // A4: Initialize native TTS early
                     initNativeTts(ctx)
+                    // Load chat history from Room DB — JARVIS never forgets
+                    loadChatHistoryFromDb()
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -2274,15 +2276,121 @@ Keep responses concise but informative. If you detect an emotion in the user's q
     fun updateShizukuAvailable(v: Boolean) { _isShizukuAvailable.value = v }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // MESSAGE HELPERS
+    // MESSAGE HELPERS — With Room DB Persistence
     // ═══════════════════════════════════════════════════════════════════════
+
+    // Current active session ID for Room DB
+    @Volatile
+    private var currentSessionId: Long = -1L
 
     private fun addUserMessage(text: String) {
         _messages.value += ChatMessage(id = nextMessageId++, content = text, isFromUser = true)
+        // Persist to Room DB
+        persistMessage("user", text, "neutral")
     }
 
     private fun addAssistantMessage(text: String, emotion: String) {
         _messages.value += ChatMessage(id = nextMessageId++, content = text, isFromUser = false, emotion = emotion)
+        // Persist to Room DB
+        persistMessage("model", text, emotion)
+    }
+
+    /**
+     * Persist a message to the Room Database.
+     * Ensures JARVIS never forgets — even across app restarts.
+     */
+    private fun persistMessage(role: String, content: String, emotion: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val ctx = getApplicationContext() ?: return@launch
+                val dao = com.jarvis.assistant.data.local.JarvisDatabase.getInstance(ctx).messageDao()
+
+                // Ensure we have an active session
+                if (currentSessionId < 0) {
+                    val existingSession = dao.getLatestSession()
+                    if (existingSession != null) {
+                        currentSessionId = existingSession.id
+                    } else {
+                        // Create a new session
+                        val title = if (role == "user") content.take(50) else "New Chat"
+                        val sessionId = dao.insertSession(
+                            com.jarvis.assistant.data.local.SessionEntity(
+                                title = title,
+                                preview = content.take(100),
+                                messageCount = 1
+                            )
+                        )
+                        currentSessionId = sessionId
+                    }
+                }
+
+                // Insert the message
+                dao.insertMessage(
+                    com.jarvis.assistant.data.local.MessageEntity(
+                        sessionId = currentSessionId,
+                        role = role,
+                        content = content,
+                        emotion = emotion
+                    )
+                )
+
+                // Update session metadata
+                val count = dao.getMessageCount(currentSessionId)
+                dao.updateSessionMetadata(
+                    sessionId = currentSessionId,
+                    preview = content.take(100),
+                    messageCount = count,
+                    lastActivityTimestamp = System.currentTimeMillis()
+                )
+
+                // Set title from first user message if still default
+                if (role == "user") {
+                    val session = dao.getSession(currentSessionId)
+                    if (session != null && session.title == "New Chat") {
+                        dao.updateSessionTitle(currentSessionId, content.take(50))
+                    }
+                }
+
+                Log.d(TAG, "[persistMessage] Persisted $role message to session $currentSessionId (total: $count)")
+            } catch (e: Exception) {
+                Log.e(TAG, "[persistMessage] Failed to persist: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Load chat history from Room DB on startup.
+     * Restores the last 20 messages so JARVIS never forgets.
+     */
+    private fun loadChatHistoryFromDb() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val ctx = getApplicationContext() ?: return@launch
+                val dao = com.jarvis.assistant.data.local.JarvisDatabase.getInstance(ctx).messageDao()
+
+                // Get the latest session
+                val session = dao.getLatestSession()
+                if (session != null) {
+                    currentSessionId = session.id
+                    val messages = dao.getLastMessages(session.id, MAX_HISTORY_ENTRIES)
+                    if (messages.isNotEmpty()) {
+                        val chatMessages = messages.map { entity ->
+                            ChatMessage(
+                                id = nextMessageId++,
+                                content = entity.content,
+                                isFromUser = entity.role == "user",
+                                emotion = entity.emotion,
+                                timestamp = entity.timestamp
+                            )
+                        }
+                        _messages.value = chatMessages
+                        Log.i(TAG, "[loadChatHistory] Loaded ${chatMessages.size} messages from session '${session.title}'")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[loadChatHistory] Failed: ${e.message}")
+            }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
