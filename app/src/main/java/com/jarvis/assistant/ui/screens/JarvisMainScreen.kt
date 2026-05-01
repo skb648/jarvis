@@ -2,6 +2,7 @@ package com.jarvis.assistant.ui.screens
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -258,7 +259,7 @@ fun JarvisMainScreen(
                 OutlinedIconButton(
                     onClick = onToggleMicLock,
                     modifier = Modifier.size(44.dp),
-                    border = androidx.compose.foundation.BorderStroke(
+                    border = BorderStroke(
                         1.dp,
                         if (userMicLocked) JarvisGreen else TextTertiary.copy(alpha = 0.4f)
                     ),
