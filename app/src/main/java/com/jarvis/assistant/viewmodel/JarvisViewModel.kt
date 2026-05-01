@@ -1460,12 +1460,22 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             _isTyping.value       = false
             addAssistantMessage(result.response, result.emotion)
 
-            // Handle call answer/reject with Shizuku
+            // Handle call answer/reject — CommandRouter already executes the action,
+            // so this is just a redundant safety net (kept for backwards compatibility)
             if (result.response.contains("Answering the call")) {
-                ShizukuManager.executeShellCommand("input keyevent KEYCODE_CALL")
+                // CommandRouter already clicked via accessibility/Shizuku; this is fallback only
+                if (!ShizukuManager.isReady()) {
+                    com.jarvis.assistant.automation.TaskExecutorBridge.accessibilityService?.get()?.let { svc ->
+                        svc.autoClick("Answer") || svc.autoClick("Accept")
+                    }
+                }
             }
             if (result.response.contains("Rejecting the call")) {
-                ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENDCALL")
+                if (!ShizukuManager.isReady()) {
+                    com.jarvis.assistant.automation.TaskExecutorBridge.accessibilityService?.get()?.let { svc ->
+                        svc.autoClick("Decline") || svc.autoClick("Reject")
+                    }
+                }
             }
 
             _brainState.value     = BrainState.SPEAKING

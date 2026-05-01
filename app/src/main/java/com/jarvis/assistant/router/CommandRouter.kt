@@ -187,10 +187,43 @@ object CommandRouter {
 
         // ─── Call Answer / Reject ────────────────────────────────
         if (normalized == "answer" || normalized == "answer call" || normalized == "receive") {
-            return RouteResult.Handled("Answering the call, Sir.", "calm")
+            // Actually answer the call using accessibility service or Shizuku
+            val svc = JarviewModel.accessibilityService?.get()
+            if (svc != null) {
+                // Try clicking the answer button via accessibility
+                val clicked = svc.autoClick("Answer") || svc.autoClick("answer") ||
+                        svc.autoClick("Accept") || svc.autoClick("accept") ||
+                        svc.clickNodeById("answer") || svc.clickNodeById("accept_call")
+                if (clicked) {
+                    return RouteResult.Handled("Answering the call, Sir.", "calm")
+                }
+            }
+            // Fallback: Shizuku keyevent for CALL button
+            if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+                ShizukuManager.executeShellCommand("input keyevent KEYCODE_CALL")
+                return RouteResult.Handled("Answering the call, Sir.", "calm")
+            }
+            return RouteResult.Handled("I couldn't answer the call — Accessibility Service or Shizuku is needed.", "stressed")
         }
         if (normalized == "reject" || normalized == "decline" || normalized == "reject call") {
-            return RouteResult.Handled("Rejecting the call, Sir.", "calm")
+            // Actually reject the call using accessibility service or Shizuku
+            val svc = JarviewModel.accessibilityService?.get()
+            if (svc != null) {
+                // Try clicking the reject/decline button via accessibility
+                val clicked = svc.autoClick("Decline") || svc.autoClick("decline") ||
+                        svc.autoClick("Reject") || svc.autoClick("reject") ||
+                        svc.autoClick("Hang up") || svc.autoClick("End call") ||
+                        svc.clickNodeById("decline") || svc.clickNodeById("reject_call")
+                if (clicked) {
+                    return RouteResult.Handled("Rejecting the call, Sir.", "calm")
+                }
+            }
+            // Fallback: Shizuku keyevent for ENDCALL button
+            if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+                ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENDCALL")
+                return RouteResult.Handled("Rejecting the call, Sir.", "calm")
+            }
+            return RouteResult.Handled("I couldn't reject the call — Accessibility Service or Shizuku is needed.", "stressed")
         }
 
         // ─── Install / Download / Get commands (AutonomousTask) ─

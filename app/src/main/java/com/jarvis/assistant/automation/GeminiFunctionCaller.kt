@@ -617,8 +617,8 @@ IMPORTANT RULES:
             })
             put("tools", org.json.JSONArray().put(TOOL_DEFINITIONS))
             put("generationConfig", org.json.JSONObject().apply {
-                put("temperature", 0.3)  // Lower temperature for more consistent tool use
-                put("maxOutputTokens", 1024)
+                put("temperature", 0.2)  // Low temperature for consistent tool use
+                put("maxOutputTokens", 2048)  // Enough room for function call + text response
             })
         }.toString()
     }
@@ -739,8 +739,8 @@ IMPORTANT RULES:
             })
             put("tools", org.json.JSONArray().put(TOOL_DEFINITIONS))
             put("generationConfig", org.json.JSONObject().apply {
-                put("temperature", 0.3)
-                put("maxOutputTokens", 1024)
+                put("temperature", 0.2)
+                put("maxOutputTokens", 2048)
             })
         }.toString()
 
@@ -787,6 +787,8 @@ IMPORTANT RULES:
 
     /**
      * Parse the Gemini API response to detect function calls or text.
+     * Handles cases where the response may contain BOTH text and a functionCall
+     * in the same part, or in separate parts.
      */
     private fun parseGeminiResponse(responseBody: String): GeminiResponse {
         return try {
@@ -801,22 +803,25 @@ IMPORTANT RULES:
                 return GeminiResponse.Error("Empty response from Gemini")
             }
 
-            // Check for function call
-            if (firstPart.has("functionCall")) {
-                val functionCall = firstPart.getAsJsonObject("functionCall")
-                val name = functionCall.get("name")?.asString ?: ""
-                val argsObj = functionCall.getAsJsonObject("args")
-                val args = mutableMapOf<String, String>()
-                if (argsObj != null) {
-                    for ((key, value) in argsObj.entrySet()) {
-                        args[key] = value.asString
+            // Check for function call in any part (Gemini sometimes puts text + functionCall in separate parts)
+            for (i in 0 until (parts?.size() ?: 0)) {
+                val part = parts?.get(i)?.asJsonObject
+                if (part != null && part.has("functionCall")) {
+                    val functionCall = part.getAsJsonObject("functionCall")
+                    val name = functionCall.get("name")?.asString ?: ""
+                    val argsObj = functionCall.getAsJsonObject("args")
+                    val args = mutableMapOf<String, String>()
+                    if (argsObj != null) {
+                        for ((key, value) in argsObj.entrySet()) {
+                            args[key] = value.asString
+                        }
                     }
+                    Log.i(TAG, "[parseGeminiResponse] Function call detected in part $i: $name($args)")
+                    return GeminiResponse.FunctionCall(name, args)
                 }
-                Log.i(TAG, "[parseGeminiResponse] Function call detected: $name($args)")
-                return GeminiResponse.FunctionCall(name, args)
             }
 
-            // Text response
+            // No function call found — treat as text response
             val text = firstPart.get("text")?.asString ?: ""
             if (text.isNotBlank()) {
                 GeminiResponse.Text(text)

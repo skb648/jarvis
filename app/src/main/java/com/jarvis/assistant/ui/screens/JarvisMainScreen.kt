@@ -38,6 +38,8 @@ fun AssistantScreen(
     emotion: String,
     isListening: Boolean,
     onToggleListening: () -> Unit,
+    userMicLocked: Boolean = false,
+    onToggleMicLock: () -> Unit = {},
     modifier: Modifier = Modifier
 ) = JarvisMainScreen(
     brainState          = brainState,
@@ -47,6 +49,8 @@ fun AssistantScreen(
     emotion             = emotion,
     isListening         = isListening,
     onToggleListening   = onToggleListening,
+    userMicLocked       = userMicLocked,
+    onToggleMicLock     = onToggleMicLock,
     modifier            = modifier
 )
 
@@ -88,6 +92,8 @@ fun JarvisMainScreen(
     emotion: String,
     isListening: Boolean,
     onToggleListening: () -> Unit,
+    userMicLocked: Boolean = false,
+    onToggleMicLock: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // ═══════════════════════════════════════════════════════════════════════
@@ -243,12 +249,40 @@ fun JarvisMainScreen(
 
             Spacer(Modifier.height(10.dp))
 
-            // Mic button
-            MicButton(
-                isListening = isListening,
-                primaryColor = primaryColor,
-                onToggle = onToggleListening
-            )
+            // Mic button row with Lock toggle
+            Row(
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Mic Lock Button
+                OutlinedIconButton(
+                    onClick = onToggleMicLock,
+                    modifier = Modifier.size(44.dp),
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        if (userMicLocked) JarvisGreen else TextTertiary.copy(alpha = 0.4f)
+                    ),
+                    colors = IconButtonDefaults.outlinedIconButtonColors(
+                        containerColor = if (userMicLocked) JarvisGreen.copy(alpha = 0.15f) else Color.Transparent,
+                        contentColor = if (userMicLocked) JarvisGreen else TextTertiary
+                    )
+                ) {
+                    Icon(
+                        imageVector = if (userMicLocked) Icons.Filled.Lock else Icons.Filled.LockOpen,
+                        contentDescription = if (userMicLocked) "Mic locked" else "Mic lock",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Spacer(Modifier.width(12.dp))
+
+                // Main Mic Button
+                MicButton(
+                    isListening = isListening,
+                    primaryColor = primaryColor,
+                    onToggle = onToggleListening
+                )
+            }
 
             Spacer(Modifier.height(14.dp))
 

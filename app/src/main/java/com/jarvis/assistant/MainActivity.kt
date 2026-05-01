@@ -128,6 +128,7 @@ class MainActivity : ComponentActivity() {
         val apiKeyTestResult by viewModel.apiKeyTestResult.collectAsState()
         val chatSessions by viewModel.chatSessions.collectAsState()
         val currentSessionId by viewModel.currentSessionIdFlow.collectAsState()
+        val userMicLocked by viewModel.userMicLocked.collectAsState()
 
         JarvisNavGraph(
             brainState = brainState,
@@ -207,7 +208,10 @@ class MainActivity : ComponentActivity() {
             currentSessionId = currentSessionId,
             onLoadSession = { viewModel.loadSession(it) },
             onNewChat = { viewModel.startNewChat() },
-            onClearHistory = { viewModel.clearAllHistory() }
+            onClearHistory = { viewModel.clearAllHistory() },
+            // Mic Lock
+            userMicLocked = userMicLocked,
+            onToggleMicLock = { viewModel.setMicLock(!userMicLocked, this@MainActivity) }
         )
     }
 

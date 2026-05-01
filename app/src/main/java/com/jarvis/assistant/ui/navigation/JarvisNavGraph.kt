@@ -107,7 +107,10 @@ fun JarvisNavGraph(
     currentSessionId: Long = -1L,
     onLoadSession: (ChatSession) -> Unit = {},
     onNewChat: () -> Unit = {},
-    onClearHistory: () -> Unit = {}
+    onClearHistory: () -> Unit = {},
+    // Mic Lock state
+    userMicLocked: Boolean = false,
+    onToggleMicLock: () -> Unit = {}
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -215,7 +218,9 @@ fun JarvisNavGraph(
                     lastResponse = lastResponse,
                     emotion = emotion,
                     isListening = isListening,
-                    onToggleListening = onToggleListening
+                    onToggleListening = onToggleListening,
+                    userMicLocked = userMicLocked,
+                    onToggleMicLock = onToggleMicLock
                 )
             }
             composable("chat") {
