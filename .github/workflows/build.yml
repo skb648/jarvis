@@ -45,12 +45,30 @@ jobs:
       run: chmod +x gradlew
 
     - name: Build Debug APK
-      run: ./gradlew assembleDebug --no-daemon --stacktrace --info 2>&1 | tail -200
+      run: |
+        set +e
+        ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/debug-build.log
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        echo "=== BUILD EXIT CODE: $BUILD_EXIT_CODE ==="
+        if [ $BUILD_EXIT_CODE -ne 0 ]; then
+          echo "=== KOTLIN COMPILATION ERRORS ==="
+          grep -E "^e:|error:|Unresolved|Cannot find|Type mismatch|No value passed|Too many arguments|Overload resolution" /tmp/debug-build.log || echo "No specific errors found in grep, check full log above"
+        fi
+        exit $BUILD_EXIT_CODE
       env:
         ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
     - name: Build Release APK
-      run: ./gradlew assembleRelease --no-daemon --stacktrace --info 2>&1 | tail -200
+      run: |
+        set +e
+        ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee /tmp/release-build.log
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        echo "=== BUILD EXIT CODE: $BUILD_EXIT_CODE ==="
+        if [ $BUILD_EXIT_CODE -ne 0 ]; then
+          echo "=== KOTLIN COMPILATION ERRORS ==="
+          grep -E "^e:|error:|Unresolved|Cannot find|Type mismatch|No value passed|Too many arguments|Overload resolution" /tmp/release-build.log || echo "No specific errors found in grep, check full log above"
+        fi
+        exit $BUILD_EXIT_CODE
       env:
         ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         RELEASE_KEYSTORE_PATH: ${{ secrets.RELEASE_KEYSTORE_PATH }}
@@ -75,13 +93,13 @@ jobs:
       run: |
         echo "## Build Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        if [ -f app/build/outputs/apk/debug/*.apk ]; then
+        if ls app/build/outputs/apk/debug/*.apk 1> /dev/null 2>&1; then
           echo "- Debug APK: Built successfully" >> $GITHUB_STEP_SUMMARY
           ls -lh app/build/outputs/apk/debug/*.apk >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
         else
           echo "- Debug APK: Build FAILED" >> $GITHUB_STEP_SUMMARY
         fi
-        if [ -f app/build/outputs/apk/release/*.apk ]; then
+        if ls app/build/outputs/apk/release/*.apk 1> /dev/null 2>&1; then
           echo "- Release APK: Built successfully" >> $GITHUB_STEP_SUMMARY
           ls -lh app/build/outputs/apk/release/*.apk >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
         else

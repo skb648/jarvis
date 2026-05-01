@@ -17,8 +17,7 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // Shizuku - required for ADB-level system control
-        maven { url = uri("https://raw.githubusercontent.com/Clivern/maven/main/repository") }
+        // Shizuku is available on Maven Central — no need for custom repo
     }
 }
 
