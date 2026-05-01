@@ -13,10 +13,17 @@
 # ─── Shizuku ────────────────────────────────────────────────────
 -keep class rikka.shizuku.** { *; }
 -keep class com.jarvis.assistant.shizuku.** { *; }
+-dontwarn rikka.shizuku.**
+-dontwarn rikka.sui.**
 
 # ─── MQTT (Paho) ────────────────────────────────────────────────
 -keep class org.eclipse.paho.** { *; }
 -keep class com.jarvis.assistant.smarthome.** { *; }
+-dontwarn org.eclipse.paho.**
+-dontwarn org.eclipse.paho.client.mqttv3.**
+-keepclassmembers class org.eclipse.paho.client.mqttv3.** {
+    *;
+}
 
 # ─── Gson ───────────────────────────────────────────────────────
 -keepattributes Signature
@@ -25,6 +32,17 @@
 -keep class * implements com.google.gson.TypeAdapterFactory
 -keep class * implements com.google.gson.JsonSerializer
 -keep class * implements com.google.gson.JsonDeserializer
+-dontwarn com.google.gson.**
+# Gson specific classes
+-dontwarn sun.misc.**
+-keep class com.google.gson.stream.** { *; }
+# Prevent R8 from stripping interface information from TypeAdapter
+-keep,allowobfuscation,allowshrinking class com.google.gson.reflect.TypeToken
+-keep,allowobfuscation,allowshrinking class * extends com.google.gson.reflect.TypeToken
+# Keep classes with @SerializedName
+-keepclassmembers,allowobfuscation class * {
+    @com.google.gson.annotations.SerializedName <fields>;
+}
 
 # ─── Serializable / Parcelable ───────────────────────────────────
 -keepclassmembers class * implements java.io.Serializable {
@@ -43,6 +61,8 @@
 -keepclassmembers class kotlinx.coroutines.** {
     volatile <fields>;
 }
+-dontwarn kotlinx.coroutines.**
+-keep class kotlinx.coroutines.** { *; }
 
 # ─── Compose ────────────────────────────────────────────────────
 -dontwarn androidx.compose.**
@@ -117,6 +137,15 @@
 -keep class com.jarvis.assistant.data.local.JarvisDatabase { *; }
 -keep class com.jarvis.assistant.data.local.MessageDao { *; }
 -keep @androidx.room.Entity class *
+-dontwarn androidx.room.**
+-keep class * extends androidx.room.RoomDatabase
+-keep @androidx.room.Dao class *
+-keep @androidx.room.Entity class *
+-keepclassmembers @androidx.room.Entity class * {
+    <fields>;
+}
+-keep @androidx.room.Database class *
+-keep @androidx.room.TypeConverter class *
 
 -dontwarn javax.annotation.**
 -dontwarn java.lang.invoke.StringConcatFactory

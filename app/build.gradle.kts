@@ -10,6 +10,7 @@ plugins {
 android {
     namespace = "com.jarvis.assistant"
     compileSdk = 35
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "com.jarvis.assistant"
@@ -110,11 +111,18 @@ android {
     }
 
     // CMake external native build — compiles the JNI stub bridge
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
+    // Only configure if NDK is available; skip gracefully otherwise
+    val ndkHome = System.getenv("ANDROID_NDK_HOME")
+        ?: System.getenv("NDK_HOME")
+    if (ndkHome != null && File(ndkHome).exists()) {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+                version = "3.22.1"
+            }
         }
+    } else {
+        logger.lifecycle("⚠️ NDK not found — skipping CMake external native build. JNI stub will not be compiled.")
     }
 
     packaging {

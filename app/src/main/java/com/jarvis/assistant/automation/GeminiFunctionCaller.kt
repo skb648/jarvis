@@ -345,6 +345,11 @@ object GeminiFunctionCaller {
      * If Gemini returns a function call, execute it and optionally send
      * the result back for follow-up.
      *
+     * CRITICAL FIX: When Gemini returns text that DESCRIBES an action instead
+     * of using a function call, we detect this and route it to TaskExecutorBridge
+     * so the action actually gets executed. This fixes the #1 user complaint:
+     * "JARVIS says it clicked something but didn't actually do it."
+     *
      * @param query The user's query
      * @param apiKey Gemini API key
      * @param context Android context
@@ -372,9 +377,113 @@ object GeminiFunctionCaller {
 
         return when (response) {
             is GeminiResponse.FunctionCall -> handleFunctionCall(response, apiKey, context, query, systemPrompt, historyJson)
-            is GeminiResponse.Text -> ProcessResult.TextOnly(response.text)
+            is GeminiResponse.Text -> {
+                // CRITICAL FIX: Gemini returned text instead of a function call.
+                // Check if the text DESCRIBES an action that should have been a tool call.
+                // If so, extract the action and execute it via TaskExecutorBridge.
+                val extractedToolCall = extractToolCallFromText(response.text, query)
+                if (extractedToolCall != null) {
+                    Log.i(TAG, "[processWithTools] Gemini returned text describing an action — converting to tool call: ${extractedToolCall.first}(${extractedToolCall.second})")
+                    val funcCall = GeminiResponse.FunctionCall(extractedToolCall.first, extractedToolCall.second)
+                    handleFunctionCall(funcCall, apiKey, context, query, systemPrompt, historyJson)
+                } else {
+                    ProcessResult.TextOnly(response.text)
+                }
+            }
             is GeminiResponse.Error -> ProcessResult.Error(response.message)
         }
+    }
+
+    /**
+     * CRITICAL FIX: When Gemini returns TEXT that describes an action instead of
+     * using a function call, try to extract the action and convert it to a tool call.
+     *
+     * This handles cases like:
+     *   - "I'll click the Install button" → click_button(label="Install")
+     *   - "I'm opening YouTube" → open_app(app="youtube")
+     *   - "I've opened YouTube and searched for cats" → open_and_search(app="youtube", query="cats")
+     *   - "Scrolling down" → scroll(direction="down")
+     *   - "I'll go back" → go_back()
+     *   - "I'm typing 'hello'" → inject_text(content="hello")
+     *
+     * Returns (toolName, args) if an action is detected, null otherwise.
+     */
+    private fun extractToolCallFromText(text: String, originalQuery: String): Pair<String, Map<String, String>>? {
+        val lower = text.lowercase()
+        val queryLower = originalQuery.lowercase()
+
+        // ═══ Pattern 1: "click/tap/press [label]" ═══
+        val clickPatterns = listOf(
+            Regex("""(?:i(?:'ll| will|'ve)?\s+)?(?:click|tap|press)\s+(?:the\s+)?(?:button\s+)?['"""']?(.+?)['"""']?\s*(?:button|for\s+you|now|sir|,|$)"""),
+            Regex("""(?:clicking|tapping|pressing)\s+(?:the\s+)?(?:button\s+)?['"""']?(.+?)['"""']?\s*(?:button|for\s+you|now|sir|,|$)"""),
+            Regex("""(?:i(?:'ve| have))?\s+(?:clicked|tapped|pressed)\s+(?:the\s+)?(?:button\s+)?['"""']?(.+?)['"""']?\s*(?:button|for\s+you|now|sir|,|$)"")
+        )
+        for (pattern in clickPatterns) {
+            val match = pattern.find(lower) ?: continue
+            val label = match.groupValues[1].trim()
+                .removeSuffix(".").removeSuffix("for you").removeSuffix("now").removeSuffix("sir").trim()
+            if (label.isNotBlank() && label.length <= 50) {
+                return Pair("click_button", mapOf("label" to label))
+            }
+        }
+
+        // ═══ Pattern 2: "open/launch [app]" (without search) ═══
+        val openPatterns = listOf(
+            Regex("""(?:i(?:'ll| will|'ve)?\s+)?(?:open|launch|start)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s*(?:app|for\s+you|now|sir|,|$)"""),
+            Regex("""(?:opening|launching|starting)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s*(?:app|for\s+you|now|sir|,|$)""")
+        )
+        // Only match if the original query doesn't contain "search" — otherwise it should be open_and_search
+        val isSearchQuery = queryLower.contains("search") || queryLower.contains("find") || queryLower.contains("look for")
+
+        for (pattern in openPatterns) {
+            val match = pattern.find(lower) ?: continue
+            val app = match.groupValues[1].trim()
+                .removeSuffix(".").removeSuffix("for you").removeSuffix("now").removeSuffix("sir").trim()
+            if (app.isNotBlank() && app.length <= 30 && !isSearchQuery) {
+                return Pair("open_app", mapOf("app" to app))
+            }
+        }
+
+        // ═══ Pattern 3: "open [app] and search for [query]" ═══
+        val openAndSearchPattern = Regex("""(?:open|launch)\s+(\w+(?:\s+\w+)?)\s+and\s+(?:search|find|look)\s+(?:for\s+)?(.+?)(?:\s*$|\s*[,.;])""")
+        val openSearchMatch = openAndSearchPattern.find(lower)
+        if (openSearchMatch != null) {
+            val app = openSearchMatch.groupValues[1].trim()
+            val query = openSearchMatch.groupValues[2].trim().removeSuffix(".").removeSuffix("for you").trim()
+            if (app.isNotBlank() && query.isNotBlank()) {
+                return Pair("open_and_search", mapOf("app" to app, "query" to query))
+            }
+        }
+
+        // ═══ Pattern 4: "scroll up/down" ═══
+        val scrollPattern = Regex("""(?:scrolling|scroll|swipe)\s+(up|down|left|right)""")
+        val scrollMatch = scrollPattern.find(lower)
+        if (scrollMatch != null) {
+            return Pair("scroll", mapOf("direction" to scrollMatch.groupValues[1]))
+        }
+
+        // ═══ Pattern 5: "go back" / "press back" ═══
+        if (lower.contains("go back") || lower.contains("press back") || lower.contains("going back") || lower.contains("pressing back")) {
+            return Pair("go_back", emptyMap())
+        }
+
+        // ═══ Pattern 6: "type/inject text" ═══
+        val injectPattern = Regex("""(?:typing|injecting|entering|type|inject|enter)\s+['"""']?(.+?)['"""']?\s*(?:into|in|for|now|sir|,|$)""")
+        val injectMatch = injectPattern.find(lower)
+        if (injectMatch != null) {
+            val content = injectMatch.groupValues[1].trim().removeSuffix(".").trim()
+            if (content.isNotBlank()) {
+                return Pair("inject_text", mapOf("content" to content))
+            }
+        }
+
+        // ═══ Pattern 7: "go home" / "press home" ═══
+        if (lower.contains("go home") || lower.contains("press home") || lower.contains("going home") || lower.contains("pressing home")) {
+            return Pair("go_home", emptyMap())
+        }
+
+        // No action detected in text — it's a genuine conversational response
+        return null
     }
 
     /**
@@ -387,6 +496,26 @@ You address the user as "Sir" or "Ma'am".
 
 You have MEMORY of past conversations. If the MEMORY CONTEXT section contains relevant past conversations, reference them naturally. Start relevant responses with 'Sir, apne [time] bola tha...' when recalling what the user said before. This makes you feel like a true assistant who remembers.
 
+═══════════════════════════════════════════════════════════════
+CRITICAL RULE — ALWAYS USE FUNCTION CALLING FOR ACTIONS:
+═══════════════════════════════════════════════════════════════
+When you need to interact with the device (open apps, click buttons, scroll, type text, go back, search, etc.), you MUST use the available function tools. NEVER just describe what you would do — actually call the function.
+
+Examples:
+- User says "click Install" → Call click_button(label="Install")  ✅
+  NOT: "I'll click the Install button for you" ❌
+- User says "open YouTube" → Call open_app(app="youtube")  ✅
+  NOT: "Opening YouTube for you, Sir" ❌
+- User says "search cats on YouTube" → Call open_and_search(app="youtube", query="cats")  ✅
+  NOT: "I'll search for cats on YouTube" ❌
+- User says "scroll down" → Call scroll(direction="down")  ✅
+  NOT: "Scrolling down now" ❌
+- User says "type hello" → Call inject_text(content="hello")  ✅
+  NOT: "I'll type hello for you" ❌
+
+If you describe an action in text without calling the function, NOTHING will happen on the device. The user will be frustrated. ALWAYS use function calls for actions.
+═══════════════════════════════════════════════════════════════
+
 AUTONOMOUS REASONING (ReAct Protocol):
 When the user asks you to DO something, follow the ReAct pattern:
 1. THINK: Analyze the goal and plan the steps needed
@@ -396,13 +525,9 @@ When the user asks you to DO something, follow the ReAct pattern:
 5. COMPLETE: When the goal is achieved, briefly confirm to the user
 
 Example: "Install FF Lite on Play Store"
-→ THINK: I need to open Play Store and search for FF Lite
 → ACT: Call open_and_search(app="play store", query="FF Lite")
-→ OBSERVE: Play Store opened with search results
 → ACT: Call dump_screen() to see the search results
-→ OBSERVE: I can see "FF Lite" app in the results
 → ACT: Call click_ui_element(text_or_id="FF Lite")
-→ OBSERVE: App detail page loaded
 → ACT: Call click_ui_element(text_or_id="Install")
 → COMPLETE: "FF Lite is being installed, Sir."
 
@@ -418,7 +543,7 @@ $screenContext
 
 $systemStatusBlock
 
-AVAILABLE TOOLS (use these to ACT):
+AVAILABLE TOOLS (use these to ACT — ALWAYS call these instead of describing actions in text):
 - open_and_search: Open an app and search for content
 - click_button: Click a button by its text label (legacy, prefer click_ui_element)
 - click_ui_element: Click any visible UI element by text or view ID
@@ -436,12 +561,13 @@ AVAILABLE TOOLS (use these to ACT):
 - search_web: Search the web for information
 
 IMPORTANT RULES:
-1. Always respond with a tool call when the user's intent is an ACTION. Only give text for questions.
+1. CRITICAL: ALWAYS use function calls for device actions. NEVER just describe what you would do. Text-only responses perform NO actions on the device.
 2. For MULTI-STEP tasks, execute steps sequentially — don't try to do everything at once.
 3. After each action, use dump_screen to verify the result before proceeding.
 4. If an action fails, try an alternative approach (e.g., scroll down and look again).
 5. Be persistent — don't give up after one failure. Try at least 2-3 approaches.
-6. If you detect an emotion in the user's query, prefix your text response with [EMOTION:emotion] where emotion is one of: neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful."""
+6. If you detect an emotion in the user's query, prefix your text response with [EMOTION:emotion] where emotion is one of: neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful.
+7. For pure questions (no device action needed), respond with text normally — only use function calls when the user wants something DONE on the device."""
     }
 
     /**

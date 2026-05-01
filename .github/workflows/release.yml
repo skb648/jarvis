@@ -23,6 +23,13 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
+    - name: Install NDK & CMake
+      run: |
+        echo "Installing Android NDK and CMake via sdkmanager..."
+        sdkmanager --install "ndk;27.0.12077973" "cmake;3.22.1"
+        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+        echo "NDK installed at: $ANDROID_HOME/ndk/27.0.12077973"
+
     - name: Cache Gradle packages
       uses: actions/cache@v4
       with:
@@ -37,10 +44,14 @@ jobs:
       run: chmod +x gradlew
 
     - name: Build Debug APK
-      run: ./gradlew assembleDebug --no-daemon --stacktrace
+      run: ./gradlew assembleDebug --no-daemon --stacktrace --info
+      env:
+        ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
     - name: Build Release APK (signed with debug key)
-      run: ./gradlew assembleRelease --no-daemon --stacktrace
+      run: ./gradlew assembleRelease --no-daemon --stacktrace --info
+      env:
+        ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
     - name: Upload Debug APK
       uses: actions/upload-artifact@v4
