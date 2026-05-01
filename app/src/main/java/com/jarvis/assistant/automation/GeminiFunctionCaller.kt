@@ -414,9 +414,9 @@ object GeminiFunctionCaller {
 
         // ═══ Pattern 1: "click/tap/press [label]" ═══
         val clickPatterns = listOf(
-            Regex("""(?:i(?:'ll| will|'ve)?\s+)?(?:click|tap|press)\s+(?:the\s+)?(?:button\s+)?['\"']?(.+?)['\"']?\s*(?:button|for\s+you|now|sir|,|$)"""),
-            Regex("""(?:clicking|tapping|pressing)\s+(?:the\s+)?(?:button\s+)?['\"']?(.+?)['\"']?\s*(?:button|for\s+you|now|sir|,|$)"""),
-            Regex("""(?:i(?:'ve| have))?\s+(?:clicked|tapped|pressed)\s+(?:the\s+)?(?:button\s+)?['\"']?(.+?)['\"']?\s*(?:button|for\s+you|now|sir|,|$)"")
+            Regex("""(?:i(?:'ll| will|'ve)?\s+)?(?:click|tap|press)\s+(?:the\s+)?(?:button\s+)?['\"']?(.+?)['\"']?\s*(?:button|for\s+you|now|sir|,|${'$'})"""),
+            Regex("""(?:clicking|tapping|pressing)\s+(?:the\s+)?(?:button\s+)?['\"']?(.+?)['\"']?\s*(?:button|for\s+you|now|sir|,|${'$'})"""),
+            Regex("""(?:i(?:'ve| have))?\s+(?:clicked|tapped|pressed)\s+(?:the\s+)?(?:button\s+)?['\"']?(.+?)['\"']?\s*(?:button|for\s+you|now|sir|,|${'$'})"")
         )
         for (pattern in clickPatterns) {
             val match = pattern.find(lower) ?: continue
@@ -429,8 +429,8 @@ object GeminiFunctionCaller {
 
         // ═══ Pattern 2: "open/launch [app]" (without search) ═══
         val openPatterns = listOf(
-            Regex("""(?:i(?:'ll| will|'ve)?\s+)?(?:open|launch|start)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s*(?:app|for\s+you|now|sir|,|$)"""),
-            Regex("""(?:opening|launching|starting)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s*(?:app|for\s+you|now|sir|,|$)""")
+            Regex("""(?:i(?:'ll| will|'ve)?\s+)?(?:open|launch|start)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s*(?:app|for\s+you|now|sir|,|${'$'})"""),
+            Regex("""(?:opening|launching|starting)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s*(?:app|for\s+you|now|sir|,|${'$'})""")
         )
         // Only match if the original query doesn't contain "search" — otherwise it should be open_and_search
         val isSearchQuery = queryLower.contains("search") || queryLower.contains("find") || queryLower.contains("look for")
@@ -445,7 +445,7 @@ object GeminiFunctionCaller {
         }
 
         // ═══ Pattern 3: "open [app] and search for [query]" ═══
-        val openAndSearchPattern = Regex("""(?:open|launch)\s+(\w+(?:\s+\w+)?)\s+and\s+(?:search|find|look)\s+(?:for\s+)?(.+?)(?:\s*$|\s*[,.;])""")
+        val openAndSearchPattern = Regex("""(?:open|launch)\s+(\w+(?:\s+\w+)?)\s+and\s+(?:search|find|look)\s+(?:for\s+)?(.+?)(?:\s*${'$'}|\s*[,.;])""")
         val openSearchMatch = openAndSearchPattern.find(lower)
         if (openSearchMatch != null) {
             val app = openSearchMatch.groupValues[1].trim()
@@ -468,7 +468,7 @@ object GeminiFunctionCaller {
         }
 
         // ═══ Pattern 6: "type/inject text" ═══
-        val injectPattern = Regex("""(?:typing|injecting|entering|type|inject|enter)\s+['\"']?(.+?)['\"']?\s*(?:into|in|for|now|sir|,|$)""")
+        val injectPattern = Regex("""(?:typing|injecting|entering|type|inject|enter)\s+['\"']?(.+?)['\"']?\s*(?:into|in|for|now|sir|,|${'$'})""")
         val injectMatch = injectPattern.find(lower)
         if (injectMatch != null) {
             val content = injectMatch.groupValues[1].trim().removeSuffix(".").trim()
