@@ -90,5 +90,33 @@
     native <methods>;
 }
 
+# ─── Command Router sealed classes (RouteResult) ────────────────
+-keep class com.jarvis.assistant.router.CommandRouter { *; }
+-keep class com.jarvis.assistant.router.CommandRouter$RouteResult { *; }
+-keep class com.jarvis.assistant.router.CommandRouter$RouteResult$* { *; }
+
+# ─── Notification Data classes ──────────────────────────────────
+-keep class com.jarvis.assistant.notifications.NotificationData { *; }
+-keep class com.jarvis.assistant.notifications.NotificationReaderService { *; }
+
+# ─── App Registry (fuzzy matching) ─────────────────────────────
+-keep class com.jarvis.assistant.actions.AppRegistry { *; }
+
+# ─── Task Executor Bridge sealed classes ────────────────────────
+-keep class com.jarvis.assistant.automation.TaskExecutorBridge { *; }
+-keep class com.jarvis.assistant.automation.TaskExecutorBridge$StepResult { *; }
+-keep class com.jarvis.assistant.automation.TaskExecutorBridge$StepResult$* { *; }
+
+# ─── Gemini Function Caller ────────────────────────────────────
+-keep class com.jarvis.assistant.automation.GeminiFunctionCaller { *; }
+-keep class com.jarvis.assistant.automation.GeminiFunctionCaller$ProcessResult { *; }
+-keep class com.jarvis.assistant.automation.GeminiFunctionCaller$ProcessResult$* { *; }
+
+# ─── Room Database entities ─────────────────────────────────────
+-keep class com.jarvis.assistant.data.local.MessageEntity { *; }
+-keep class com.jarvis.assistant.data.local.JarvisDatabase { *; }
+-keep class com.jarvis.assistant.data.local.MessageDao { *; }
+-keep @androidx.room.Entity class *
+
 -dontwarn javax.annotation.**
 -dontwarn java.lang.invoke.StringConcatFactory

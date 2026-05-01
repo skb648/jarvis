@@ -45,7 +45,7 @@ object SelfDiagnosticManager {
     fun readAppLogs(maxLines: Int = 200, filterLevel: String = "W"): String {
         return try {
             val pid = android.os.Process.myPid()
-            val command = "logcat -d -v time -m $maxLines *:$filterLevel"
+            val command = "logcat -d -v time --pid=$pid -m $maxLines *:$filterLevel"
             
             Log.d(TAG, "[readAppLogs] Running: $command")
             

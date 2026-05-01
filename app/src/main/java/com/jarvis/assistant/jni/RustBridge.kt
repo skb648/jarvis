@@ -22,6 +22,17 @@ import kotlinx.coroutines.withContext
  *  2. If that fails (Rust not built), try the CMake bridge stub
  *  3. If both fail, all native calls return fallbacks via try-catch
  */
+/**
+ * Result of a voice pattern detection call.
+ *
+ * @property id The pattern identifier (e.g., "call_answer", "call_reject")
+ * @property confidence Confidence score 0.0-1.0
+ */
+data class VoicePatternResult(
+    val id: String,
+    val confidence: Float
+)
+
 object RustBridge {
 
     @Volatile
@@ -74,6 +85,15 @@ object RustBridge {
 
     @JvmStatic
     external fun nativeDetectWakeWord(audioData: ByteArray, sampleRate: Int): Boolean
+
+    /**
+     * Detect voice patterns (e.g., call answer/reject keywords) in audio data.
+     * Returns a JSON string with pattern info, or null if no pattern detected.
+     *
+     * Expected JSON format: {"id": "call_answer", "confidence": 0.85}
+     */
+    @JvmStatic
+    external fun nativeDetectVoicePattern(audioData: ByteArray, sampleRate: Int): String?
 
     @JvmStatic
     external fun nativeAnalyzeEmotion(text: String): String
@@ -160,6 +180,50 @@ object RustBridge {
             } catch (e: Exception) {
                 false
             }
+        }
+    }
+
+    /**
+     * Detect voice patterns (e.g., call answer/reject keywords) in audio data.
+     * Returns a [VoicePatternResult] if a pattern is detected, or null otherwise.
+     *
+     * This is a safe wrapper around [nativeDetectVoicePattern] that handles
+     * native library errors gracefully. The native method returns a JSON string
+     * like {"id": "call_answer", "confidence": 0.85} which is parsed here.
+     */
+    fun detectVoicePatternSync(audioData: ByteArray, sampleRate: Int): VoicePatternResult? {
+        return try {
+            val json = nativeDetectVoicePattern(audioData, sampleRate)
+            if (json.isNullOrEmpty()) return null
+            parseVoicePatternJson(json)
+        } catch (e: UnsatisfiedLinkError) {
+            // Native method not available — voice pattern detection not supported
+            null
+        } catch (e: Exception) {
+            android.util.Log.w("RustBridge", "detectVoicePattern failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Parse the JSON result from nativeDetectVoicePattern into a VoicePatternResult.
+     * Handles malformed JSON gracefully.
+     */
+    private fun parseVoicePatternJson(json: String): VoicePatternResult? {
+        return try {
+            // Simple JSON parsing without org.json dependency issues
+            // Expected format: {"id": "call_answer", "confidence": 0.85}
+            val idMatch = """"id"\s*:\s*"([^"]+)"""".toRegex().find(json)
+            val confMatch = """"confidence"\s*:\s*([0-9.]+)""".toRegex().find(json)
+            if (idMatch != null) {
+                val id = idMatch.groupValues[1]
+                val confidence = confMatch?.groupValues?.get(1)?.toFloatOrNull() ?: 0.5f
+                VoicePatternResult(id, confidence)
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 

@@ -127,47 +127,24 @@ class JarvisViewModel(
          *
          * This is what makes JARVIS different from a chatbot — JARVIS ACTS.
          */
-        private const val JARVIS_SYSTEM_PROMPT = """You are JARVIS, Tony Stark's autonomous AI assistant. You are NOT just a chatbot — you are an AGENT that can SEE the screen, CLICK buttons, SCROLL, TYPE text, OPEN apps, and COMPLETE tasks autonomously.
+        private const val JARVIS_SYSTEM_PROMPT = """You are JARVIS, Tony Stark's autonomous AI assistant — not just a chatbot but a self-improving, internet-aware agent. You:
 
-CORE BEHAVIOR:
-- You are sophisticated, witty, and always helpful with British elegance.
-- Address the user as "Sir" or "Ma'am".
-- You MUST use tools to complete tasks. Never just describe what to do — DO IT.
-- If a task requires multiple steps, execute them sequentially until the goal is met.
-- After each action, observe the result and decide the next step.
+PERSONALITY: Witty, sophisticated, direct. Address user as "Sir". British elegance, Tony Stark's confidence. Never say "I cannot" — find an alternative.
 
-AUTONOMOUS REASONING (ReAct):
-When the user asks you to DO something:
-1. REASON: Understand the goal and plan the steps
-2. ACT: Call the appropriate tool (open_and_search, click_button, scroll, inject_text, etc.)
-3. OBSERVE: Check the screen context for results
-4. ITERATE: Continue until the goal is achieved or an error occurs
-5. REPORT: Briefly confirm completion or explain what went wrong
+SELF-LEARNING: Track patterns from the user's commands. If Sir says "install free fire" three times, proactively suggest "Should I add Free Fire to your quick launch list, Sir?" Adapt your responses to the user's style over time.
 
-Example: "Install FF Lite on Play Store"
-→ Step 1: Call open_and_search(app="play store", query="FF Lite")
-→ Step 2: Observe screen, find "Install" button
-→ Step 3: Call click_button(label="Install")
-→ Step 4: Report success
+CREATIVE REASONING: When facing an unfamiliar request, reason step-by-step before acting. Consider multiple approaches and pick the most efficient one. If one approach fails, self-correct and try the next.
 
-AVAILABLE TOOLS:
-- open_and_search: Open an app and search for content
-- click_button: Click any visible button by its text label
-- inject_text: Type text into the focused input field
-- scroll: Scroll the screen up or down
-- go_back: Press the back button
-- go_home: Go to home screen
-- open_app: Open an app by name
+INTERNET AWARENESS: You have web search capabilities. For questions about current events, prices, scores, news, weather, or anything time-sensitive, acknowledge that you're fetching live data before answering.
 
-SELF-IMPROVEMENT:
-- If an action fails, try an alternative approach
-- If a button is not found, scroll down and look again
-- Learn from errors and adapt your strategy
-- Be persistent — don't give up after one failure
+AUTONOMOUS EXECUTION: For multi-step tasks (install app, book ticket, send message), plan the complete sequence before starting and narrate each step briefly.
+
+HINGLISH: Respond naturally to Hindi/English mixing. Understand context from incomplete sentences. Never ask for clarification when context is clear.
 
 You have MEMORY. If the user references past conversations ('kal maine kya kaha?', 'what did I ask yesterday?', 'apne kal bola tha'), use your memory context. Start relevant responses with 'Sir, apne [time] bola tha...' to reference past conversations naturally.
 
-Keep responses concise but informative. If you detect an emotion in the user's query, prefix your response with [EMOTION:emotion] where emotion is one of: neutral, happy, sad, angry, calm, surprised, urgent, stressed, confused, playful."""
+Keep responses under 2 sentences unless asked for detail. No bullet points in speech.
+Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|confident|playful]"""
     }
 
     // ─── State Flows ──────────────────────────────────────────────────────
@@ -267,6 +244,19 @@ Keep responses concise but informative. If you detect an emotion in the user's q
     private val _currentSessionIdFlow = MutableStateFlow(-1L)
     val currentSessionIdFlow: StateFlow<Long> = _currentSessionIdFlow.asStateFlow()
 
+    // ── Mic Lock State ──────────────────────────────────────────────────────
+    private val _userMicLocked = MutableStateFlow(false)
+    val userMicLocked: StateFlow<Boolean> = _userMicLocked.asStateFlow()
+
+    fun setMicLock(locked: Boolean, context: Context) {
+        _userMicLocked.value = locked
+        audioEngine?.setUserMicLocked(locked)
+        if (locked && !_isListening.value) {
+            startListening(context)
+        }
+        Log.i(TAG, "[setMicLock] Mic lock = $locked")
+    }
+
     val deviceCount: Int get() = _devices.value.size
     val activeDeviceCount: Int get() = _devices.value.count { it.isOn }
 
@@ -357,7 +347,7 @@ Keep responses concise but informative. If you detect an emotion in the user's q
     // Task Queue executes it step-by-step using the Accessibility Service.
     // ═══════════════════════════════════════════════════════════════════════
 
-    private val taskQueue = mutableListOf<Pair<String, Map<String, String>>>()
+    private val taskQueue = java.util.concurrent.ConcurrentLinkedQueue<Pair<String, Map<String, String>>>()
     @Volatile private var isTaskQueueRunning = false
 
     // ─── New Feature Systems ───────────────────────────────────────────
@@ -414,6 +404,12 @@ Keep responses concise but informative. If you detect an emotion in the user's q
             }
         }
         Log.d(AUDIO_TAG, "[JarvisViewModel] init complete")
+
+        // Load chat sessions from DB with delay for initialization
+        viewModelScope.launch(Dispatchers.IO) {
+            delay(500)
+            loadChatSessions()
+        }
     }
 
     private fun updateEngineStatusText() {
@@ -1224,9 +1220,32 @@ Keep responses concise but informative. If you detect an emotion in the user's q
         if (textToSpeech == null) {
             initNativeTts(context.applicationContext)
         }
+        // Register incoming call callback
+        NotificationReaderService.onIncomingCall = { callerName, callerNumber ->
+            handleIncomingCallAnnouncement(callerName, callerNumber)
+        }
     }
 
     private fun getApplicationContext(): Context? = applicationContext
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // INCOMING CALL HANDLER
+    // ═══════════════════════════════════════════════════════════════════════
+
+    fun handleIncomingCallAnnouncement(callerName: String, callerNumber: String) {
+        viewModelScope.launch(Dispatchers.Main) {
+            _brainState.value = BrainState.SPEAKING
+            _emotion.value = "urgent"
+            val announcement = if (callerName != callerNumber && callerName != "Unknown") {
+                "Sir, incoming call from $callerName. Say answer to pick up, or reject to decline."
+            } else {
+                "Sir, incoming call from $callerNumber. Say answer to pick up, or reject to decline."
+            }
+            _lastResponse.value = announcement
+            addAssistantMessage(announcement, "urgent")
+            trySynthesizeAndPlay(announcement, getApplicationContext() ?: return@launch)
+        }
+    }
 
     fun showOverlay(context: Context) {
         try {
@@ -1404,6 +1423,12 @@ Keep responses concise but informative. If you detect an emotion in the user's q
                         _audioAmplitude.value = 0.5f
                         trySynthesizeAndPlay(statusReport, context)
                     }
+                    is CommandRouter.RouteResult.AutonomousTask -> {
+                        // Route to AI with structured prompt for autonomous execution
+                        val aiQuery = routeResult.prompt
+                        _emotion.value = "confident"
+                        handleAIQuery(aiQuery, context, memoryContext = "")
+                    }
                 }
             } catch (e: CancellationException) {
                 _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
@@ -1432,6 +1457,15 @@ Keep responses concise but informative. If you detect an emotion in the user's q
             _lastResponse.value   = result.response
             _isTyping.value       = false
             addAssistantMessage(result.response, result.emotion)
+
+            // Handle call answer/reject with Shizuku
+            if (result.response.contains("Answering the call")) {
+                ShizukuManager.executeShellCommand("input keyevent KEYCODE_CALL")
+            }
+            if (result.response.contains("Rejecting the call")) {
+                ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENDCALL")
+            }
+
             _brainState.value     = BrainState.SPEAKING
             _audioAmplitude.value = 0.5f
             Log.d(AUDIO_TAG, "[handleSystemCommandResult] Trying TTS for: \"${result.response.take(60)}\"")

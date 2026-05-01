@@ -2,7 +2,10 @@ package com.jarvis.assistant.router
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.Manifest
 import android.net.Uri
+import android.provider.ContactsContract
 import android.provider.Settings
 import android.util.Log
 import com.jarvis.assistant.brief.DailyBriefGenerator
@@ -34,8 +37,10 @@ import com.jarvis.assistant.shizuku.ShizukuManager
  *   - "open settings" → Opens Android Settings
  *   - "set brightness [0-255]" → Screen brightness via Settings
  *   - "set alarm/timer" → Opens clock app
- *   - "call [contact]" → Opens dialer
+ *   - "call [contact]" → Opens dialer or direct calls
  *   - "open [url]" → Opens browser
+ *   - "install/download/get [app]" → Autonomous install task
+ *   - "answer/reject call" → Call answer/reject
  */
 object CommandRouter {
 
@@ -68,11 +73,109 @@ object CommandRouter {
 
         /** Device status command — check battery/storage etc */
         data class DeviceStatusCommand(val component: String = "all") : RouteResult()
+
+        /** Autonomous task — install/download/get an app via AI+accessibility */
+        data class AutonomousTask(val taskType: String, val target: String, val prompt: String) : RouteResult()
     }
 
     // ─── Well-known app name → package mapping ──────────────────
     // Delegated to shared AppRegistry (BUG #12 fix: eliminates duplicate map)
     private val appAliases: Map<String, String> get() = com.jarvis.assistant.actions.AppRegistry.appAliases
+
+    // ─── Hinglish → English normalization map ───────────────────
+    private val hinglishMap = mapOf(
+        "kholo" to "open",
+        "band karo" to "turn off",
+        "off karo" to "turn off",
+        "on karo" to "turn on",
+        "chalu karo" to "turn on",
+        "install karo" to "install",
+        "download karo" to "download",
+        "get karo" to "get",
+        "bhejo" to "send",
+        "samjhao" to "explain",
+        "dikhao" to "show",
+        "sunao" to "play",
+        "chalao" to "run",
+        "rukho" to "stop",
+        "holo" to "open",
+    )
+
+    /**
+     * Normalize Hinglish phrasings to their English equivalents.
+     * E.g. "free fire kholo" → "open free fire", "install karo" → "install"
+     */
+    private fun normalizeHinglish(input: String): String {
+        var result = input
+        // Handle "X kholo" → "open X" (kholo at end after a word)
+        result = Regex("""(\S+)\s+kholo""", RegexOption.IGNORE_CASE).replace(result) { match ->
+            "open ${match.groupValues[1]}"
+        }
+        // Handle "X karo" patterns at end of string
+        for ((hinglish, english) in hinglishMap) {
+            if (hinglish.contains(" ")) {
+                // Multi-word replacements like "band karo" → "turn off"
+                result = result.replace(Regex(Regex.escape(hinglish), RegexOption.IGNORE_CASE), english)
+            }
+        }
+        // Handle single-word suffixes like "install karo" → "install"
+        result = Regex("""(install|download|get)\s+karo""", RegexOption.IGNORE_CASE).replace(result) { match ->
+            match.groupValues[1]
+        }
+        // Handle standalone "karo" at end after other words → treat as action verb
+        // e.g. "wifi on karo" already handled above
+        // Handle "X karo" for toggle patterns: "wifi on karo" → "turn on wifi"
+        result = Regex("""(\S+)\s+on\s*karo""", RegexOption.IGNORE_CASE).replace(result) { match ->
+            "turn on ${match.groupValues[1]}"
+        }
+        result = Regex("""(\S+)\s+off\s*karo""", RegexOption.IGNORE_CASE).replace(result) { match ->
+            "turn off ${match.groupValues[1]}"
+        }
+        // Handle remaining single-word replacements (but not "kholo" which is already handled)
+        for ((hinglish, english) in hinglishMap) {
+            if (!hinglish.contains(" ") && hinglish != "kholo" && hinglish != "holo") {
+                result = result.replace(Regex("""\b${Regex.escape(hinglish)}\b""", RegexOption.IGNORE_CASE), english)
+            }
+        }
+        return result
+    }
+
+    /**
+     * Calculate Levenshtein edit distance between two strings.
+     */
+    private fun levenshtein(a: String, b: String): Int {
+        val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+        for (i in 0..a.length) dp[i][0] = i
+        for (j in 0..b.length) dp[0][j] = j
+        for (i in 1..a.length) {
+            for (j in 1..b.length) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                dp[i][j] = minOf(
+                    dp[i - 1][j] + 1,       // deletion
+                    dp[i][j - 1] + 1,       // insertion
+                    dp[i - 1][j - 1] + cost // substitution
+                )
+            }
+        }
+        return dp[a.length][b.length]
+    }
+
+    /**
+     * Normalize a string for fuzzy matching: lowercase, remove spaces & punctuation.
+     */
+    private fun normalizeForFuzzy(s: String): String {
+        return s.lowercase().replace(Regex("[\\s\\p{Punct}]"), "")
+    }
+
+    /**
+     * Calculate token-overlap bonus between input and a known alias.
+     * Returns 0..2 bonus (each matching token reduces effective distance by 1).
+     */
+    private fun tokenOverlapBonus(input: String, alias: String): Int {
+        val inputTokens = input.lowercase().split(Regex("\\s+")).toSet()
+        val aliasTokens = alias.lowercase().split(Regex("\\s+")).toSet()
+        return inputTokens.intersect(aliasTokens).size.coerceAtMost(2)
+    }
 
     /**
      * Route a user query to the appropriate handler.
@@ -80,7 +183,23 @@ object CommandRouter {
      * or [RouteResult.NeedsAI] if it should go to Gemini.
      */
     fun route(query: String, context: Context): RouteResult {
-        val normalized = query.lowercase().trim()
+        val normalized = normalizeHinglish(query.lowercase().trim())
+
+        // ─── Call Answer / Reject ────────────────────────────────
+        if (normalized == "answer" || normalized == "answer call" || normalized == "receive") {
+            return RouteResult.Handled("Answering the call, Sir.", "calm")
+        }
+        if (normalized == "reject" || normalized == "decline" || normalized == "reject call") {
+            return RouteResult.Handled("Rejecting the call, Sir.", "calm")
+        }
+
+        // ─── Install / Download / Get commands (AutonomousTask) ─
+        val installMatch = Regex("""(?:install|download|get)\s+(.+)""", RegexOption.IGNORE_CASE).find(normalized)
+        if (installMatch != null) {
+            val target = installMatch.groupValues[1].trim()
+            return RouteResult.AutonomousTask("install", target,
+                "Open Play Store, search for '$target', and tap Install using the accessibility service tools.")
+        }
 
         // ─── App Opening ──────────────────────────────────────
         val openMatch = Regex("""(?:open|launch|start|run)\s+(.+)""", RegexOption.IGNORE_CASE)
@@ -134,7 +253,8 @@ object CommandRouter {
         }
 
         // ─── Navigation ──────────────────────────────────────
-        if (normalized in listOf("go back", "back", "go back")) {
+        // FIX #2: Removed duplicate "go back" from the list
+        if (normalized in listOf("go back", "back")) {
             return handleGlobalAction("back")
         }
         if (normalized in listOf("go home", "home", "go to home screen")) {
@@ -176,13 +296,21 @@ object CommandRouter {
         val callMatch = Regex("""(?:call|dial|ring)\s+(.+)""").find(normalized)
         if (callMatch != null) {
             val target = callMatch.groupValues[1].trim()
-            return handleCall(target, context)
+            // FIX #8 (M2): Exclude "call back" / "call me back" from dialer routing
+            if (target.equals("back", ignoreCase = true) || target.equals("me back", ignoreCase = true)) {
+                // Fall through — let AI or callback handler deal with it
+            } else {
+                return handleCall(target, context)
+            }
         }
 
         // ─── Vision Commands ─────────────────────────────────────
+        // FIX #1 (C3): Removed "screenshot" from vision command match to avoid
+        // conflict with the screenshot handler above. Vision commands now only match:
+        // "kya hai yeh", "what is this", "dekh kya hai", "look at this",
+        // "describe", "identify", "scan", "take a photo", "photo le"
         if (normalized.matches(Regex("(?:kya hai yeh|what is this|dekh kya hai|look at this|describe|identify|scan)")) ||
-            normalized.contains("take a photo") || normalized.contains("photo le") ||
-            normalized.contains("screenshot")) {
+            normalized.contains("take a photo") || normalized.contains("photo le")) {
             val prompt = when {
                 normalized.contains("describe") -> "Describe what you see in detail"
                 normalized.contains("identify") -> "Identify objects and text in the image"
@@ -276,6 +404,36 @@ object CommandRouter {
             )
         }
 
+        // ── FIX #4: Fuzzy matching with Levenshtein edit distance ──
+        // When exact match fails, try fuzzy matching against known aliases
+        val fuzzyResult = fuzzyMatchApp(appName)
+        if (fuzzyResult != null) {
+            val (matchedAlias, matchedPackage) = fuzzyResult
+            val launched = tryLaunchApp(matchedPackage, context)
+            if (launched) {
+                return RouteResult.Handled(
+                    "Opening ${matchedAlias.replaceFirstChar { it.uppercase() }} for you, Sir.",
+                    "confident"
+                )
+            }
+
+            // Shizuku fallback for fuzzy match
+            if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+                val result = ShizukuManager.openApp(matchedPackage)
+                if (result.isSuccess) {
+                    return RouteResult.Handled(
+                        "Opening ${matchedAlias.replaceFirstChar { it.uppercase() }} via system command, Sir.",
+                        "confident"
+                    )
+                }
+            }
+
+            return RouteResult.Handled(
+                "I couldn't open ${matchedAlias.replaceFirstChar { it.uppercase() }}. The app may not be installed.",
+                "confused"
+            )
+        }
+
         // Unknown app name — try Shizuku with a fuzzy match or pass to AI
         if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
             // Try to find the package
@@ -299,6 +457,43 @@ object CommandRouter {
 
         // Can't resolve — let AI handle it
         return RouteResult.NeedsAI("Open the app: $appName")
+    }
+
+    /**
+     * Fuzzy match an app name against known aliases using Levenshtein distance
+     * with token-overlap bonus.
+     * Returns the (alias, packageName) pair if a close match is found, null otherwise.
+     *
+     * Examples: "yotube" → YouTube, "free fier" → Free Fire, "watsap" → WhatsApp
+     */
+    private fun fuzzyMatchApp(input: String): Pair<String, String>? {
+        val inputNorm = normalizeForFuzzy(input)
+        if (inputNorm.isEmpty()) return null
+
+        var bestAlias: String? = null
+        var bestPackage: String? = null
+        var bestDistance = Int.MAX_VALUE
+
+        for ((alias, packageName) in appAliases) {
+            val aliasNorm = normalizeForFuzzy(alias)
+            val dist = levenshtein(inputNorm, aliasNorm)
+            val bonus = tokenOverlapBonus(input, alias)
+            val effectiveDist = dist - bonus
+
+            // Max allowed errors: 3 for longer names, 1 for short words (≤4 chars)
+            val maxAllowed = if (aliasNorm.length <= 4) 1 else 3
+
+            if (effectiveDist in 0..maxAllowed && effectiveDist < bestDistance) {
+                bestDistance = effectiveDist
+                bestAlias = alias
+                bestPackage = packageName
+            }
+        }
+
+        if (bestAlias != null && bestPackage != null) {
+            return Pair(bestAlias, bestPackage)
+        }
+        return null
     }
 
     private fun tryLaunchApp(packageName: String, context: Context): Boolean {
@@ -454,18 +649,95 @@ object CommandRouter {
         }
     }
 
+    /**
+     * FIX #3 (M1): Handle call with actual contact resolution.
+     * - Queries ContactsContract for the contact name to get phone number
+     * - If CALL_PHONE permission is granted, uses ACTION_CALL for direct calling
+     * - If only a number is provided, uses ACTION_CALL directly (if permission granted)
+     * - Falls back to ACTION_DIAL (just opens dialer) if no CALL_PHONE permission
+     */
     private fun handleCall(target: String, context: Context): RouteResult {
         return try {
-            // If it looks like a phone number
             val isNumber = target.all { it.isDigit() || it in "+-() " }
-            val uri = if (isNumber) "tel:$target" else "tel:$target"
+
+            if (isNumber) {
+                // Direct number provided — call if we have permission, else dial
+                val uri = "tel:$target"
+                val hasCallPermission = context.checkCallingOrSelfPermission(Manifest.permission.CALL_PHONE) ==
+                        PackageManager.PERMISSION_GRANTED
+                val action = if (hasCallPermission) Intent.ACTION_CALL else Intent.ACTION_DIAL
+                val intent = Intent(action, Uri.parse(uri)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                return if (hasCallPermission) {
+                    RouteResult.Handled("Calling $target, Sir.", "calm")
+                } else {
+                    RouteResult.Handled("Opening dialer for $target, Sir.", "calm")
+                }
+            }
+
+            // Contact name — resolve via ContactsContract
+            val resolvedNumber = resolveContactNumber(target, context)
+            if (resolvedNumber != null) {
+                val uri = "tel:$resolvedNumber"
+                val hasCallPermission = context.checkCallingOrSelfPermission(Manifest.permission.CALL_PHONE) ==
+                        PackageManager.PERMISSION_GRANTED
+                val action = if (hasCallPermission) Intent.ACTION_CALL else Intent.ACTION_DIAL
+                val intent = Intent(action, Uri.parse(uri)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                return if (hasCallPermission) {
+                    RouteResult.Handled("Calling $target, Sir.", "calm")
+                } else {
+                    RouteResult.Handled("Opening dialer for $target, Sir.", "calm")
+                }
+            }
+
+            // Could not resolve contact — open dialer with the raw text
+            val uri = "tel:$target"
             val intent = Intent(Intent.ACTION_DIAL, Uri.parse(uri)).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(intent)
-            RouteResult.Handled("Opening dialer for $target, Sir.", "calm")
+            RouteResult.Handled("Couldn't find contact '$target'. Opening dialer, Sir.", "confused")
         } catch (e: Exception) {
             RouteResult.Handled("Could not initiate call: ${e.message}", "stressed")
+        }
+    }
+
+    /**
+     * Resolve a contact name to a phone number using ContactsContract.
+     * Returns the first matching phone number, or null if not found.
+     */
+    private fun resolveContactNumber(name: String, context: Context): String? {
+        return try {
+            val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+            val projection = arrayOf(
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                ContactsContract.CommonDataKinds.Phone.NUMBER
+            )
+            // Search by display name (case-insensitive via SQL)
+            val selection = "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?"
+            val selectionArgs = arrayOf("%$name%")
+
+            val cursor = context.contentResolver.query(uri, projection, selection, selectionArgs, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val numberIndex = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                    if (numberIndex >= 0) {
+                        return it.getString(numberIndex)
+                    }
+                }
+            }
+            null
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Missing READ_CONTACTS permission for contact lookup", e)
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to resolve contact: $name", e)
+            null
         }
     }
 

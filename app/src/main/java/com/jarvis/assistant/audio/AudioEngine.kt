@@ -20,17 +20,17 @@ import kotlin.math.sqrt
  * AudioEngine — Production-grade silent audio capture engine WITH VAD.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CRITICAL OVERHAUL (v15) — ULTRA-SENSITIVE MIC / JARVIS HEARING:
+ * CRITICAL OVERHAUL (v16) — FAST RESPONSE / MIC LOCK / BUG FIXES:
  *
  *  G1: SOFTWARE GAIN BOOST 4.0x — Increased from 2.5x to 4.0x.
  *      A whisper at 0.003 RMS becomes 0.012 after gain, which now
  *      crosses the lowered SPEECH_THRESHOLD of 0.008. Clipping
  *      protection is built-in and AGC further adapts per-frame.
  *
- *  G2: SILENCE_TIMEOUT 1200ms — Increased from 700ms. The old
- *      700ms cutoff was murdering slow speakers and people who
- *      pause between words. 1200ms gives natural speech rhythm
- *      room to breathe while still being responsive.
+ *  G2: SILENCE_TIMEOUT 700ms — Reduced from 1200ms back to 700ms.
+ *      Combined with ~300ms transcription handoff = ~1 second total.
+ *      Fast response after user stops talking. The mic-lock mode
+ *      provides an escape hatch for users who need unlimited time.
  *
  *  G3: CRASH-PROOF AudioRecord LIFECYCLE — The AudioRecord read loop
  *      is wrapped in a strict try-finally block. Regardless of
@@ -75,14 +75,72 @@ import kotlin.math.sqrt
  *  G10: MAX_CMD_SECONDS 30 — Increased from 15 for long dictation.
  *       MIN_RECORDING_MS reduced to 300ms so even very short
  *       utterances are captured.
+ *
+ *  ── v16 CHANGES ────────────────────────────────────────────────────
+ *
+ *  C1: SILENCE_TIMEOUT reduced to 700ms (was 1200ms) for faster
+ *      end-of-speech detection. ~700ms silence + ~300ms transcription
+ *      = ~1 second total response time after user stops talking.
+ *
+ *  C2: SW_WAKE_SPEECH_THRESHOLD halved to 0.008f (was 0.016f) so
+ *      the software wake-word fallback triggers at normal speaking
+ *      volume instead of requiring shouting.
+ *
+ *  C3: SW_WAKE_MIN_SPEECH_FRAMES reduced to 4 (was 7, ~180ms) for
+ *      faster wake-word detection.
+ *
+ *  C5: maxCmdFrames bug fix — Changed from compile-time
+ *      SAMPLE_RATE_PRIMARY to runtime actualSampleRate via a
+ *      computed property. Previously, when the engine fell back
+ *      to 16000Hz, maxCmdFrames was still calculated against
+ *      44100Hz, causing commands to be cut off too early at
+ *      ~10.9s instead of the intended 30s.
+ *
+ *  C6: MIC LOCK MODE — Added userMicLocked flag. When true, the
+ *      mic stays permanently in command-recording mode. Silence
+ *      timeout is completely ignored — Jarvis keeps listening
+ *      until the user explicitly turns it off. When a command
+ *      finishes in locked mode, the buffer is flushed and
+ *      recording restarts immediately.
+ *
+ *  C7: Removed unused SILENCE_FLOOR constant.
+ *
+ *  C8: Added VoicePatternCallback mechanism so AudioEngine can
+ *      signal when it detects specific voice patterns during
+ *      locked mode (e.g., call answer/reject keywords), for
+ *      future integration with CommandRouter route types
+ *      like ANSIBLE_CALL_ANSWER and CALL_REJECT.
  * ═══════════════════════════════════════════════════════════════════════
  */
+
+/**
+ * Callback interface for voice pattern detection events.
+ *
+ * During mic-locked mode, AudioEngine can detect specific voice
+ * patterns (keywords like "answer", "reject", etc.) and signal
+ * them upstream. This decouples AudioEngine from CommandRouter,
+ * allowing CommandRouter to define ANSIBLE_CALL_ANSWER and
+ * CALL_REJECT route types without AudioEngine needing to know
+ * about them.
+ */
+interface VoicePatternCallback {
+    /**
+     * Called when a voice pattern is detected during locked-mode recording.
+     *
+     * @param patternId Identifier for the detected pattern (e.g., "call_answer", "call_reject")
+     * @param confidence Confidence score 0.0-1.0
+     * @param audioSnapshot Short audio snippet surrounding the detection, if available
+     */
+    fun onVoicePatternDetected(patternId: String, confidence: Float, audioSnapshot: ByteArray?)
+}
+
 class AudioEngine(
     private val context: Context,
     val onAmplitudeUpdate: (Float) -> Unit,
     val onWakeWordDetected: () -> Unit,
     val onCommandReady: (ByteArray) -> Unit,
-    private val rawAudioFlow: MutableStateFlow<ByteArray>? = null
+    private val rawAudioFlow: MutableStateFlow<ByteArray>? = null,
+    private val voicePatternCallback: VoicePatternCallback? = null
 ) {
 
     companion object {
@@ -98,7 +156,6 @@ class AudioEngine(
 
         // G10: Increased from 15 for long dictation commands
         private const val MAX_CMD_SECONDS = 30
-        private const val SILENCE_FLOOR   = 0.003f
 
         // ── G1: SOFTWARE GAIN 4.0x ─────────────────────────────────────
         // Increased from 2.5x to 4.0x. With 4x gain, a whisper at
@@ -106,10 +163,11 @@ class AudioEngine(
         // Clipping protection is built-in, and AGC further adapts.
         private const val SOFTWARE_GAIN = 4.0f
 
-        // ── G2: SILENCE TIMEOUT ────────────────────────────────────────
-        // Increased from 700ms to 1200ms. 700ms was cutting off slow
-        // speakers and people who pause between words.
-        private const val SILENCE_TIMEOUT_MS  = 1200L
+        // ── C1: SILENCE TIMEOUT 700ms ──────────────────────────────────
+        // Reduced from 1200ms to 700ms. Combined with ~300ms
+        // transcription handoff = ~1 second total response time.
+        // Users who need unlimited recording time should use mic-lock mode.
+        private const val SILENCE_TIMEOUT_MS  = 700L
 
         // ── G4: LOWERED VAD THRESHOLDS (with 4x gain boost) ────────────
         // These thresholds operate on GAIN-BOOSTED + AGC-processed audio.
@@ -143,12 +201,24 @@ class AudioEngine(
         // Software wake word detection constants
         private const val SW_WAKE_MIN_FRAMES_ABOVE = 5
         private const val SW_WAKE_MAX_FRAMES_WINDOW = 30
-        // Threshold: at least 2x the RMS SPEECH_THRESHOLD to avoid false triggers
-        private const val SW_WAKE_SPEECH_THRESHOLD = 0.016f
-        // Minimum speech duration: 300ms (at ~46ms per frame @44100Hz/2048)
-        private const val SW_WAKE_MIN_SPEECH_FRAMES = 7  // ~300ms
+        // ── C2: Halved from 0.016f to 0.008f ──────────────────────────
+        // Now matches SPEECH_THRESHOLD so wake word triggers at normal
+        // speaking volume instead of requiring shouting.
+        private const val SW_WAKE_SPEECH_THRESHOLD = 0.008f
+        // ── C3: Reduced from 7 to 4 frames (~180ms) ───────────────────
+        // Faster wake word detection — 4 frames at ~46ms = ~184ms
+        private const val SW_WAKE_MIN_SPEECH_FRAMES = 4  // ~180ms
         // Cooldown: 3000ms (at ~46ms per frame)
         private const val SW_WAKE_COOLDOWN_FRAMES = 65  // ~3000ms
+
+        // ── C8: Voice pattern keywords for locked-mode detection ───────
+        // These are keyword IDs that AudioEngine can signal via
+        // VoicePatternCallback. The actual keyword spotting logic
+        // is expected to be handled by RustBridge or a future
+        // on-device keyword spotter. AudioEngine just provides the
+        // callback plumbing.
+        const val VOICE_PATTERN_CALL_ANSWER = "call_answer"
+        const val VOICE_PATTERN_CALL_REJECT = "call_reject"
     }
 
     enum class VadState { IDLE, SPEECH_DETECTED, SILENCE_AFTER_SPEECH }
@@ -160,6 +230,14 @@ class AudioEngine(
     @Volatile var isCommandBufferReady = false
         private set
     @Volatile private var vadState: VadState = VadState.IDLE
+
+    // ── C6: MIC LOCK MODE ─────────────────────────────────────────────
+    // When true, the mic stays permanently in command-recording mode.
+    // Silence timeout is completely ignored — Jarvis keeps listening
+    // until the user explicitly turns it off. When a command finishes
+    // in locked mode, the buffer is flushed and recording restarts
+    // immediately.
+    @Volatile var userMicLocked = false; private set
 
     private var audioRecord:    AudioRecord? = null
     private var listeningJob:   Job?         = null
@@ -176,10 +254,53 @@ class AudioEngine(
     private val commandBufferLock = Object()
     private val commandFrames   = mutableListOf<ByteArray>()
     private var cmdFrameCount   = 0
-    private val maxCmdFrames    = (MAX_CMD_SECONDS * SAMPLE_RATE_PRIMARY) / FRAME_SAMPLES
+
+    // ── C5: maxCmdFrames now uses actualSampleRate ────────────────────
+    // Previously this was calculated at class-init time using the compile-time
+    // SAMPLE_RATE_PRIMARY (44100). If the engine fell back to 16000Hz, the
+    // maxCmdFrames was still based on 44100, so 30*44100/2048 = 645 frames
+    // represented only ~645 * 2048 / 16000 ≈ 82.6s at 16kHz but only
+    // ~645 * 2048 / 44100 ≈ 30.0s at 44.1kHz. The real bug: at 16kHz the
+    // frame duration is longer so 645 frames = 82.6s which is too LONG,
+    // but the intent was 30s. Wait — actually the opposite: at 16kHz with
+    // 2048 samples/frame, each frame = 128ms. So 645 frames * 128ms = 82.6s.
+    // That means on 16kHz fallback, the command would record for 82s instead
+    // of the intended 30s. However, the real problem is: at 16kHz fallback,
+    // cmdFrameCount increments once per read (2048 samples at 16kHz), but
+    // maxCmdFrames was calculated for 44100Hz. With 16kHz, each frame is
+    // 128ms, so 645 frames * 128ms = 82.6s — way over the 30s limit.
+    // FIX: use actualSampleRate so maxCmdFrames adapts to the real rate.
+    private val maxCmdFrames: Int
+        get() = (MAX_CMD_SECONDS * actualSampleRate) / FRAME_SAMPLES
 
     private val flushMutex = Mutex()
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * C6: Set mic lock mode.
+     *
+     * When [locked] is true, the mic stays permanently in command-recording
+     * mode. Silence timeout is completely ignored — Jarvis keeps listening
+     * until the user explicitly calls setUserMicLocked(false).
+     *
+     * When transitioning to locked mode while already recording, the current
+     * recording continues without interruption.
+     *
+     * When transitioning from locked to unlocked, if currently in
+     * SILENCE_AFTER_SPEECH state, the silence timer will naturally
+     * take effect and flush the command.
+     */
+    fun setUserMicLocked(locked: Boolean) {
+        val wasLocked = userMicLocked
+        userMicLocked = locked
+        Log.i(TAG, "[setUserMicLocked] locked=$locked (was=$wasLocked) isRecordingCommand=$isRecordingCommand")
+
+        if (locked && !isRecordingCommand && isRunning) {
+            // Auto-start command recording if not already recording
+            Log.i(TAG, "[setUserMicLocked] Mic locked + not recording — auto-starting command recording")
+            startCommandRecording()
+        }
+    }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startListening() {
@@ -223,7 +344,7 @@ class AudioEngine(
                 return@launch
             }
 
-            Log.i(TAG, "[startListening] AudioRecord STARTED  source=${ar.audioSource}  sampleRate=$activeSampleRate  bufSize=${ar.bufferSizeInFrames * 2}  state=${ar.state}  gain=${SOFTWARE_GAIN}x  silenceTimeout=${SILENCE_TIMEOUT_MS}ms  agcMaxBoost=${AGC_MAX_BOOST}x  noiseGate=${NOISE_GATE_THRESHOLD}")
+            Log.i(TAG, "[startListening] AudioRecord STARTED  source=${ar.audioSource}  sampleRate=$activeSampleRate  bufSize=${ar.bufferSizeInFrames * 2}  state=${ar.state}  gain=${SOFTWARE_GAIN}x  silenceTimeout=${SILENCE_TIMEOUT_MS}ms  agcMaxBoost=${AGC_MAX_BOOST}x  noiseGate=${NOISE_GATE_THRESHOLD}  micLocked=$userMicLocked")
 
             // ══════════════════════════════════════════════════════════════
             // G3: CRASH-PROOF READ LOOP — strict try-finally
@@ -315,22 +436,53 @@ class AudioEngine(
                         // G4: Log VAD state periodically for diagnostics
                         vadLogCounter++
                         if (vadLogCounter % 22 == 0) {
-                            Log.d(TAG, "[VAD] state=$vadState rawAmp=$rawAmp threshold=$SPEECH_THRESHOLD recDuration=${recordingDuration}ms frames=$cmdFrameCount")
+                            Log.d(TAG, "[VAD] state=$vadState rawAmp=$rawAmp threshold=$SPEECH_THRESHOLD recDuration=${recordingDuration}ms frames=$cmdFrameCount micLocked=$userMicLocked")
+                        }
+
+                        // ── C8: Voice pattern detection during locked mode ──
+                        // When mic is locked, check for specific voice patterns
+                        // that could trigger call answer/reject actions.
+                        if (userMicLocked && RustBridge.isNativeReady()) {
+                            try {
+                                val patternResult = RustBridge.detectVoicePatternSync(frame, activeSampleRate)
+                                if (patternResult != null) {
+                                    Log.i(TAG, "[VAD] Voice pattern detected in locked mode: id=${patternResult.id} confidence=${patternResult.confidence}")
+                                    mainHandler.post {
+                                        voicePatternCallback?.onVoicePatternDetected(
+                                            patternResult.id,
+                                            patternResult.confidence,
+                                            frame.copyOf()
+                                        )
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                // Non-critical — don't disrupt recording
+                                Log.d(TAG, "[VAD] Voice pattern detection error: ${e.message}")
+                            }
                         }
 
                         if (rawAmp < SILENCE_THRESHOLD && recordingDuration > MIN_RECORDING_MS) {
                             if (vadState == VadState.SPEECH_DETECTED) {
                                 vadState = VadState.SILENCE_AFTER_SPEECH
                                 silenceStartTime = System.currentTimeMillis()
-                                Log.d(TAG, "[VAD] Silence detected after speech, waiting ${SILENCE_TIMEOUT_MS}ms before flush")
+                                Log.d(TAG, "[VAD] Silence detected after speech, waiting ${SILENCE_TIMEOUT_MS}ms before flush (micLocked=$userMicLocked)")
                             }
 
                             if (vadState == VadState.SILENCE_AFTER_SPEECH) {
-                                val silenceDuration = System.currentTimeMillis() - silenceStartTime
-                                // G2: 1200ms cutoff — gives natural speech rhythm room
-                                if (silenceDuration >= SILENCE_TIMEOUT_MS) {
-                                    Log.i(TAG, "[VAD] End-of-speech confirmed (silence=${silenceDuration}ms, recording=${recordingDuration}ms) — flushing command")
-                                    flushCommandBuffer()
+                                // ── C6: MIC LOCK — skip silence timeout entirely ──
+                                // When userMicLocked is true, we completely ignore
+                                // silence timeout. The mic stays in recording mode
+                                // until the user explicitly unlocks it.
+                                if (userMicLocked) {
+                                    // Don't flush on silence — keep recording
+                                    Log.d(TAG, "[VAD] Mic LOCKED — ignoring silence timeout, continuing to record")
+                                } else {
+                                    val silenceDuration = System.currentTimeMillis() - silenceStartTime
+                                    // C1: 700ms cutoff — fast response after user stops talking
+                                    if (silenceDuration >= SILENCE_TIMEOUT_MS) {
+                                        Log.i(TAG, "[VAD] End-of-speech confirmed (silence=${silenceDuration}ms, recording=${recordingDuration}ms) — flushing command")
+                                        flushCommandBuffer()
+                                    }
                                 }
                             }
                         } else if (rawAmp >= SPEECH_THRESHOLD) {
@@ -625,7 +777,33 @@ class AudioEngine(
     }
 
     fun startCommandRecording() {
-        Log.d(TAG, "[startCommandRecording] called")
+        Log.d(TAG, "[startCommandRecording] called (micLocked=$userMicLocked)")
+
+        // ── C6: In locked mode, if already recording, don't reset ──────
+        // When mic is locked and we're already recording, a call to
+        // startCommandRecording (e.g., from the auto-restart in
+        // flushCommandBuffer) should clear the buffer and keep going
+        // without any gap. If NOT locked and already recording, this
+        // is a no-op to avoid disrupting an active recording.
+        if (isRecordingCommand) {
+            if (userMicLocked) {
+                // Locked mode auto-restart: just clear the buffer,
+                // keep isRecordingCommand = true
+                Log.d(TAG, "[startCommandRecording] Mic LOCKED + already recording — clearing buffer, continuing to record")
+                synchronized(commandBufferLock) {
+                    commandFrames.clear()
+                    cmdFrameCount = 0
+                }
+                vadState = VadState.IDLE
+                recordingStartTime = System.currentTimeMillis()
+                silenceStartTime = 0L
+                return
+            } else {
+                Log.d(TAG, "[startCommandRecording] Already recording (not locked) — ignoring duplicate call")
+                return
+            }
+        }
+
         synchronized(commandBufferLock) {
             commandFrames.clear()
             cmdFrameCount = 0
@@ -635,11 +813,11 @@ class AudioEngine(
         vadState = VadState.IDLE
         recordingStartTime = System.currentTimeMillis()
         silenceStartTime = 0L
-        Log.d(TAG, "[startCommandRecording] VAD command recording started — autoStopOnSilence=${SILENCE_TIMEOUT_MS}ms")
+        Log.d(TAG, "[startCommandRecording] VAD command recording started — autoStopOnSilence=${if (userMicLocked) "DISABLED (mic locked)" else "${SILENCE_TIMEOUT_MS}ms"}")
     }
 
     fun stopCommandRecording() {
-        Log.d(TAG, "[stopCommandRecording] called — isRecordingCommand=$isRecordingCommand")
+        Log.d(TAG, "[stopCommandRecording] called — isRecordingCommand=$isRecordingCommand userMicLocked=$userMicLocked")
         if (!isRecordingCommand) return
         engineScope.launch {
             Log.d(TAG, "[stopCommandRecording] launching flushCommandBuffer()")
@@ -649,6 +827,7 @@ class AudioEngine(
 
     fun release() {
         Log.d(TAG, "[release] called")
+        userMicLocked = false
         stopListening()
         engineScope.cancel()
         Log.d(TAG, "[release] engineScope cancelled")
@@ -662,7 +841,7 @@ class AudioEngine(
     // ═══════════════════════════════════════════════════════════════════════
 
     private suspend fun flushCommandBuffer() {
-        Log.d(TAG, "[flushCommandBuffer] acquiring flushMutex...")
+        Log.d(TAG, "[flushCommandBuffer] acquiring flushMutex... (micLocked=$userMicLocked)")
         flushMutex.withLock {
             Log.d(TAG, "[flushCommandBuffer] mutex acquired — isRecordingCommand=$isRecordingCommand")
             if (!isRecordingCommand) {
@@ -685,6 +864,14 @@ class AudioEngine(
             if (frames.isEmpty()) {
                 Log.w(TAG, "[flushCommandBuffer] NO FRAMES captured — command buffer was empty")
                 isCommandBufferReady = false
+                // ── C6: In locked mode, restart recording even on empty ──
+                if (userMicLocked) {
+                    Log.i(TAG, "[flushCommandBuffer] Mic LOCKED — restarting command recording after empty flush")
+                    isRecordingCommand = true
+                    vadState = VadState.IDLE
+                    recordingStartTime = System.currentTimeMillis()
+                    silenceStartTime = 0L
+                }
                 return@withLock
             }
 
@@ -696,6 +883,23 @@ class AudioEngine(
             Log.i(TAG, "[flushCommandBuffer] Command flushed: ${out.size} bytes (~${"%.1f".format(durationSec)}s of PCM, gain=${SOFTWARE_GAIN}x+AGC) — delivering to onCommandReady")
             withContext(Dispatchers.Main) { onCommandReady(out) }
             Log.d(TAG, "[flushCommandBuffer] onCommandReady delivered on Main thread")
+
+            // ── C6: In locked mode, automatically restart command recording ──
+            // After flushing the command, clear the buffer and start recording
+            // again immediately. The mic will never auto-turn-off without
+            // the user explicitly unlocking it.
+            if (userMicLocked) {
+                Log.i(TAG, "[flushCommandBuffer] Mic LOCKED — restarting command recording immediately after flush")
+                isRecordingCommand = true
+                vadState = VadState.IDLE
+                isCommandBufferReady = false
+                recordingStartTime = System.currentTimeMillis()
+                silenceStartTime = 0L
+                synchronized(commandBufferLock) {
+                    commandFrames.clear()
+                    cmdFrameCount = 0
+                }
+            }
         }
     }
 

@@ -54,6 +54,7 @@ object ProactiveDeviceMonitor {
     private var batteryReceiver: BroadcastReceiver? = null
     private var networkReceiver: BroadcastReceiver? = null
     @Volatile private var isMonitoring = false
+    @Volatile private var monitorContext: Context? = null
 
     // Callback for speaking alerts
     var onAlertCallback: ((String) -> Unit)? = null
@@ -70,6 +71,7 @@ object ProactiveDeviceMonitor {
             return
         }
 
+        monitorContext = context.applicationContext
         isMonitoring = true
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putBoolean(KEY_MONITORING_ENABLED, true).apply()
@@ -101,8 +103,16 @@ object ProactiveDeviceMonitor {
         isMonitoring = false
         monitoringJob?.cancel()
         monitoringJob = null
+
+        // Unregister receivers using stored context
+        val ctx = monitorContext
+        if (ctx != null) {
+            try { batteryReceiver?.let { ctx.unregisterReceiver(it) } } catch (_: Exception) {}
+            try { networkReceiver?.let { ctx.unregisterReceiver(it) } } catch (_: Exception) {}
+        }
         batteryReceiver = null
         networkReceiver = null
+        monitorContext = null
         Log.i(TAG, "[stopMonitoring] Stopped")
     }
 

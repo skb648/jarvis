@@ -6,7 +6,9 @@ import android.net.Uri
 import android.util.Log
 import com.jarvis.assistant.actions.AppRegistry
 import com.jarvis.assistant.services.JarvisAccessibilityService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
 
 /**
@@ -519,13 +521,10 @@ object TaskExecutorBridge {
      * search_web — Search the web using the integrated WebSearchEngine.
      * Uses Google Custom Search API if configured, otherwise falls back to DuckDuckGo.
      */
-    private fun executeSearchWeb(args: Map<String, String>): StepResult {
+    private suspend fun executeSearchWeb(args: Map<String, String>): StepResult {
         val query = args["query"]?.trim() ?: return StepResult.Failed("Missing 'query' argument")
-        
-        // Run the search synchronously within the coroutine context
-        // Since executeToolCall is a suspend fun, we can call suspend functions
         return try {
-            val result = kotlinx.coroutines.runBlocking {
+            val result = withContext(Dispatchers.IO) {
                 com.jarvis.assistant.search.WebSearchEngine().search(query)
             }
             StepResult.Success(result)
