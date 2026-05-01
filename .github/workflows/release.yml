@@ -6,30 +6,68 @@ on:
       - 'v*'
   workflow_dispatch:
 
+env:
+  NDK_VERSION: "27.0.12077973"
+  CMAKE_VERSION: "3.22.1"
+  RUST_TARGETS: "aarch64-linux-android armv7-linux-androideabi"
+
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
+    # ─── Checkout ──────────────────────────────────────────────────
     - name: Checkout code
       uses: actions/checkout@v4
 
+    # ─── JDK ───────────────────────────────────────────────────────
     - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
         java-version: '17'
         distribution: 'temurin'
 
+    # ─── Android SDK + NDK + CMake ─────────────────────────────────
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
     - name: Install NDK & CMake
       run: |
-        echo "Installing Android NDK and CMake via sdkmanager..."
-        sdkmanager --install "ndk;27.0.12077973" "cmake;3.22.1"
-        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
-        echo "NDK installed at: $ANDROID_HOME/ndk/27.0.12077973"
+        echo "Installing Android NDK ${{ env.NDK_VERSION }} and CMake ${{ env.CMAKE_VERSION }}..."
+        sdkmanager --install "ndk;${{ env.NDK_VERSION }}" "cmake;${{ env.CMAKE_VERSION }}"
+        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+        echo "NDK installed at: $ANDROID_HOME/ndk/${{ env.NDK_VERSION }}"
+        # Verify installation
+        test -d "$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" && echo "NDK directory verified" || echo "WARNING: NDK directory not found"
 
+    # ─── Rust Toolchain ───────────────────────────────────────────
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install cargo-ndk
+      run: cargo install cargo-ndk
+
+    - name: Add Android cross-compilation targets
+      run: |
+        rustup target add ${{ env.RUST_TARGETS }}
+        echo "Installed Rust targets:"
+        rustup target list --installed | grep android
+
+    - name: Cache Rust cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          rust/target
+        key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock', 'rust/Cargo.toml') }}
+        restore-keys: |
+          rust-${{ runner.os }}-
+
+    # ─── Gradle Cache ─────────────────────────────────────────────
     - name: Cache Gradle packages
       uses: actions/cache@v4
       with:
@@ -40,38 +78,184 @@ jobs:
         restore-keys: |
           gradle-
 
+    # ─── Build Rust native libraries ──────────────────────────────
+    # Build Rust .so files BEFORE Gradle so they get packaged.
+    # If Rust build fails, we continue — the CMake stub provides fallback.
+    - name: Build Rust native libraries (arm64-v8a + armeabi-v7a)
+      id: rust_build
+      continue-on-error: true
+      run: |
+        chmod +x rust/build.sh
+        echo "=== Building Rust native libraries (release mode) ==="
+        ./rust/build.sh arm64 release 2>&1 || {
+          echo "::warning::Rust build failed — CMake stub will be used as fallback"
+          echo "rust_build_failed=true" >> "$GITHUB_OUTPUT"
+          # Ensure jniLibs directories exist even if Rust build failed,
+          # so CMake can find them and build the stub instead
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          mkdir -p app/src/main/jniLibs/armeabi-v7a
+          exit 0
+        }
+      env:
+        ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+
+    - name: Verify Rust build output
+      if: steps.rust_build.outcome == 'success' && steps.rust_build.outputs.rust_build_failed != 'true'
+      run: |
+        echo "=== Rust .so files in jniLibs ==="
+        find app/src/main/jniLibs -name "*.so" -exec ls -lh {} \; 2>/dev/null || echo "No .so files found — CMake stub will be used"
+        echo ""
+        for abi in arm64-v8a armeabi-v7a; do
+          so_file="app/src/main/jniLibs/$abi/libjarvis_rust.so"
+          if [ -f "$so_file" ]; then
+            size=$(stat -c%s "$so_file" 2>/dev/null || stat -f%z "$so_file" 2>/dev/null || echo "unknown")
+            echo "  $abi/libjarvis_rust.so — $size bytes ($(du -h "$so_file" | cut -f1))"
+          else
+            echo "  $abi/libjarvis_rust.so — NOT FOUND (CMake stub will be used)"
+          fi
+        done
+
+    - name: Warn about Rust build failure
+      if: steps.rust_build.outputs.rust_build_failed == 'true'
+      run: |
+        echo "::warning::Rust native build failed. The APK will be built with the CMake stub (JNI no-op fallback). Native AI features will not work — app will use Kotlin HTTP fallback."
+
+    # ─── Ensure jniLibs directories exist ─────────────────────────
+    - name: Ensure jniLibs directories exist
+      run: |
+        mkdir -p app/src/main/jniLibs/arm64-v8a
+        mkdir -p app/src/main/jniLibs/armeabi-v7a
+        echo "jniLibs directories ready"
+
+    # ─── Gradle Build ─────────────────────────────────────────────
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
     - name: Build Debug APK
-      run: ./gradlew assembleDebug --no-daemon --stacktrace --info
+      run: ./gradlew assembleDebug --no-daemon --stacktrace
       env:
         ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-    - name: Build Release APK (signed with debug key)
-      run: ./gradlew assembleRelease --no-daemon --stacktrace --info
+    - name: Build Release APK
+      run: ./gradlew assembleRelease --no-daemon --stacktrace
       env:
         ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        RELEASE_KEYSTORE_PATH: ${{ secrets.RELEASE_KEYSTORE_PATH }}
+        RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+        RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+        RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
 
+    # ─── APK Verification ─────────────────────────────────────────
+    - name: Verify APK contents & size
+      if: always()
+      run: |
+        echo "## APK Build Verification" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+
+        for variant in debug release; do
+          echo "### ${variant^} APK" >> "$GITHUB_STEP_SUMMARY"
+          if ls app/build/outputs/apk/$variant/*.apk 1> /dev/null 2>&1; then
+            for apk in app/build/outputs/apk/$variant/*.apk; do
+              size=$(du -h "$apk" | cut -f1)
+              bytes=$(stat -c%s "$apk" 2>/dev/null || stat -f%z "$apk" 2>/dev/null || echo "unknown")
+              echo "- **$(basename "$apk")**: $size ($bytes bytes)" >> "$GITHUB_STEP_SUMMARY"
+
+              # List native libraries inside APK
+              echo "  Native libraries:" >> "$GITHUB_STEP_SUMMARY"
+              unzip -l "$apk" 'lib/*/*.so' 2>/dev/null | while read -r line; do
+                echo "    $line" >> "$GITHUB_STEP_SUMMARY"
+              done || echo "    (none found — using stub)" >> "$GITHUB_STEP_SUMMARY"
+            done
+          else
+            echo "- ${variant^} APK: **NOT BUILT**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+        done
+
+        echo "### Rust Build Status" >> "$GITHUB_STEP_SUMMARY"
+        if [ "${{ steps.rust_build.outputs.rust_build_failed }}" = "true" ]; then
+          echo "- Rust native build: **FAILED** — CMake stub used (app runs in Kotlin fallback mode)" >> "$GITHUB_STEP_SUMMARY"
+        else
+          so_count=$(find app/src/main/jniLibs -name "libjarvis_rust.so" 2>/dev/null | wc -l)
+          echo "- Rust native build: **OK** ($so_count .so file(s) compiled)" >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    # ─── Generate Checksums ───────────────────────────────────────
+    - name: Generate checksums
+      if: always()
+      run: |
+        echo "## APK Checksums" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        mkdir -p /tmp/apk-checksums
+        for apk in app/build/outputs/apk/*/*.apk; do
+          if [ -f "$apk" ]; then
+            basename=$(basename "$apk")
+            sha256=$(sha256sum "$apk" | cut -d' ' -f1)
+            md5=$(md5sum "$apk" | cut -d' ' -f1)
+            size=$(du -h "$apk" | cut -f1)
+            echo "- **$basename**: SHA256 \`$sha256\` | MD5 \`$md5\` | Size: $size" >> "$GITHUB_STEP_SUMMARY"
+            echo "$sha256  $basename" >> /tmp/apk-checksums/checksums-sha256.txt
+            echo "$md5  $basename" >> /tmp/apk-checksums/checksums-md5.txt
+          fi
+        done
+        echo ""
+        echo "Checksum files written to /tmp/apk-checksums/"
+        ls -la /tmp/apk-checksums/ || true
+
+    # ─── Upload Artifacts ─────────────────────────────────────────
     - name: Upload Debug APK
       uses: actions/upload-artifact@v4
+      if: always()
       with:
         name: jarvis-debug-apk
         path: app/build/outputs/apk/debug/*.apk
+        retention-days: 30
 
     - name: Upload Release APK
       uses: actions/upload-artifact@v4
+      if: always()
       with:
         name: jarvis-release-apk
         path: app/build/outputs/apk/release/*.apk
+        retention-days: 30
 
-    - name: Create Release
+    - name: Upload checksums
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: apk-checksums
+        path: /tmp/apk-checksums/*.txt
+        retention-days: 30
+
+    # ─── Create GitHub Release ────────────────────────────────────
+    - name: Create GitHub Release
       if: startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v2
       with:
         files: |
           app/build/outputs/apk/debug/*.apk
           app/build/outputs/apk/release/*.apk
+          /tmp/apk-checksums/checksums-sha256.txt
+          /tmp/apk-checksums/checksums-md5.txt
+        body: |
+          ## JARVIS AI Assistant — ${{ github.ref_name }}
+
+          ### Downloads
+          - **Debug APK**: For testing and development
+          - **Release APK**: For production use (signed with debug key if no release keystore configured)
+
+          ### Checksums
+          See `checksums-sha256.txt` and `checksums-md5.txt` for verification.
+
+          ### Native Libraries
+          ${{ steps.rust_build.outputs.rust_build_failed == 'true' && '⚠️ Rust native build failed — APK uses CMake stub fallback (Kotlin HTTP mode)' || '✅ Rust native libraries included — full AI features available' }}
+
+          ---
+
+          *Built with GitHub Actions on ${{ github.event.head_commit.timestamp }}*
         generate_release_notes: true
         draft: false
         prerelease: false

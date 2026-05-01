@@ -216,28 +216,47 @@ class JarvisAccessibilityService : AccessibilityService() {
      * @return true if a clickable element was found and clicked
      */
     fun autoClick(text: String): Boolean {
-        val rootNode = rootInActiveWindow ?: return false
+        val rootNode = rootInActiveWindow ?: run {
+            Log.w(TAG, "[autoClick] No active window — accessibility service may not be connected")
+            return false
+        }
         val results = mutableListOf<AccessibilityNodeInfo>()
         findNodesByTextRecursive(rootNode, text.lowercase(), results, 0)
 
+        if (results.isEmpty()) {
+            Log.w(TAG, "[autoClick] No nodes found with text '$text' on screen")
+            rootNode.recycle()
+            return false
+        }
+
+        Log.i(TAG, "[autoClick] Found ${results.size} node(s) matching '$text'")
+
         try {
             // Step 1: Try ACTION_CLICK on the node itself first
+            // CRITICAL FIX: Refresh node before action to ensure it's still valid
             for (node in results) {
-                if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    Log.i(TAG, "[autoClick] Directly clicked node with text '$text'")
-                    JarviewModel.sendEventToUi("auto_click", mapOf(
-                        "text" to text, "success" to true,
-                        "method" to "direct_click",
-                        "timestamp" to System.currentTimeMillis()
-                    ))
-                    return true
+                try { node.refresh() } catch (_: Exception) {}
+                if (node.isEnabled && node.isVisibleToUser) {
+                    // First try to focus the node
+                    node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                    if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                        Log.i(TAG, "[autoClick] Directly clicked node with text '$text'")
+                        JarviewModel.sendEventToUi("auto_click", mapOf(
+                            "text" to text, "success" to true,
+                            "method" to "direct_click",
+                            "timestamp" to System.currentTimeMillis()
+                        ))
+                        return true
+                    }
                 }
             }
 
             // Step 2: Try clickable ancestor
             for (node in results) {
+                try { node.refresh() } catch (_: Exception) {}
                 val clickable = findClickableAncestor(node)
                 if (clickable != null) {
+                    clickable.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
                     val result = clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     Log.i(TAG, "[autoClick] Clicked ancestor element with text '$text' — success=$result")
                     JarviewModel.sendEventToUi("auto_click", mapOf(
@@ -251,6 +270,7 @@ class JarvisAccessibilityService : AccessibilityService() {
 
             // Step 3: Try ACTION_LONG_CLICK as fallback
             for (node in results) {
+                try { node.refresh() } catch (_: Exception) {}
                 if (node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
                     Log.i(TAG, "[autoClick] Long-clicked node with text '$text'")
                     JarviewModel.sendEventToUi("auto_click", mapOf(
@@ -263,12 +283,15 @@ class JarvisAccessibilityService : AccessibilityService() {
             }
 
             // Step 4: Force click using dispatchGesture at center bounds
+            // This is the most reliable method — it simulates a real touch event
             for (node in results) {
+                try { node.refresh() } catch (_: Exception) {}
                 val bounds = Rect()
                 node.getBoundsInScreen(bounds)
                 if (!bounds.isEmpty) {
                     val centerX = (bounds.left + bounds.right) / 2
                     val centerY = (bounds.top + bounds.bottom) / 2
+                    Log.i(TAG, "[autoClick] Attempting gesture click at ($centerX, $centerY) for '$text'")
                     if (forceClickAtPosition(centerX, centerY)) {
                         Log.i(TAG, "[autoClick] Force-clicked at ($centerX, $centerY) for text '$text'")
                         JarviewModel.sendEventToUi("auto_click", mapOf(
@@ -281,7 +304,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 }
             }
 
-            Log.w(TAG, "[autoClick] No clickable element found with text '$text'")
+            Log.w(TAG, "[autoClick] All methods failed for text '$text'")
             return false
         } finally {
             // MEMORY LEAK FIX: Recycle all AccessibilityNodeInfo objects after use

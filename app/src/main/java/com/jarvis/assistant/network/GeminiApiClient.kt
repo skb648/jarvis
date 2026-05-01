@@ -4,8 +4,11 @@ import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import java.net.HttpURLConnection
-import java.net.URL
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.concurrent.TimeUnit
 
 /**
  * GeminiApiClient — Centralized Gemini API client with retry logic and model fallback.
@@ -23,9 +26,10 @@ import java.net.URL
  *     - If the primary model fails, try fallback models in order
  *     - Supports gemini-2.5-flash-preview, gemini-2.5-flash, gemini-2.0-flash
  *
- *  3. PROPER CONNECTION MANAGEMENT:
- *     - Always disconnects HttpURLConnection in finally blocks
- *     - Sets appropriate timeouts (15s connect, 60s read)
+ *  3. OKHTTP CLIENT:
+ *     - Replaces HttpURLConnection with OkHttp for better reliability
+ *     - Proper connection pooling, timeout management
+ *     - Connection timeout: 15s, Read timeout: 90s, Write timeout: 30s
  *     - Uses ?key= URL parameter for maximum API key compatibility
  * ═══════════════════════════════════════════════════════════════════════
  */
@@ -43,6 +47,18 @@ object GeminiApiClient {
         "gemini-2.0-flash",
         "gemini-2.0-flash-lite"
     )
+
+    private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+    /** Shared OkHttp client with proper timeouts */
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
 
     /**
      * Result of a Gemini API call.
@@ -83,26 +99,19 @@ object GeminiApiClient {
         for (model in models) {
             var retries = 0
             while (retries < maxRetries) {
-                var connection: HttpURLConnection? = null
                 try {
-                    val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$trimmedKey")
-                    connection = url.openConnection() as HttpURLConnection
-                    connection.requestMethod = "POST"
-                    connection.setRequestProperty("Content-Type", "application/json")
-                    connection.doOutput = true
-                    connection.connectTimeout = 15_000
-                    connection.readTimeout = 60_000
+                    val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$trimmedKey"
+                    val request = Request.Builder()
+                        .url(url)
+                        .post(requestBody.toRequestBody(JSON_MEDIA_TYPE))
+                        .build()
 
-                    connection.outputStream.use { os ->
-                        os.write(requestBody.toByteArray(Charsets.UTF_8))
-                    }
+                    val response = httpClient.newCall(request).execute()
 
-                    val responseCode = connection.responseCode
-
-                    when (responseCode) {
+                    when (response.code) {
                         200 -> {
-                            val responseBody = connection.inputStream.bufferedReader().readText()
-                            connection.disconnect()
+                            val responseBody = response.body?.string() ?: ""
+                            response.close()
                             Log.i(TAG, "[postWithRetry] SUCCESS with model=$model (attempt=${retries + 1})")
                             return@withContext ApiResult.Success(responseBody, model)
                         }
@@ -110,8 +119,7 @@ object GeminiApiClient {
                         503 -> {
                             val backoffMs = (1000L * (1 shl retries))
                             Log.w(TAG, "[postWithRetry] 503 for model=$model (attempt=${retries + 1}/$maxRetries), retry in ${backoffMs}ms")
-                            connection.disconnect()
-                            connection = null
+                            response.close()
                             delay(backoffMs)
                             retries++
                             continue
@@ -120,8 +128,7 @@ object GeminiApiClient {
                         429 -> {
                             val backoffMs = (2000L * (1 shl retries))
                             Log.w(TAG, "[postWithRetry] 429 for model=$model (attempt=${retries + 1}/$maxRetries), retry in ${backoffMs}ms")
-                            connection.disconnect()
-                            connection = null
+                            response.close()
                             delay(backoffMs)
                             retries++
                             continue
@@ -130,8 +137,7 @@ object GeminiApiClient {
                         500 -> {
                             val backoffMs = (1000L * (1 shl retries))
                             Log.w(TAG, "[postWithRetry] 500 for model=$model (attempt=${retries + 1}/$maxRetries), retry in ${backoffMs}ms")
-                            connection.disconnect()
-                            connection = null
+                            response.close()
                             delay(backoffMs)
                             retries++
                             continue
@@ -139,24 +145,22 @@ object GeminiApiClient {
 
                         else -> {
                             val errorBody = try {
-                                connection.errorStream?.bufferedReader()?.readText() ?: ""
+                                response.body?.string() ?: ""
                             } catch (_: Exception) { "" }
-                            connection.disconnect()
-                            connection = null
-                            val friendlyMsg = when (responseCode) {
+                            response.close()
+                            val friendlyMsg = when (response.code) {
                                 400 -> "Bad request (400)"
                                 403 -> "API key not authorized (403)"
                                 404 -> "Model not found (404)"
-                                else -> "HTTP $responseCode"
+                                else -> "HTTP ${response.code}"
                             }
                             Log.e(TAG, "[postWithRetry] $friendlyMsg for model=$model: ${errorBody.take(300)}")
-                            lastError = ApiResult.HttpError(responseCode, "$friendlyMsg — ${errorBody.take(200)}")
+                            lastError = ApiResult.HttpError(response.code, "$friendlyMsg — ${errorBody.take(200)}")
                             break
                         }
                     }
                 } catch (e: java.net.SocketTimeoutException) {
                     Log.w(TAG, "[postWithRetry] Timeout for model=$model (attempt=${retries + 1}/$maxRetries)")
-                    try { connection?.disconnect() } catch (_: Exception) {}
                     if (retries < maxRetries - 1) {
                         delay(1000L)
                         retries++
@@ -166,7 +170,6 @@ object GeminiApiClient {
                     }
                 } catch (e: java.io.IOException) {
                     Log.w(TAG, "[postWithRetry] IO error for model=$model (attempt=${retries + 1}/$maxRetries): ${e.message}")
-                    try { connection?.disconnect() } catch (_: Exception) {}
                     if (retries < maxRetries - 1) {
                         delay(1000L)
                         retries++
@@ -176,11 +179,8 @@ object GeminiApiClient {
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "[postWithRetry] Error for model=$model: ${e.message}")
-                    try { connection?.disconnect() } catch (_: Exception) {}
                     lastError = ApiResult.NetworkError("Error: ${e.message?.take(100)}")
                     break
-                } finally {
-                    try { connection?.disconnect() } catch (_: Exception) {}
                 }
             }
         }
