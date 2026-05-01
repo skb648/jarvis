@@ -464,26 +464,6 @@ object CommandRouter {
             return RouteResult.DeviceStatusCommand(component)
         }
 
-        // ─── Alarm / Timer Commands ──────────────────────────────────
-        val alarmMatch = Regex("""(?:set|create)\s+alarm\s+(?:for\s+)?(.+)""").find(normalized)
-        if (alarmMatch != null) {
-            val timeStr = alarmMatch.groupValues[1].trim()
-            return SystemActionExecutor.setAlarm(context, timeStr)
-        }
-
-        val timerMatch = Regex("""(?:set|start)\s+timer\s+(?:for\s+)?(.+)""").find(normalized)
-        if (timerMatch != null) {
-            val durationStr = timerMatch.groupValues[1].trim()
-            return SystemActionExecutor.setTimer(context, durationStr)
-        }
-
-        val reminderMatch = Regex("""remind\s+me\s+(?:at\s+)?(.+?)(?:\s+to\s+)(.+)""").find(normalized)
-        if (reminderMatch != null) {
-            val timeStr = reminderMatch.groupValues[1].trim()
-            val message = reminderMatch.groupValues[2].trim()
-            return SystemActionExecutor.setReminder(context, timeStr, message)
-        }
-
         // ─── No system command matched → route to Gemini AI ──
         return RouteResult.NeedsAI(query)
     }

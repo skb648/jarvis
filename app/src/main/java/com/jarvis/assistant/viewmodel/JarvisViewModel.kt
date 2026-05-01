@@ -1847,7 +1847,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                                 Log.w(TAG, "[processQueryViaGeminiDirect] Retrying model $model in ${delayMs}ms due to HTTP $responseCode...")
                                 connection.disconnect()
                                 connection = null
-                                kotlinx.coroutines.delay(delayMs)
+                                Thread.sleep(delayMs)
                                 continue
                             }
 
@@ -1886,7 +1886,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                         try { connection?.disconnect() } catch (_: Exception) {}
                         connection = null
                         if (retry < maxRetriesPerModel) {
-                            kotlinx.coroutines.delay(1000L * (1L shl retry))
+                            Thread.sleep(1000L * (1L shl retry))
                             continue
                         }
                     }
