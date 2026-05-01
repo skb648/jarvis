@@ -353,3 +353,4 @@ dependencies {
     // OkHttp — Modern HTTP client (replaces HttpURLConnection for better reliability)
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
+}
