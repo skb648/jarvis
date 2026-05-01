@@ -24,13 +24,16 @@ android {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
 
-        // CMake build for JNI stub (when Rust .so is not available)
-        externalNativeBuild {
-            cmake {
-                cppFlags += ""
-                arguments += listOf(
-                    "-DANDROID_STL=none"
-                )
+        // CMake build config — only set if NDK is available
+        val hasNdk = (System.getenv("ANDROID_NDK_HOME") ?: System.getenv("NDK_HOME"))?.let { File(it).exists() } == true
+        if (hasNdk) {
+            externalNativeBuild {
+                cmake {
+                    cppFlags += ""
+                    arguments += listOf(
+                        "-DANDROID_STL=none"
+                    )
+                }
             }
         }
     }

@@ -101,3 +101,10 @@ Java_com_jarvis_assistant_jni_RustBridge_nativeShutdown(
     JNIEnv *env, jclass clazz) {
     LOGW("STUB: nativeShutdown called — Rust core not available");
 }
+
+JNIEXPORT jstring JNICALL
+Java_com_jarvis_assistant_jni_RustBridge_nativeDetectVoicePattern(
+    JNIEnv *env, jclass clazz, jbyteArray audioData, jint sampleRate) {
+    LOGW("STUB: nativeDetectVoicePattern called — Rust core not available");
+    return NULL;
+}
