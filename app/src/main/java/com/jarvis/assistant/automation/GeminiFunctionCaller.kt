@@ -414,9 +414,9 @@ object GeminiFunctionCaller {
 
         // ═══ Pattern 1: "click/tap/press [label]" ═══
         val clickPatterns = listOf(
-            Regex("""(?:i(?:'ll| will|'ve)?\s+)?(?:click|tap|press)\s+(?:the\s+)?(?:button\s+)?['"""']?(.+?)['"""']?\s*(?:button|for\s+you|now|sir|,|$)"""),
-            Regex("""(?:clicking|tapping|pressing)\s+(?:the\s+)?(?:button\s+)?['"""']?(.+?)['"""']?\s*(?:button|for\s+you|now|sir|,|$)"""),
-            Regex("""(?:i(?:'ve| have))?\s+(?:clicked|tapped|pressed)\s+(?:the\s+)?(?:button\s+)?['"""']?(.+?)['"""']?\s*(?:button|for\s+you|now|sir|,|$)"")
+            Regex("""(?:i(?:'ll| will|'ve)?\s+)?(?:click|tap|press)\s+(?:the\s+)?(?:button\s+)?['\"']?(.+?)['\"']?\s*(?:button|for\s+you|now|sir|,|$)"""),
+            Regex("""(?:clicking|tapping|pressing)\s+(?:the\s+)?(?:button\s+)?['\"']?(.+?)['\"']?\s*(?:button|for\s+you|now|sir|,|$)"""),
+            Regex("""(?:i(?:'ve| have))?\s+(?:clicked|tapped|pressed)\s+(?:the\s+)?(?:button\s+)?['\"']?(.+?)['\"']?\s*(?:button|for\s+you|now|sir|,|$)"")
         )
         for (pattern in clickPatterns) {
             val match = pattern.find(lower) ?: continue
@@ -468,7 +468,7 @@ object GeminiFunctionCaller {
         }
 
         // ═══ Pattern 6: "type/inject text" ═══
-        val injectPattern = Regex("""(?:typing|injecting|entering|type|inject|enter)\s+['"""']?(.+?)['"""']?\s*(?:into|in|for|now|sir|,|$)""")
+        val injectPattern = Regex("""(?:typing|injecting|entering|type|inject|enter)\s+['\"']?(.+?)['\"']?\s*(?:into|in|for|now|sir|,|$)""")
         val injectMatch = injectPattern.find(lower)
         if (injectMatch != null) {
             val content = injectMatch.groupValues[1].trim().removeSuffix(".").trim()
