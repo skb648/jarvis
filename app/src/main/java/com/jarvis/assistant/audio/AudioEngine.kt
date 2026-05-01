@@ -163,11 +163,12 @@ class AudioEngine(
         // Clipping protection is built-in, and AGC further adapts.
         private const val SOFTWARE_GAIN = 4.0f
 
-        // ── C1: SILENCE TIMEOUT 700ms ──────────────────────────────────
-        // Reduced from 1200ms to 700ms. Combined with ~300ms
-        // transcription handoff = ~1 second total response time.
+        // ── C1: SILENCE TIMEOUT 500ms ───────────────────────────────────
+        // Reduced from 700ms to 500ms. Combined with ~300ms
+        // transcription handoff = ~0.8 second total response time.
+        // Faster end-of-speech detection to reduce the 10-second delay complaint.
         // Users who need unlimited recording time should use mic-lock mode.
-        private const val SILENCE_TIMEOUT_MS  = 700L
+        private const val SILENCE_TIMEOUT_MS  = 500L
 
         // ── G4: LOWERED VAD THRESHOLDS (with 4x gain boost) ────────────
         // These thresholds operate on GAIN-BOOSTED + AGC-processed audio.
@@ -175,8 +176,8 @@ class AudioEngine(
         private const val SPEECH_THRESHOLD    = 0.008f   // was 0.012f
         private const val SILENCE_THRESHOLD   = 0.004f   // was 0.007f
 
-        // G10: Reduced from 400ms so even very short utterances are captured
-        private const val MIN_RECORDING_MS    = 300L
+        // G10: Reduced from 300ms to 200ms so even very short utterances are captured
+        private const val MIN_RECORDING_MS    = 200L
 
         private const val RMS_SMOOTHING   = 0.3f
 
@@ -199,17 +200,26 @@ class AudioEngine(
         private const val AR_ERROR                  = -1
 
         // Software wake word detection constants
-        private const val SW_WAKE_MIN_FRAMES_ABOVE = 5
+        // v7.0: Made more aggressive for better wake word detection
+        private const val SW_WAKE_MIN_FRAMES_ABOVE = 3
         private const val SW_WAKE_MAX_FRAMES_WINDOW = 30
         // ── C2: Halved from 0.016f to 0.008f ──────────────────────────
         // Now matches SPEECH_THRESHOLD so wake word triggers at normal
         // speaking volume instead of requiring shouting.
         private const val SW_WAKE_SPEECH_THRESHOLD = 0.008f
-        // ── C3: Reduced from 7 to 4 frames (~180ms) ───────────────────
-        // Faster wake word detection — 4 frames at ~46ms = ~184ms
-        private const val SW_WAKE_MIN_SPEECH_FRAMES = 4  // ~180ms
+        // ── C3: Reduced from 4 to 3 frames (~140ms) ───────────────────
+        // Faster wake word detection — 3 frames at ~46ms = ~138ms
+        private const val SW_WAKE_MIN_SPEECH_FRAMES = 3  // ~140ms
         // Cooldown: 3000ms (at ~46ms per frame)
         private const val SW_WAKE_COOLDOWN_FRAMES = 65  // ~3000ms
+
+        // ── v7.0: Configurable wake word phrase ────────────────────────
+        // The software wake word uses amplitude-based detection.
+        // For improved accuracy without Rust, we look for a syllable
+        // pattern: 2+ speech bursts with a brief pause between them
+        // (matching the "JAR-vis" cadence).
+        const val WAKE_WORD_PHRASE = "jarvis"
+        private const val SW_WAKE_SYLLABLE_GAP_MS = 300L  // Gap between syllables
 
         // ── C8: Voice pattern keywords for locked-mode detection ───────
         // These are keyword IDs that AudioEngine can signal via

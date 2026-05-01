@@ -103,16 +103,13 @@ class JarvisViewModel(
         private const val SHIZUKU_CHECK_INTERVAL_MS = 5_000L
 
         // A2: Model fallback list — tried in order until one succeeds
-        // CRITICAL FIX (v14): Put gemini-2.5-flash FIRST because gemini-1.5-flash
-        // is deprecated and returns 404 on many Google Cloud Projects.
-        // gemini-2.5-flash is the current recommended model.
-        // IMPORTANT: For audio transcription, models must support audio input.
-        // gemini-2.5-flash supports audio input.
+        // Updated v7.0: Removed deprecated gemini-1.5-pro-latest (returns 404)
+        // Added gemini-2.5-flash-preview-05-20 as the latest model
         private val GEMINI_MODELS = listOf(
+            "gemini-2.5-flash-preview-05-20",
             "gemini-2.5-flash",
             "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-1.5-pro-latest"
+            "gemini-2.0-flash-lite"
         )
 
         /** JARVIS system prompt — AUTONOMOUS REACT AGENT (v7.0)
@@ -444,6 +441,8 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 val loadedKeepAlive   = settingsRepository.isKeepAliveEnabled()
 
                 if (_geminiApiKey.value.isEmpty()) _geminiApiKey.value = loadedGemini
+                // Sync API key to JarviewModel for TaskExecutorBridge access
+                JarviewModel.geminiApiKey = loadedGemini
                 if (_elevenLabsApiKey.value.isEmpty()) _elevenLabsApiKey.value = loadedElevenLabs
                 _ttsVoiceId.value = loadedTtsVoiceId
                 _isWakeWordEnabled.value = loadedWakeWord
@@ -509,6 +508,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 val trimmedGemini = geminiKey.trim()
                 val trimmedElevenLabs = elevenLabsKey.trim()
                 _geminiApiKey.value     = trimmedGemini
+                JarviewModel.geminiApiKey = trimmedGemini
                 _elevenLabsApiKey.value = trimmedElevenLabs
                 Log.i(TAG, "API keys FORCE-UPDATED in memory — gemini=${trimmedGemini.take(4)}... (${trimmedGemini.length} chars), elevenLabs=${trimmedElevenLabs.take(4)}... (${trimmedElevenLabs.length} chars)")
 
@@ -943,13 +943,20 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             audioEngine?.stopCommandRecording()
             _isListening.value = false
 
-            val audioEmotion = try {
-                withContext(Dispatchers.IO) {
-                    Log.d(AUDIO_TAG, "[handleCommandReady] calling RustBridge.analyzeAudio at ${sampleRate}Hz")
-                    RustBridge.analyzeAudio(pcmBytes, sampleRate)
+            val audioEmotion = if (RustBridge.isNativeReady()) {
+                try {
+                    withContext(Dispatchers.IO) {
+                        Log.d(AUDIO_TAG, "[handleCommandReady] calling RustBridge.analyzeAudio at ${sampleRate}Hz")
+                        RustBridge.analyzeAudio(pcmBytes, sampleRate)
+                    }
+                } catch (e: Exception) {
+                    Log.w(AUDIO_TAG, "[handleCommandReady] Audio emotion analysis failed: ${e.message}")
+                    null
                 }
-            } catch (e: Exception) {
-                Log.w(AUDIO_TAG, "[handleCommandReady] Audio emotion analysis failed: ${e.message}")
+            } else {
+                // Skip audio emotion analysis when Rust native is not available —
+                // it adds ~200ms latency and always returns "neutral" without Rust
+                Log.d(AUDIO_TAG, "[handleCommandReady] Skipping audio emotion analysis — Rust native not ready")
                 null
             }
 
@@ -971,27 +978,32 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             }
 
             // Feature: Mood Detection from voice tone
-            try {
-                val moodResult = MoodDetector.detectMoodFromAudio(pcmBytes, sampleRate)
-                _detectedMood.value = moodResult
-                Log.d(AUDIO_TAG, "[handleCommandReady] Mood detected: ${moodResult.mood} (confidence=${moodResult.confidence})")
+            // Skip when Rust native is not available — it adds latency and doesn't work without Rust
+            if (RustBridge.isNativeReady()) {
+                try {
+                    val moodResult = MoodDetector.detectMoodFromAudio(pcmBytes, sampleRate)
+                    _detectedMood.value = moodResult
+                    Log.d(AUDIO_TAG, "[handleCommandReady] Mood detected: ${moodResult.mood} (confidence=${moodResult.confidence})")
 
-                // Auto-suggest actions for stressed/sad moods
-                if (moodResult.mood == "stressed" || moodResult.mood == "sad") {
-                    if (moodResult.confidence > 0.3f) {
-                        val actionMsg = when (moodResult.suggestedAction) {
-                            "play_calm_music" -> "Sir, aap ${moodResult.mood} lag rahe ho. Shall I play some calming music?"
-                            "play_uplifting_music" -> "Sir, lagta hai mood thoda off hai. Kuch achha gaana sunau?"
-                            "suggest_break" -> "Sir, aap stressed lag rahe ho. Chaliye thoda break lete hain."
-                            else -> null
-                        }
-                        if (actionMsg != null) {
-                            Log.i(AUDIO_TAG, "[handleCommandReady] Mood action suggestion: $actionMsg")
+                    // Auto-suggest actions for stressed/sad moods
+                    if (moodResult.mood == "stressed" || moodResult.mood == "sad") {
+                        if (moodResult.confidence > 0.3f) {
+                            val actionMsg = when (moodResult.suggestedAction) {
+                                "play_calm_music" -> "Sir, aap ${moodResult.mood} lag rahe ho. Shall I play some calming music?"
+                                "play_uplifting_music" -> "Sir, lagta hai mood thoda off hai. Kuch achha gaana sunau?"
+                                "suggest_break" -> "Sir, aap stressed lag rahe ho. Chaliye thoda break lete hain."
+                                else -> null
+                            }
+                            if (actionMsg != null) {
+                                Log.i(AUDIO_TAG, "[handleCommandReady] Mood action suggestion: $actionMsg")
+                            }
                         }
                     }
+                } catch (e: Exception) {
+                    Log.w(AUDIO_TAG, "[handleCommandReady] Mood detection failed: ${e.message}")
                 }
-            } catch (e: Exception) {
-                Log.w(AUDIO_TAG, "[handleCommandReady] Mood detection failed: ${e.message}")
+            } else {
+                Log.d(AUDIO_TAG, "[handleCommandReady] Skipping mood detection — Rust native not ready")
             }
 
             Log.d(AUDIO_TAG, "[handleCommandReady] Starting Gemini multimodal transcription at ${sampleRate}Hz")
@@ -1071,56 +1083,72 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 var lastError = ""
                 for (model in GEMINI_MODELS) {
                     var connection: HttpURLConnection? = null
-                    try {
-                        // CRITICAL FIX (v8): Use ?key= URL parameter instead of x-goog-api-key header.
-                        // The header method was causing 403 errors with some API key configurations.
-                        val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}")
-                        connection = url.openConnection() as HttpURLConnection
-                        connection.requestMethod = "POST"
-                        connection.setRequestProperty("Content-Type", "application/json")
-                        connection.doOutput = true
-                        connection.connectTimeout = 15_000
-                        connection.readTimeout = 30_000
+                    val maxRetriesPerModel = 2
+                    for (retry in 0..maxRetriesPerModel) {
+                        try {
+                            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}")
+                            connection = url.openConnection() as HttpURLConnection
+                            connection.requestMethod = "POST"
+                            connection.setRequestProperty("Content-Type", "application/json")
+                            connection.doOutput = true
+                            connection.connectTimeout = 15_000
+                            connection.readTimeout = 30_000
 
-                        connection.outputStream.use { os ->
-                            os.write(requestBody.toByteArray(Charsets.UTF_8))
-                        }
+                            connection.outputStream.use { os ->
+                                os.write(requestBody.toByteArray(Charsets.UTF_8))
+                            }
 
-                        val responseCode = connection.responseCode
-                        if (responseCode == HttpURLConnection.HTTP_OK) {
-                            val responseBody = connection.inputStream.bufferedReader().readText()
-                            connection.disconnect()
+                            val responseCode = connection.responseCode
+                            if (responseCode == HttpURLConnection.HTTP_OK) {
+                                val responseBody = connection.inputStream.bufferedReader().readText()
+                                connection.disconnect()
+                                connection = null
+
+                                val transcribedText = try {
+                                    val root = JsonParser.parseString(responseBody).asJsonObject
+                                    val candidates = root.getAsJsonArray("candidates")
+                                    val firstCandidate = candidates?.firstOrNull()?.asJsonObject
+                                    val content = firstCandidate?.getAsJsonObject("content")
+                                    val parts = content?.getAsJsonArray("parts")
+                                    val firstPart = parts?.firstOrNull()?.asJsonObject
+                                    firstPart?.get("text")?.asString ?: ""
+                                } catch (e: Exception) {
+                                    Log.e(AUDIO_TAG, "[transcribeViaGeminiFallback] JSON parsing failed: ${e.message}")
+                                    ""
+                                }
+
+                                if (transcribedText.isNotBlank()) {
+                                    Log.i(AUDIO_TAG, "[transcribeViaGeminiFallback] Model $model transcription: \"$transcribedText\"")
+                                    return@withContext transcribedText
+                                }
+                            } else {
+                                val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
+                                lastError = "Model $model error $responseCode: ${errorBody.take(300)}"
+                                Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] $lastError")
+
+                                // Retry on 503/429
+                                if ((responseCode == 503 || responseCode == 429) && retry < maxRetriesPerModel) {
+                                    val delayMs = if (responseCode == 429) 2000L * (1L shl retry) else 1000L * (1L shl retry)
+                                    Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] Retrying model $model in ${delayMs}ms due to HTTP $responseCode...")
+                                    connection?.disconnect()
+                                    connection = null
+                                    kotlinx.coroutines.delay(delayMs)
+                                    continue
+                                }
+                            }
+                            connection?.disconnect()
                             connection = null
-
-                            val transcribedText = try {
-                                val root = JsonParser.parseString(responseBody).asJsonObject
-                                val candidates = root.getAsJsonArray("candidates")
-                                val firstCandidate = candidates?.firstOrNull()?.asJsonObject
-                                val content = firstCandidate?.getAsJsonObject("content")
-                                val parts = content?.getAsJsonArray("parts")
-                                val firstPart = parts?.firstOrNull()?.asJsonObject
-                                firstPart?.get("text")?.asString ?: ""
-                            } catch (e: Exception) {
-                                Log.e(AUDIO_TAG, "[transcribeViaGeminiFallback] JSON parsing failed: ${e.message}")
-                                ""
-                            }
-
-                            if (transcribedText.isNotBlank()) {
-                                Log.i(AUDIO_TAG, "[transcribeViaGeminiFallback] Model $model transcription: \"$transcribedText\"")
-                                return@withContext transcribedText
-                            }
-                        } else {
-                            val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                            lastError = "Model $model error $responseCode: ${errorBody.take(300)}"
+                            break // Non-retryable error, try next model
+                        } catch (e: Exception) {
+                            lastError = "Model $model exception: ${e.message}"
                             Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] $lastError")
+                            try { connection?.disconnect() } catch (_: Exception) {}
+                            connection = null
+                            if (retry < maxRetriesPerModel) {
+                                kotlinx.coroutines.delay(1000L * (1L shl retry))
+                                continue
+                            }
                         }
-                        connection?.disconnect()
-                        connection = null
-                    } catch (e: Exception) {
-                        lastError = "Model $model exception: ${e.message}"
-                        Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] $lastError")
-                        // FIX (v14): Disconnect leaked connection on exception
-                        try { connection?.disconnect() } catch (_: Exception) {}
                     }
                 }
 
@@ -1788,63 +1816,80 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 })
             }.toString()
 
-            // A2: Try multiple models
+            // A2: Try multiple models with retry
             var lastError = ""
             for (model in GEMINI_MODELS) {
                 var connection: HttpURLConnection? = null
-                try {
-                    // CRITICAL FIX (v8): Use ?key= URL parameter instead of x-goog-api-key header
-                    val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}")
-                    connection = url.openConnection() as HttpURLConnection
-                    connection.requestMethod = "POST"
-                    connection.setRequestProperty("Content-Type", "application/json")
-                    connection.doOutput = true
-                    connection.connectTimeout = 15_000
-                    connection.readTimeout = 60_000
+                val maxRetriesPerModel = 2
+                for (retry in 0..maxRetriesPerModel) {
+                    try {
+                        val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}")
+                        connection = url.openConnection() as HttpURLConnection
+                        connection.requestMethod = "POST"
+                        connection.setRequestProperty("Content-Type", "application/json")
+                        connection.doOutput = true
+                        connection.connectTimeout = 15_000
+                        connection.readTimeout = 60_000
 
-                    connection.outputStream.use { os ->
-                        os.write(requestBody.toByteArray(Charsets.UTF_8))
-                    }
+                        connection.outputStream.use { os ->
+                            os.write(requestBody.toByteArray(Charsets.UTF_8))
+                        }
 
-                    val responseCode = connection.responseCode
-                    if (responseCode != HttpURLConnection.HTTP_OK) {
-                        val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                        Log.e(TAG, "[processQueryViaGeminiDirect] Model $model error $responseCode: ${errorBody.take(500)}")
-                        lastError = "Model $model: HTTP $responseCode — ${errorBody.take(200)}"
+                        val responseCode = connection.responseCode
+                        if (responseCode != HttpURLConnection.HTTP_OK) {
+                            val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
+                            Log.e(TAG, "[processQueryViaGeminiDirect] Model $model error $responseCode: ${errorBody.take(500)}")
+                            lastError = "Model $model: HTTP $responseCode — ${errorBody.take(200)}"
+
+                            // Retry on 503/429
+                            if ((responseCode == 503 || responseCode == 429) && retry < maxRetriesPerModel) {
+                                val delayMs = if (responseCode == 429) 2000L * (1L shl retry) else 1000L * (1L shl retry)
+                                Log.w(TAG, "[processQueryViaGeminiDirect] Retrying model $model in ${delayMs}ms due to HTTP $responseCode...")
+                                connection.disconnect()
+                                connection = null
+                                kotlinx.coroutines.delay(delayMs)
+                                continue
+                            }
+
+                            connection.disconnect()
+                            connection = null
+                            break // Non-retryable, try next model
+                        }
+
+                        val responseBody = connection.inputStream.bufferedReader().readText()
                         connection.disconnect()
                         connection = null
-                        continue
-                    }
 
-                    val responseBody = connection.inputStream.bufferedReader().readText()
-                    connection.disconnect()
-                    connection = null
+                        val responseText = try {
+                            val root = JsonParser.parseString(responseBody).asJsonObject
+                            val candidates = root.getAsJsonArray("candidates")
+                            val firstCandidate = candidates?.firstOrNull()?.asJsonObject
+                            val content = firstCandidate?.getAsJsonObject("content")
+                            val parts = content?.getAsJsonArray("parts")
+                            val firstPart = parts?.firstOrNull()?.asJsonObject
+                            firstPart?.get("text")?.asString ?: ""
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[processQueryViaGeminiDirect] JSON parsing failed: ${e.message}")
+                            ""
+                        }
 
-                    val responseText = try {
-                        val root = JsonParser.parseString(responseBody).asJsonObject
-                        val candidates = root.getAsJsonArray("candidates")
-                        val firstCandidate = candidates?.firstOrNull()?.asJsonObject
-                        val content = firstCandidate?.getAsJsonObject("content")
-                        val parts = content?.getAsJsonArray("parts")
-                        val firstPart = parts?.firstOrNull()?.asJsonObject
-                        firstPart?.get("text")?.asString ?: ""
+                        return if (responseText.isNotBlank()) {
+                            Log.i(TAG, "[processQueryViaGeminiDirect] Model $model response: \"${responseText.take(100)}...\"")
+                            responseText
+                        } else {
+                            Log.w(TAG, "[processQueryViaGeminiDirect] Model $model returned empty response")
+                            ""
+                        }
                     } catch (e: Exception) {
-                        Log.e(TAG, "[processQueryViaGeminiDirect] JSON parsing failed: ${e.message}")
-                        ""
+                        lastError = "Model $model exception: ${e.message}"
+                        Log.e(TAG, "[processQueryViaGeminiDirect] $lastError")
+                        try { connection?.disconnect() } catch (_: Exception) {}
+                        connection = null
+                        if (retry < maxRetriesPerModel) {
+                            kotlinx.coroutines.delay(1000L * (1L shl retry))
+                            continue
+                        }
                     }
-
-                    return if (responseText.isNotBlank()) {
-                        Log.i(TAG, "[processQueryViaGeminiDirect] Model $model response: \"${responseText.take(100)}...\"")
-                        responseText
-                    } else {
-                        Log.w(TAG, "[processQueryViaGeminiDirect] Model $model returned empty response")
-                        ""
-                    }
-                } catch (e: Exception) {
-                    lastError = "Model $model exception: ${e.message}"
-                    Log.e(TAG, "[processQueryViaGeminiDirect] $lastError")
-                    // FIX (v14): Disconnect leaked connection on exception
-                    try { connection?.disconnect() } catch (_: Exception) {}
                 }
             }
 

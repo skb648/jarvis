@@ -16,8 +16,8 @@ android {
         applicationId = "com.jarvis.assistant"
         minSdk = 26
         targetSdk = 35
-        versionCode = 600
-        versionName = "6.0.0"
+        versionCode = 800
+        versionName = "8.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
@@ -153,25 +153,20 @@ android {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Rust NDK Build Integration — CRITICAL FIX
+// Rust NDK Build Integration — MANUAL ONLY
 //
-// PREVIOUS BUG: The Rust build tasks were registered but NOT automatically
-// triggered. The comment said: "We do NOT automatically depend on Rust build
-// tasks anymore." This meant cargo-ndk was NEVER called during a normal
-// ./gradlew assembleRelease, causing the APK to ship with only the CMake
-// JNI stub instead of the real Rust libjarvis_rust.so.
+// The Rust build tasks are available as MANUAL tasks only.
+// They are NOT automatically triggered during ./gradlew assembleDebug/Release.
 //
-// FIX: The Rust build tasks are now AUTOMATICALLY executed as a pre-build
-// dependency for both debug and release builds. The flow is:
+// This is because cargo-ndk is NOT available in CI environments (GitHub Actions),
+// and the auto-dependency caused build failures.
 //
-//   1. Pre-build task checks if cargo-ndk is available on PATH
-//   2. If cargo-ndk exists: builds libjarvis_rust.so for arm64-v8a + armeabi-v7a
-//   3. If cargo-ndk is missing: skips gracefully (CMake stub provides fallback)
-//   4. CMake then either links against the real .so or builds the stub
-//
-// The Gradle tasks are also safe to run manually:
+// To build Rust .so files locally, run manually:
 //   ./gradlew buildRustDebug
 //   ./gradlew buildRustRelease
+//
+// When Rust .so is not available, CMake builds the stub library
+// (jni_bridge_stub.c) which provides safe no-op JNI implementations.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 val rustDir = file("${project.projectDir}/../rust")
@@ -298,23 +293,10 @@ tasks.register("buildRustRelease") {
 // the debug APK to be only 23MB instead of 66MB.
 // ═══════════════════════════════════════════════════════════════════════
 
-// Wire debug builds to build Rust debug .so (large, with symbols)
-tasks.matching { it.name == "preDebugBuild" }.configureEach {
-    dependsOn("buildRustDebug")
-}
-
-// Wire release builds to build Rust release .so (small, stripped with LTO)
-tasks.matching { it.name == "preReleaseBuild" }.configureEach {
-    dependsOn("buildRustRelease")
-}
-
-// Wire merge tasks to the CORRECT build type (not always release!)
-tasks.matching { it.name == "mergeDebugJniLibFolders" }.configureEach {
-    dependsOn("buildRustDebug")
-}
-tasks.matching { it.name == "mergeReleaseJniLibFolders" }.configureEach {
-    dependsOn("buildRustRelease")
-}
+// NOTE: Rust build tasks are MANUAL ONLY. Do NOT auto-wire them as
+// pre-build dependencies. CI environments (GitHub Actions) do not have
+// cargo-ndk, and auto-wiring causes the build to fail.
+// The CMake stub (jni_bridge_stub.c) provides fallback JNI implementations.
 
 dependencies {
     val composeBom = platform(libs.compose.bom)
@@ -367,4 +349,7 @@ dependencies {
 
     // Google Play Services Location — Location Awareness
     implementation("com.google.android.gms:play-services-location:21.3.0")
-}
+
+    // OkHttp — Modern HTTP client (replaces HttpURLConnection for better reliability)
+    implementation(libs.okhttp)
+    implementation(libs.okhttp.logging)

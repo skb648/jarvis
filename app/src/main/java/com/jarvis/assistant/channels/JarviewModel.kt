@@ -121,6 +121,9 @@ object JarviewModel {
     @Volatile var overlayX: Int = 0
     @Volatile var overlayY: Int = 0
 
+    // ─── API Key (shared for TaskExecutorBridge image generation) ──
+    @Volatile var geminiApiKey: String = ""
+
     // ─── Automation State ─────────────────────────────────────────
     @Volatile var activeRoutines: Int = 0
     @Volatile var lastRoutineTriggered: String = ""

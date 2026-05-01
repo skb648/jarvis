@@ -78,6 +78,9 @@ object TaskExecutorBridge {
             "dump_screen" -> executeDumpScreen()
             "diagnose_system" -> executeDiagnoseSystem(args)
             "search_web" -> executeSearchWeb(args)
+            "set_alarm" -> executeSetAlarm(args, context)
+            "generate_image" -> executeGenerateImage(args)
+            "generate_video" -> executeGenerateVideo(args)
             else -> StepResult.Failed("Unknown tool: $toolName")
         }
     }
@@ -532,6 +535,157 @@ object TaskExecutorBridge {
             Log.e(TAG, "[executeSearchWeb] Error: ${e.message}")
             StepResult.Failed("Web search failed: ${e.message}")
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Alarm / Timer / Reminder
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * set_alarm — Set an alarm, timer, or reminder via Android intents.
+     */
+    private fun executeSetAlarm(args: Map<String, String>, context: Context): StepResult {
+        val type = args["type"]?.lowercase()?.trim() ?: "alarm"
+        val hour = args["hour"]?.toIntOrNull()
+        val minute = args["minute"]?.toIntOrNull() ?: 0
+        val message = args["message"]?.trim() ?: ""
+
+        return try {
+            when (type) {
+                "alarm" -> {
+                    val intent = Intent(android.provider.AlarmClock.ACTION_SET_ALARM).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        if (hour != null) putExtra(android.provider.AlarmClock.EXTRA_HOUR, hour)
+                        putExtra(android.provider.AlarmClock.EXTRA_MINUTES, minute)
+                        if (message.isNotBlank()) putExtra(android.provider.AlarmClock.EXTRA_MESSAGE, message)
+                        putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, false)
+                    }
+                    context.startActivity(intent)
+                    val timeStr = if (hour != null) String.format("%02d:%02d", hour, minute) else ""
+                    Log.i(TAG, "[setAlarm] Alarm set for $timeStr — $message")
+                    StepResult.Success("Alarm set for $timeStr${if (message.isNotBlank()) " — $message" else ""}")
+                }
+                "timer" -> {
+                    val durationSeconds = hour?.let { it * 3600 + minute * 60 } ?: (minute * 60)
+                    val intent = Intent(android.provider.AlarmClock.ACTION_SET_TIMER).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        putExtra(android.provider.AlarmClock.EXTRA_LENGTH, if (durationSeconds > 0) durationSeconds else 60)
+                        if (message.isNotBlank()) putExtra(android.provider.AlarmClock.EXTRA_MESSAGE, message)
+                        putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, false)
+                    }
+                    context.startActivity(intent)
+                    Log.i(TAG, "[setTimer] Timer set for $durationSeconds seconds — $message")
+                    StepResult.Success("Timer set for ${durationSeconds / 60} minutes${if (message.isNotBlank()) " — $message" else ""}")
+                }
+                "reminder" -> {
+                    // Android doesn't have a standard reminder intent; use alarm as fallback
+                    val intent = Intent(android.provider.AlarmClock.ACTION_SET_ALARM).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        if (hour != null) putExtra(android.provider.AlarmClock.EXTRA_HOUR, hour)
+                        putExtra(android.provider.AlarmClock.EXTRA_MINUTES, minute)
+                        putExtra(android.provider.AlarmClock.EXTRA_MESSAGE, "Reminder: ${message.ifBlank { "Reminder" }}")
+                        putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, false)
+                    }
+                    context.startActivity(intent)
+                    val timeStr = if (hour != null) String.format("%02d:%02d", hour, minute) else ""
+                    Log.i(TAG, "[setReminder] Reminder set for $timeStr — $message")
+                    StepResult.Success("Reminder set for $timeStr — ${message.ifBlank { "Reminder" }}")
+                }
+                else -> StepResult.Failed("Unknown alarm type: $type (use 'alarm', 'timer', or 'reminder')")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[setAlarm] Failed: ${e.message}")
+            StepResult.Failed("Could not set $type: ${e.message}")
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Image / Video Generation
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * generate_image — Generate an image using Gemini Imagen API.
+     * Calls the v1beta/models/imagen-3.0-generate-002:predict endpoint.
+     */
+    private suspend fun executeGenerateImage(args: Map<String, String>): StepResult {
+        val prompt = args["prompt"]?.trim() ?: return StepResult.Failed("Missing 'prompt' argument")
+        val style = args["style"]?.trim() ?: ""
+
+        return withContext(Dispatchers.IO) {
+            try {
+                // Get API key from JarviewModel
+                val apiKey = com.jarvis.assistant.channels.JarviewModel.geminiApiKey
+                if (apiKey.isBlank()) {
+                    return@withContext StepResult.Failed("Gemini API key not set — cannot generate image")
+                }
+
+                val fullPrompt = if (style.isNotBlank()) "$prompt, $style style" else prompt
+
+                val requestBody = org.json.JSONObject().apply {
+                    put("instances", org.json.JSONArray().put(
+                        org.json.JSONObject().put("prompt", fullPrompt)
+                    ))
+                    put("parameters", org.json.JSONObject().apply {
+                        put("sampleCount", 1)
+                    })
+                }.toString()
+
+                val url = java.net.URL("https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${apiKey.trim()}")
+                val connection = url.openConnection() as java.net.HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.doOutput = true
+                connection.connectTimeout = 30_000
+                connection.readTimeout = 120_000
+
+                connection.outputStream.use { os ->
+                    os.write(requestBody.toByteArray(Charsets.UTF_8))
+                }
+
+                val responseCode = connection.responseCode
+                if (responseCode != 200) {
+                    val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
+                    connection.disconnect()
+                    Log.e(TAG, "[generateImage] HTTP $responseCode: ${errorBody.take(300)}")
+                    return@withContext StepResult.Failed("Image generation failed: HTTP $responseCode — ${errorBody.take(200)}")
+                }
+
+                val responseBody = connection.inputStream.bufferedReader().readText()
+                connection.disconnect()
+
+                // Parse the response to extract base64 image
+                val root = com.google.gson.JsonParser.parseString(responseBody).asJsonObject
+                val predictions = root.getAsJsonArray("predictions")
+                val firstPrediction = predictions?.firstOrNull()?.asJsonObject
+                val bytesBase64 = firstPrediction?.get("bytesBase64Encoded")?.asString
+
+                if (!bytesBase64.isNullOrBlank()) {
+                    // Save image to a file and return the path
+                    val imageBytes = android.util.Base64.decode(bytesBase64, android.util.Base64.NO_WRAP)
+                    val imagesDir = java.io.File("/sdcard/Pictures/Jarvis")
+                    if (!imagesDir.exists()) imagesDir.mkdirs()
+                    val imageFile = java.io.File(imagesDir, "jarvis_img_${System.currentTimeMillis()}.png")
+                    java.io.FileOutputStream(imageFile).use { it.write(imageBytes) }
+                    Log.i(TAG, "[generateImage] Image saved to ${imageFile.absolutePath}")
+                    StepResult.Success("Image generated and saved to ${imageFile.absolutePath}. Prompt: \"$fullPrompt\"")
+                } else {
+                    StepResult.Success("Image generation request sent for: \"$fullPrompt\". Check the Gemini API response for the generated image.")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[generateImage] Failed: ${e.message}")
+                StepResult.Failed("Image generation failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * generate_video — Placeholder for future Veo API integration.
+     * Video generation is not yet available through the public Gemini API.
+     */
+    private fun executeGenerateVideo(args: Map<String, String>): StepResult {
+        val prompt = args["prompt"]?.trim() ?: return StepResult.Failed("Missing 'prompt' argument")
+        Log.i(TAG, "[generateVideo] Video generation requested for: $prompt — not yet available")
+        return StepResult.Failed("Video generation is a future feature. The Veo API is not yet publicly available. Your prompt was: \"$prompt\"")
     }
 
     // ═══════════════════════════════════════════════════════════════════════

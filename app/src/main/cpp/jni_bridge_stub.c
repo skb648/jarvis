@@ -22,16 +22,13 @@ static void on_library_load(void) {
 }
 
 /* ─── JNI Stub Implementations ──────────────────────────────────── */
+/* All external JNI functions declared in RustBridge.kt have matching stubs. */
+/* Each stub returns a safe default and logs a warning.                    */
 
 JNIEXPORT jboolean JNICALL
 Java_com_jarvis_assistant_jni_RustBridge_nativeInitialize(
     JNIEnv *env, jclass clazz, jstring geminiKey, jstring elevenLabsKey) {
     LOGI("STUB: nativeInitialize called — Rust core not available, using Kotlin fallback");
-    // FIX v12: Return JNI_FALSE so the app knows Rust is NOT actually available.
-    // Previously returned JNI_TRUE which caused the app to think Rust was loaded,
-    // leading to failed native calls and confusing error messages.
-    // The Kotlin HTTP fallback path is used when RustBridge.isNativeReady() is false,
-    // so we must be honest that the stub doesn't actually implement AI functionality.
     return JNI_FALSE;
 }
 
@@ -39,10 +36,6 @@ JNIEXPORT jstring JNICALL
 Java_com_jarvis_assistant_jni_RustBridge_nativeProcessQuery(
     JNIEnv *env, jclass clazz, jstring query, jstring context, jstring historyJson, jstring systemPrompt) {
     LOGI("STUB: nativeProcessQuery called — Rust core not available, use Kotlin HTTP fallback");
-    // FIX v13: Return [ERROR] prefix so Kotlin fallback logic is triggered.
-    // The ViewModel checks for [ERROR] to decide whether to fall back to
-    // direct Gemini HTTP calls. Without this prefix, the stub message would
-    // be treated as JARVIS's actual spoken response.
     return (*env)->NewStringUTF(env, "[ERROR] Rust core not built. Using Kotlin HTTP fallback for AI queries.");
 }
 
@@ -65,6 +58,13 @@ Java_com_jarvis_assistant_jni_RustBridge_nativeDetectWakeWord(
     JNIEnv *env, jclass clazz, jbyteArray audioData, jint sampleRate) {
     LOGW("STUB: nativeDetectWakeWord called — Rust core not available");
     return JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_jarvis_assistant_jni_RustBridge_nativeDetectVoicePattern(
+    JNIEnv *env, jclass clazz, jbyteArray audioData, jint sampleRate) {
+    LOGW("STUB: nativeDetectVoicePattern called — Rust core not available");
+    return NULL;
 }
 
 JNIEXPORT jstring JNICALL
@@ -93,18 +93,11 @@ JNIEXPORT jboolean JNICALL
 Java_com_jarvis_assistant_jni_RustBridge_nativeHealthCheck(
     JNIEnv *env, jclass clazz) {
     LOGI("STUB: nativeHealthCheck called — stub is healthy");
-    return JNI_TRUE;
+    return JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
 Java_com_jarvis_assistant_jni_RustBridge_nativeShutdown(
     JNIEnv *env, jclass clazz) {
     LOGW("STUB: nativeShutdown called — Rust core not available");
-}
-
-JNIEXPORT jstring JNICALL
-Java_com_jarvis_assistant_jni_RustBridge_nativeDetectVoicePattern(
-    JNIEnv *env, jclass clazz, jbyteArray audioData, jint sampleRate) {
-    LOGW("STUB: nativeDetectVoicePattern called — Rust core not available");
-    return NULL;
 }

@@ -41,6 +41,12 @@ jobs:
         restore-keys: |
           gradle-
 
+    - name: Create jniLibs directories
+      run: |
+        mkdir -p app/src/main/jniLibs/arm64-v8a
+        mkdir -p app/src/main/jniLibs/armeabi-v7a
+        echo "Created jniLibs directories for CMake stub build"
+
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
@@ -53,6 +59,8 @@ jobs:
         if [ $BUILD_EXIT_CODE -ne 0 ]; then
           echo "=== KOTLIN COMPILATION ERRORS ==="
           grep -E "^e:|error:|Unresolved|Cannot find|Type mismatch|No value passed|Too many arguments|Overload resolution" /tmp/debug-build.log || echo "No specific errors found in grep, check full log above"
+          echo "=== FULL ERROR LOG (last 200 lines) ==="
+          tail -200 /tmp/debug-build.log
         fi
         exit $BUILD_EXIT_CODE
       env:

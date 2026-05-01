@@ -313,6 +313,69 @@ object GeminiFunctionCaller {
                     put("required", org.json.JSONArray().put("query"))
                 })
             })
+
+            // generate_image — Generate an image using Imagen
+            put(org.json.JSONObject().apply {
+                put("name", "generate_image")
+                put("description", "Generate an image from a text description using AI image generation. " +
+                        "Use this when the user asks to create, draw, generate, or make an image/picture/art. " +
+                        "Returns a base64-encoded PNG image.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("prompt", org.json.JSONObject().apply {
+                            put("type", "string")
+                            put("description", "Detailed text description of the image to generate (e.g., 'a futuristic city at sunset with flying cars')")
+                        })
+                        put("style", org.json.JSONObject().apply {
+                            put("type", "string")
+                            put("description", "Optional style: 'photorealistic', 'artistic', 'anime', 'sketch', '3d'")
+                        })
+                    })
+                    put("required", org.json.JSONArray().put("prompt"))
+                })
+            })
+
+            // generate_video — Generate a video (future feature placeholder)
+            put(org.json.JSONObject().apply {
+                put("name", "generate_video")
+                put("description", "Generate a short video from a text description. This is a future feature. " +
+                        "Use this when the user asks to create or generate a video clip.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("prompt", org.json.JSONObject().apply {
+                            put("type", "string")
+                            put("description", "Text description of the video to generate")
+                        })
+                    })
+                    put("required", org.json.JSONArray().put("prompt"))
+                })
+            })
+
+            // set_alarm — Set an alarm on the device
+            put(org.json.JSONObject().apply {
+                put("name", "set_alarm")
+                put("description", "Set an alarm on the device. Use this when the user wants to set an alarm or wake-up call.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("hour", org.json.JSONObject().apply {
+                            put("type", "integer")
+                            put("description", "Hour in 24-hour format (0-23)")
+                        })
+                        put("minute", org.json.JSONObject().apply {
+                            put("type", "integer")
+                            put("description", "Minute (0-59)")
+                        })
+                        put("message", org.json.JSONObject().apply {
+                            put("type", "string")
+                            put("description", "Optional alarm label/message")
+                        })
+                    })
+                    put("required", org.json.JSONArray().put("hour").put("minute"))
+                })
+            })
         })
     }
 
@@ -750,38 +813,71 @@ IMPORTANT RULES:
     /**
      * Send a request to the Gemini API and parse the response.
      * Wraps the HTTP call in withContext(Dispatchers.IO) to avoid blocking the calling thread.
+     *
+     * Includes retry with exponential backoff for 503 (Service Unavailable) and
+     * 429 (Rate Limited) errors. Max 3 retries with 1s, 2s, 4s delays.
      */
     private suspend fun sendToGemini(requestBody: String, apiKey: String): GeminiResponse {
         return withContext(Dispatchers.IO) {
-            try {
-                val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=${apiKey.trim()}")
-                val connection = url.openConnection() as HttpURLConnection
-                connection.requestMethod = "POST"
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.doOutput = true
-                connection.connectTimeout = 15_000
-                connection.readTimeout = 60_000
+            val maxRetries = 3
+            var lastError: GeminiResponse.Error? = null
 
-                connection.outputStream.use { os ->
-                    os.write(requestBody.toByteArray(Charsets.UTF_8))
-                }
+            for (attempt in 0..maxRetries) {
+                try {
+                    val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=${apiKey.trim()}")
+                    val connection = url.openConnection() as HttpURLConnection
+                    connection.requestMethod = "POST"
+                    connection.setRequestProperty("Content-Type", "application/json")
+                    connection.doOutput = true
+                    connection.connectTimeout = 15_000
+                    connection.readTimeout = 60_000
 
-                val responseCode = connection.responseCode
-                if (responseCode != HttpURLConnection.HTTP_OK) {
-                    val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                    Log.e(TAG, "[sendToGemini] HTTP $responseCode: ${errorBody.take(500)}")
+                    connection.outputStream.use { os ->
+                        os.write(requestBody.toByteArray(Charsets.UTF_8))
+                    }
+
+                    val responseCode = connection.responseCode
+                    if (responseCode != HttpURLConnection.HTTP_OK) {
+                        val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
+                        Log.e(TAG, "[sendToGemini] HTTP $responseCode (attempt ${attempt + 1}/${maxRetries + 1}): ${errorBody.take(500)}")
+                        connection.disconnect()
+
+                        // Retry on 503 (Service Unavailable) or 429 (Rate Limited)
+                        if ((responseCode == 503 || responseCode == 429) && attempt < maxRetries) {
+                            val delayMs = if (responseCode == 429) {
+                                // Rate limited: wait longer (2s, 4s, 8s)
+                                (2000L * (1L shl attempt))
+                            } else {
+                                // Service unavailable: standard backoff (1s, 2s, 4s)
+                                (1000L * (1L shl attempt))
+                            }
+                            Log.w(TAG, "[sendToGemini] Retrying in ${delayMs}ms due to HTTP $responseCode...")
+                            kotlinx.coroutines.delay(delayMs)
+                            lastError = GeminiResponse.Error("Gemini API error: HTTP $responseCode (retrying...)")
+                            continue
+                        }
+
+                        return@withContext GeminiResponse.Error("Gemini API error: HTTP $responseCode — ${errorBody.take(200)}")
+                    }
+
+                    val responseBody = connection.inputStream.bufferedReader().readText()
                     connection.disconnect()
-                    return@withContext GeminiResponse.Error("Gemini API error: HTTP $responseCode")
+
+                    return@withContext parseGeminiResponse(responseBody)
+                } catch (e: Exception) {
+                    Log.e(TAG, "[sendToGemini] Exception (attempt ${attempt + 1}/${maxRetries + 1}): ${e.message}")
+                    if (attempt < maxRetries) {
+                        val delayMs = 1000L * (1L shl attempt)
+                        kotlinx.coroutines.delay(delayMs)
+                        lastError = GeminiResponse.Error("Network error: ${e.message?.take(100)} (retrying...)")
+                        continue
+                    }
+                    return@withContext GeminiResponse.Error("Network error: ${e.message?.take(100)}")
                 }
-
-                val responseBody = connection.inputStream.bufferedReader().readText()
-                connection.disconnect()
-
-                parseGeminiResponse(responseBody)
-            } catch (e: Exception) {
-                Log.e(TAG, "[sendToGemini] Exception: ${e.message}")
-                GeminiResponse.Error("Network error: ${e.message?.take(100)}")
             }
+
+            // All retries exhausted
+            lastError ?: GeminiResponse.Error("All retries exhausted")
         }
     }
 

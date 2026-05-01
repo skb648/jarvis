@@ -1,4 +1,8 @@
-# ─── JARVIS ProGuard Rules ───────────────────────────────────────
+# ─── JARVIS ProGuard Rules v7.0 ──────────────────────────────────
+
+# ─── Keep all JARVIS classes ──────────────────────────────────────
+-keep class com.jarvis.assistant.** { *; }
+-keepclassmembers class com.jarvis.assistant.** { *; }
 
 # ─── JNI / Rust Bridge ──────────────────────────────────────────
 # Keep all classes with native methods — the Rust JNI functions
@@ -96,6 +100,7 @@
 # ─── Audio Engine (VAD state enum) ──────────────────────────────
 -keep class com.jarvis.assistant.audio.AudioEngine { *; }
 -keep class com.jarvis.assistant.audio.AudioEngine$VadState { *; }
+-keep class com.jarvis.assistant.audio.VoicePatternCallback { *; }
 
 # ─── Brain State enum ──────────────────────────────────────────
 -keep class com.jarvis.assistant.ui.orb.BrainState { *; }
@@ -136,6 +141,8 @@
 -keep class com.jarvis.assistant.data.local.MessageEntity { *; }
 -keep class com.jarvis.assistant.data.local.JarvisDatabase { *; }
 -keep class com.jarvis.assistant.data.local.MessageDao { *; }
+-keep class com.jarvis.assistant.data.local.ConversationMemory { *; }
+-keep class com.jarvis.assistant.data.local.MemoryDao { *; }
 -keep @androidx.room.Entity class *
 -dontwarn androidx.room.**
 -keep class * extends androidx.room.RoomDatabase
@@ -146,6 +153,20 @@
 }
 -keep @androidx.room.Database class *
 -keep @androidx.room.TypeConverter class *
+
+# ─── OkHttp ─────────────────────────────────────────────────────
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-keep class okhttp3.** { *; }
+-keep class okio.** { *; }
+
+# ─── System Action Executor ─────────────────────────────────────
+-keep class com.jarvis.assistant.router.SystemActionExecutor { *; }
+
+# ─── Gemini API Client ─────────────────────────────────────────
+-keep class com.jarvis.assistant.network.GeminiApiClient { *; }
+-keep class com.jarvis.assistant.network.GeminiApiClient$ApiResult { *; }
+-keep class com.jarvis.assistant.network.GeminiApiClient$ApiResult$* { *; }
 
 -dontwarn javax.annotation.**
 -dontwarn java.lang.invoke.StringConcatFactory

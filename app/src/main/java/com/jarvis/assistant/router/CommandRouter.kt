@@ -226,6 +226,69 @@ object CommandRouter {
             return RouteResult.Handled("I couldn't reject the call — Accessibility Service or Shizuku is needed.", "stressed")
         }
 
+        // ─── Alarm / Timer / Reminder ──────────────────────────
+        val alarmMatch = Regex("""(?:set|create)\s+(?:an?\s+)?alarm\s+(?:for\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?""", RegexOption.IGNORE_CASE).find(normalized)
+        if (alarmMatch != null) {
+            var hour = alarmMatch.groupValues[1].toIntOrNull() ?: return RouteResult.NeedsAI(query)
+            val minute = alarmMatch.groupValues[2].toIntOrNull() ?: 0
+            val ampm = alarmMatch.groupValues[3].lowercase()
+            if (ampm == "pm" && hour < 12) hour += 12
+            if (ampm == "am" && hour == 12) hour = 0
+            val success = SystemActionExecutor.setAlarm(context, hour, minute)
+            return if (success) {
+                RouteResult.Handled("Alarm set for $hour:${minute.toString().padStart(2, '0')}, Sir.", "confident")
+            } else {
+                RouteResult.Handled("I couldn't set the alarm. Please set it manually.", "stressed")
+            }
+        }
+
+        val timerMatch = Regex("""(?:set|start)\s+(?:a\s+)?timer\s+(?:for\s+)?(\d+)\s*(min|minute|sec|second|hour)?s?""", RegexOption.IGNORE_CASE).find(normalized)
+        if (timerMatch != null) {
+            val value = timerMatch.groupValues[1].toIntOrNull() ?: return RouteResult.NeedsAI(query)
+            val unit = timerMatch.groupValues[2].lowercase()
+            val seconds = when {
+                unit.startsWith("hour") -> value * 3600
+                unit.startsWith("min") -> value * 60
+                unit.startsWith("sec") -> value
+                else -> value * 60 // Default to minutes
+            }
+            val success = SystemActionExecutor.setTimer(context, seconds)
+            return if (success) {
+                RouteResult.Handled("Timer set for $value ${unit.ifBlank { "minutes" }}, Sir.", "confident")
+            } else {
+                RouteResult.Handled("I couldn't set the timer. Please set it manually.", "stressed")
+            }
+        }
+
+        if (normalized.contains("show alarm") || normalized.contains("show my alarm") || normalized.contains("my alarm")) {
+            val success = SystemActionExecutor.showAlarms(context)
+            return if (success) {
+                RouteResult.Handled("Showing your alarms, Sir.", "calm")
+            } else {
+                RouteResult.Handled("I couldn't open the alarms.", "stressed")
+            }
+        }
+
+        // ─── Settings ─────────────────────────────────────────
+        val settingsMatch = Regex("""(?:open|open the|go to|show)\s+(?:my\s+)?(\w+)\s+settings""", RegexOption.IGNORE_CASE).find(normalized)
+        if (settingsMatch != null || normalized == "open settings" || normalized == "settings") {
+            val section = settingsMatch?.groupValues?.get(1) ?: ""
+            val success = SystemActionExecutor.openSettings(context, section)
+            return if (success) {
+                RouteResult.Handled("Opening ${section.ifBlank { "" }}settings, Sir.", "calm")
+            } else {
+                RouteResult.Handled("I couldn't open settings.", "stressed")
+            }
+        }
+
+        // ─── Image Generation ─────────────────────────────────
+        val imageMatch = Regex("""(?:generate|create|make|draw)\s+(?:a\s+|an\s+)?image\s+(?:of\s+)?(.+)""", RegexOption.IGNORE_CASE).find(normalized)
+        if (imageMatch != null) {
+            val prompt = imageMatch.groupValues[1].trim()
+            return RouteResult.AutonomousTask("generate_image", prompt,
+                "Generate an image of: $prompt. Use the generate_image tool to create it.")
+        }
+
         // ─── Install / Download / Get commands (AutonomousTask) ─
         val installMatch = Regex("""(?:install|download|get)\s+(.+)""", RegexOption.IGNORE_CASE).find(normalized)
         if (installMatch != null) {
@@ -399,6 +462,26 @@ object CommandRouter {
                 else -> "all"
             }
             return RouteResult.DeviceStatusCommand(component)
+        }
+
+        // ─── Alarm / Timer Commands ──────────────────────────────────
+        val alarmMatch = Regex("""(?:set|create)\s+alarm\s+(?:for\s+)?(.+)""").find(normalized)
+        if (alarmMatch != null) {
+            val timeStr = alarmMatch.groupValues[1].trim()
+            return SystemActionExecutor.setAlarm(context, timeStr)
+        }
+
+        val timerMatch = Regex("""(?:set|start)\s+timer\s+(?:for\s+)?(.+)""").find(normalized)
+        if (timerMatch != null) {
+            val durationStr = timerMatch.groupValues[1].trim()
+            return SystemActionExecutor.setTimer(context, durationStr)
+        }
+
+        val reminderMatch = Regex("""remind\s+me\s+(?:at\s+)?(.+?)(?:\s+to\s+)(.+)""").find(normalized)
+        if (reminderMatch != null) {
+            val timeStr = reminderMatch.groupValues[1].trim()
+            val message = reminderMatch.groupValues[2].trim()
+            return SystemActionExecutor.setReminder(context, timeStr, message)
         }
 
         // ─── No system command matched → route to Gemini AI ──
