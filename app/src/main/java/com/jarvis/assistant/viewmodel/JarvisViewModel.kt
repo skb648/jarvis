@@ -23,7 +23,7 @@ import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.jarvis.assistant.actions.ActionHandler
 import com.jarvis.assistant.audio.AudioEngine
-import com.jarvis.assistant.automation.GeminiFunctionCaller
+import com.jarvis.assistant.automation.GroqFunctionCaller
 import com.jarvis.assistant.automation.TaskExecutorBridge
 import com.jarvis.assistant.brief.DailyBriefGenerator
 import com.jarvis.assistant.channels.JarviewModel
@@ -62,6 +62,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import android.os.Handler
 import android.os.Looper
 import java.util.concurrent.atomic.AtomicBoolean
@@ -112,14 +114,11 @@ class JarvisViewModel(
         private const val TTS_TIMEOUT_MS = 30_000L
         private const val SHIZUKU_CHECK_INTERVAL_MS = 5_000L
 
-        // A2: Model fallback list — tried in order until one succeeds
-        // Updated v7.0: Removed deprecated gemini-1.5-pro-latest (returns 404)
-        // Added gemini-2.5-flash-preview-05-20 as the latest model
-        private val GEMINI_MODELS = listOf(
-            "gemini-2.5-flash-preview-05-20",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite"
+        // v17: Groq model fallback — all free tier (14,400 req/day)
+        private val GROQ_MODELS = listOf(
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+            "llama-3.3-70b-versatile"
         )
 
         /** JARVIS system prompt — AUTONOMOUS REACT AGENT (v7.0)
@@ -194,8 +193,8 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     private val _mqttLabel = MutableStateFlow("MQTT Disconnected")
     val mqttLabel: StateFlow<String> = _mqttLabel.asStateFlow()
 
-    private val _geminiApiKey = MutableStateFlow("")
-    val geminiApiKey: StateFlow<String> = _geminiApiKey.asStateFlow()
+    private val _groqApiKey = MutableStateFlow("")
+    val groqApiKey: StateFlow<String> = _groqApiKey.asStateFlow()
 
     private val _elevenLabsApiKey = MutableStateFlow("")
     val elevenLabsApiKey: StateFlow<String> = _elevenLabsApiKey.asStateFlow()
@@ -304,7 +303,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     //   2. SpeechRecognizer fires onPartialResults() → updates UI in real-time
     //   3. VAD detects silence → handleCommandReady()
     //   4. If SpeechRecognizer has a final result → use it (instant, ~0ms)
-    //   5. If not → fall back to transcribeViaGeminiFallback() (1-3s)
+    //   5. If not → fall back to transcribeViaGroqWhisper() (1-3s)
     // ═══════════════════════════════════════════════════════════════════════
     private var speechRecognizer: SpeechRecognizer? = null
     private var recognizerIntent: Intent? = null
@@ -749,7 +748,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         _engineStatusText.value = if (_isRustReady.value) {
             "AI engine operational · Rust native"
         } else {
-            "AI engine operational · Gemini Cloud"
+            "AI engine operational · Groq Cloud"
         }
     }
 
@@ -763,7 +762,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     private fun loadPersistedSettings() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val loadedGemini      = settingsRepository.getGeminiApiKey()
+                val loadedGroq        = settingsRepository.getGroqApiKey()
                 val loadedElevenLabs  = settingsRepository.getElevenLabsApiKey()
                 val loadedTtsVoiceId  = settingsRepository.getTtsVoiceId()
                 val loadedWakeWord    = settingsRepository.isWakeWordEnabled()
@@ -774,9 +773,9 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 val loadedHaToken     = settingsRepository.getHomeAssistantToken()
                 val loadedKeepAlive   = settingsRepository.isKeepAliveEnabled()
 
-                if (_geminiApiKey.value.isEmpty()) _geminiApiKey.value = loadedGemini
+                if (_groqApiKey.value.isEmpty()) _groqApiKey.value = loadedGroq
                 // Sync API key to JarviewModel for TaskExecutorBridge access
-                JarviewModel.geminiApiKey = loadedGemini
+                JarviewModel.groqApiKey = loadedGroq
                 if (_elevenLabsApiKey.value.isEmpty()) _elevenLabsApiKey.value = loadedElevenLabs
                 _ttsVoiceId.value = loadedTtsVoiceId
                 _isWakeWordEnabled.value = loadedWakeWord
@@ -788,12 +787,12 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 _isKeepAliveEnabled.value = loadedKeepAlive
                 settingsLoaded = true
 
-                Log.i(TAG, "Settings loaded — geminiKey=${_geminiApiKey.value.take(4)}..., elevenLabsKey=${_elevenLabsApiKey.value.take(4)}...")
+                Log.i(TAG, "Settings loaded — groqKey=${_groqApiKey.value.take(4)}..., elevenLabsKey=${_elevenLabsApiKey.value.take(4)}...")
 
-                if (_geminiApiKey.value.isNotEmpty() && RustBridge.isNativeReady()) {
+                if (_groqApiKey.value.isNotEmpty() && RustBridge.isNativeReady()) {
                     try {
                         _isRustReady.value = RustBridge.initialize(
-                            _geminiApiKey.value, _elevenLabsApiKey.value
+                            _groqApiKey.value, _elevenLabsApiKey.value
                         )
                         updateEngineStatusText()
                         Log.i(TAG, "Rust initialized with persisted keys on startup")
@@ -833,22 +832,18 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         }
     }
 
-    fun saveAndApplyApiKeys(geminiKey: String, elevenLabsKey: String) {
+    fun saveAndApplyApiKeys(groqKey: String, elevenLabsKey: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // CRITICAL FIX: Trim whitespace from API keys.
-                // Users frequently paste keys with trailing spaces/newlines
-                // from the clipboard, which causes 403 API errors.
-                val trimmedGemini = geminiKey.trim()
+                val trimmedGroq = groqKey.trim()
                 val trimmedElevenLabs = elevenLabsKey.trim()
-                _geminiApiKey.value     = trimmedGemini
-                JarviewModel.geminiApiKey = trimmedGemini
+                _groqApiKey.value     = trimmedGroq
+                JarviewModel.groqApiKey = trimmedGroq
                 _elevenLabsApiKey.value = trimmedElevenLabs
-                Log.i(TAG, "API keys FORCE-UPDATED in memory — gemini=${trimmedGemini.take(4)}... (${trimmedGemini.length} chars), elevenLabs=${trimmedElevenLabs.take(4)}... (${trimmedElevenLabs.length} chars)")
+                Log.i(TAG, "API keys FORCE-UPDATED — groq=${trimmedGroq.take(4)}... (${trimmedGroq.length} chars), elevenLabs=${trimmedElevenLabs.take(4)}...")
 
-                // Step 1: Persist to DataStore — if this fails, report FAILURE immediately
                 try {
-                    settingsRepository.setGeminiApiKey(trimmedGemini)
+                    settingsRepository.setGroqApiKey(trimmedGroq)
                     settingsRepository.setElevenLabsApiKey(trimmedElevenLabs)
                     Log.i(TAG, "API keys persisted to DataStore — CONFIRMED")
                 } catch (e: Exception) {
@@ -863,7 +858,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                     if (ctx != null) {
                         ctx.getSharedPreferences("jarvis_settings_apikey_cache", Context.MODE_PRIVATE)
                             .edit()
-                            .putString("gemini_api_key", trimmedGemini)
+                            .putString("groq_api_key", trimmedGroq)
                             .apply()
                     }
                 } catch (_: Exception) {}
@@ -871,7 +866,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 // Step 2: Apply keys to RustBridge engine
                 if (RustBridge.isNativeReady()) {
                     try {
-                        val ok = RustBridge.initialize(trimmedGemini, trimmedElevenLabs)
+                        val ok = RustBridge.initialize(trimmedGroq, trimmedElevenLabs)
                         _isRustReady.value = ok
                         updateEngineStatusText()
                         Log.i(TAG, "Hot-swap RustBridge.initialize -> $ok")
@@ -906,10 +901,10 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     // only report the Gemini result. A missing ElevenLabs key should
     // NOT make the overall test appear to fail — the app has native
     // TTS fallback for speech.
-    fun testApiKeys(geminiKey: String, elevenLabsKey: String) {
+    fun testApiKeys(groqKey: String, elevenLabsKey: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            _apiKeyTestResult.value = "Testing Gemini API..."
-            val geminiResult = testGeminiKeyDetailed(geminiKey)
+            _apiKeyTestResult.value = "Testing Groq API..."
+            val groqResult = testGroqKeyDetailed(groqKey)
 
             // Only test ElevenLabs if a key was actually provided
             val elevenLabsProvided = elevenLabsKey.isNotBlank()
@@ -922,14 +917,14 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             }
 
             _apiKeyTestResult.value = when {
-                geminiResult.first && (elevenResult == null || elevenResult.first) -> {
-                    if (elevenResult == null) "Gemini OK. ElevenLabs: not provided (using native TTS)."
+                groqResult.first && (elevenResult == null || elevenResult.first) -> {
+                    if (elevenResult == null) "Groq OK. ElevenLabs: not provided (using native TTS)."
                     else "All keys valid!"
                 }
-                geminiResult.first -> "Gemini OK. ElevenLabs FAILED: ${elevenResult!!.second}"
-                elevenResult == null -> "Gemini FAILED: ${geminiResult.second} (ElevenLabs not provided)"
-                elevenResult.first -> "ElevenLabs OK. Gemini FAILED: ${geminiResult.second}"
-                else -> "BOTH FAILED — Gemini: ${geminiResult.second} | ElevenLabs: ${elevenResult.second}"
+                groqResult.first -> "Groq OK. ElevenLabs FAILED: ${elevenResult!!.second}"
+                elevenResult == null -> "Groq FAILED: ${groqResult.second} (ElevenLabs not provided)"
+                elevenResult.first -> "ElevenLabs OK. Groq FAILED: ${groqResult.second}"
+                else -> "BOTH FAILED — Groq: ${groqResult.second} | ElevenLabs: ${elevenResult.second}"
             }
         }
     }
@@ -939,71 +934,13 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     }
 
     /**
-     * Detailed Gemini API key test — returns (success, errorMessage) pair.
-     * Uses ?key= URL parameter (most universally compatible auth method).
-     * Logs the FULL Google API error response to Logcat for debugging.
+     * Groq API key test — uses GroqApiClient.testApiKey() for instant validation.
      */
-    private fun testGeminiKeyDetailed(key: String): Pair<Boolean, String> {
+    private fun testGroqKeyDetailed(key: String): Pair<Boolean, String> {
         if (key.isBlank()) return Pair(false, "Key is empty")
         val trimmedKey = key.trim()
         if (trimmedKey.length < 20) return Pair(false, "Key too short (${trimmedKey.length} chars)")
-        return try {
-            val testBody = org.json.JSONObject().apply {
-                put("contents", org.json.JSONArray().put(
-                    org.json.JSONObject().apply {
-                        put("parts", org.json.JSONArray().put(
-                            org.json.JSONObject().put("text", "Hi")
-                        ))
-                    }
-                ))
-                put("generationConfig", org.json.JSONObject().apply {
-                    put("maxOutputTokens", 10)
-                })
-            }.toString()
-
-            // CRITICAL FIX (v8): Use ?key= URL parameter for authentication.
-            // This is the most universally compatible method — works with ALL Gemini API key types.
-            // The x-goog-api-key header was causing 403 errors with some keys.
-            val model = "gemini-2.5-flash"
-            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$trimmedKey")
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.setRequestProperty("Content-Type", "application/json")
-            connection.doOutput = true
-            connection.connectTimeout = 10_000
-            connection.readTimeout = 10_000
-            connection.outputStream.use { it.write(testBody.toByteArray(Charsets.UTF_8)) }
-
-            val code = connection.responseCode
-            Log.i(TAG, "[testGeminiKey] HTTP $code for model=$model, key_len=${trimmedKey.length}, auth=url_param")
-            
-            if (code == 200) {
-                connection.disconnect()
-                Pair(true, "")
-            } else {
-                // Read and log the FULL error response body from Google API
-                val errorBody = try {
-                    connection.errorStream?.bufferedReader()?.readText() ?: "no error body"
-                } catch (e: Exception) {
-                    "could not read error body: ${e.message}"
-                }
-                Log.e(TAG, "[testGeminiKey] FAILED — HTTP $code, error body: ${errorBody.take(500)}")
-                connection.disconnect()
-                
-                // Parse a user-friendly error message from the Google API response
-                val friendlyMsg = when (code) {
-                    400 -> "Bad request (400) — check key format"
-                    403 -> "API key not authorized (403) — key may not have Gemini API access enabled"
-                    404 -> "Model not found (404) — endpoint may be wrong"
-                    429 -> "Quota exhausted (429) — rate limited or billing issue"
-                    else -> "HTTP $code"
-                }
-                Pair(false, "$friendlyMsg — ${errorBody.take(150)}")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "[testGeminiKey] FAILED: ${e.message}")
-            Pair(false, "Network error: ${e.message?.take(100)}")
-        }
+        return com.jarvis.assistant.network.GroqApiClient.testApiKey(trimmedKey)
     }
 
     /**
@@ -1341,13 +1278,13 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                         Log.i(AUDIO_TAG, "[handleCommandReady] Using SpeechRecognizer partial result: \"$transcription\"")
                     } else {
                         Log.d(AUDIO_TAG, "[handleCommandReady] SpeechRecognizer no result — falling back to Gemini at ${sampleRate}Hz")
-                        transcription = transcribeViaGeminiFallback(pcmBytes, sampleRate)
+                        transcription = transcribeViaGroqWhisper(pcmBytes, sampleRate)
                     }
                 }
             } else {
                 // SpeechRecognizer errored or has no results — fall back to Gemini
                 Log.d(AUDIO_TAG, "[handleCommandReady] SpeechRecognizer unavailable (ready=$srReady, error=$srError) — falling back to Gemini at ${sampleRate}Hz")
-                transcription = transcribeViaGeminiFallback(pcmBytes, sampleRate)
+                transcription = transcribeViaGroqWhisper(pcmBytes, sampleRate)
             }
 
             // ── Run emotion/mood analysis in BACKGROUND — don't block transcription ──
@@ -1442,127 +1379,77 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         }
     }
 
-    private suspend fun transcribeViaGeminiFallback(pcmBytes: ByteArray, sourceSampleRate: Int): String {
+    private suspend fun transcribeViaGroqWhisper(pcmBytes: ByteArray, sourceSampleRate: Int): String {
         return withContext(Dispatchers.IO) {
             try {
-                val apiKey = _geminiApiKey.value
+                val apiKey = _groqApiKey.value
                 if (apiKey.isBlank()) {
-                    Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] Gemini API key not set")
+                    Log.w(AUDIO_TAG, "[transcribeViaGroqWhisper] Groq API key not set")
                     return@withContext ""
                 }
 
+                // Groq Whisper requires 16kHz WAV
                 val targetSampleRate = 16_000
-                val pcmForGemini = if (sourceSampleRate != targetSampleRate) {
-                    Log.d(AUDIO_TAG, "[transcribeViaGeminiFallback] Resampling PCM from ${sourceSampleRate}Hz to ${targetSampleRate}Hz")
+                val resampledPcm = if (sourceSampleRate != targetSampleRate) {
+                    Log.d(AUDIO_TAG, "[transcribeViaGroqWhisper] Resampling PCM from ${sourceSampleRate}Hz to ${targetSampleRate}Hz")
                     resamplePcm(pcmBytes, sourceSampleRate, targetSampleRate)
                 } else {
                     pcmBytes
                 }
 
-                val wavBytes = pcmToWav(pcmForGemini, sampleRate = targetSampleRate, channels = 1, bitsPerSample = 16)
-                val base64Audio = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
+                val wavBytes = pcmToWav(resampledPcm, sampleRate = targetSampleRate, channels = 1, bitsPerSample = 16)
+                Log.d(AUDIO_TAG, "[transcribeViaGroqWhisper] Sending ${wavBytes.size} bytes WAV to Groq Whisper")
 
-                Log.d(AUDIO_TAG, "[transcribeViaGeminiFallback] Sending ${wavBytes.size} bytes WAV (${targetSampleRate}Hz) to Gemini")
+                // Groq Whisper API uses multipart/form-data
+                val boundary = "JarvisBoundary_${System.currentTimeMillis()}"
+                val requestBody = okhttp3.MultipartBody.Builder(boundary)
+                    .setType(okhttp3.MultipartBody.FORM)
+                    .addFormDataPart("model", "distil-whisper-large-v3-en")
+                    .addFormDataPart("language", "en")
+                    .addFormDataPart("response_format", "json")
+                    .addFormDataPart(
+                        "file", "recording.wav",
+                        wavBytes.toRequestBody("audio/wav".toMediaType())
+                    )
+                    .build()
 
-                val requestBody = org.json.JSONObject().apply {
-                    put("contents", org.json.JSONArray().put(
-                        org.json.JSONObject().apply {
-                            put("parts", org.json.JSONArray().apply {
-                                put(org.json.JSONObject().apply {
-                                    put("inline_data", org.json.JSONObject().apply {
-                                        put("mimeType", "audio/wav")
-                                        put("data", base64Audio)
-                                    })
-                                })
-                                put(org.json.JSONObject().apply {
-                                    put("text", "Transcribe the audio. Respond with ONLY the exact words spoken, nothing else. No quotes, no explanation, no commentary.")
-                                })
-                            })
-                        }
-                    ))
-                    put("generationConfig", org.json.JSONObject().apply {
-                        put("temperature", 0.0)
-                        put("maxOutputTokens", 256)
-                    })
-                }.toString()
+                val request = okhttp3.Request.Builder()
+                    .url(com.jarvis.assistant.network.GroqApiClient.STT_URL)
+                    .addHeader("Authorization", "Bearer ${apiKey.trim()}")
+                    .post(requestBody)
+                    .build()
 
-                // A2: Try each model in the fallback list
-                var lastError = ""
-                for (model in GEMINI_MODELS) {
-                    var connection: HttpURLConnection? = null
-                    val maxRetriesPerModel = 2
-                    for (retry in 0..maxRetriesPerModel) {
-                        try {
-                            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}")
-                            connection = url.openConnection() as HttpURLConnection
-                            connection.requestMethod = "POST"
-                            connection.setRequestProperty("Content-Type", "application/json")
-                            connection.doOutput = true
-                            connection.connectTimeout = 15_000
-                            connection.readTimeout = 30_000
+                val client = okhttp3.OkHttpClient.Builder()
+                    .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                    .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
 
-                            connection.outputStream.use { os ->
-                                os.write(requestBody.toByteArray(Charsets.UTF_8))
-                            }
-
-                            val responseCode = connection.responseCode
-                            if (responseCode == HttpURLConnection.HTTP_OK) {
-                                val responseBody = connection.inputStream.bufferedReader().readText()
-                                connection.disconnect()
-                                connection = null
-
-                                val transcribedText = try {
-                                    val root = JsonParser.parseString(responseBody).asJsonObject
-                                    val candidates = root.getAsJsonArray("candidates")
-                                    val firstCandidate = candidates?.firstOrNull()?.asJsonObject
-                                    val content = firstCandidate?.getAsJsonObject("content")
-                                    val parts = content?.getAsJsonArray("parts")
-                                    val firstPart = parts?.firstOrNull()?.asJsonObject
-                                    firstPart?.get("text")?.asString ?: ""
-                                } catch (e: Exception) {
-                                    Log.e(AUDIO_TAG, "[transcribeViaGeminiFallback] JSON parsing failed: ${e.message}")
-                                    ""
-                                }
-
-                                if (transcribedText.isNotBlank()) {
-                                    Log.i(AUDIO_TAG, "[transcribeViaGeminiFallback] Model $model transcription: \"$transcribedText\"")
-                                    return@withContext transcribedText
-                                }
-                            } else {
-                                val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                                lastError = "Model $model error $responseCode: ${errorBody.take(300)}"
-                                Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] $lastError")
-
-                                // Retry on 503/429
-                                if ((responseCode == 503 || responseCode == 429) && retry < maxRetriesPerModel) {
-                                    val delayMs = if (responseCode == 429) 2000L * (1L shl retry) else 1000L * (1L shl retry)
-                                    Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] Retrying model $model in ${delayMs}ms due to HTTP $responseCode...")
-                                    connection?.disconnect()
-                                    connection = null
-                                    kotlinx.coroutines.delay(delayMs)
-                                    continue
-                                }
-                            }
-                            connection?.disconnect()
-                            connection = null
-                            break // Non-retryable error, try next model
-                        } catch (e: Exception) {
-                            lastError = "Model $model exception: ${e.message}"
-                            Log.w(AUDIO_TAG, "[transcribeViaGeminiFallback] $lastError")
-                            try { connection?.disconnect() } catch (_: Exception) {}
-                            connection = null
-                            if (retry < maxRetriesPerModel) {
-                                kotlinx.coroutines.delay(1000L * (1L shl retry))
-                                continue
-                            }
-                        }
+                val response = client.newCall(request).execute()
+                if (response.code == 200) {
+                    val responseBody = response.body?.string() ?: ""
+                    response.close()
+                    val transcribedText = try {
+                        val root = JsonParser.parseString(responseBody).asJsonObject
+                        root.get("text")?.asString ?: ""
+                    } catch (e: Exception) {
+                        Log.e(AUDIO_TAG, "[transcribeViaGroqWhisper] JSON parsing failed: ${e.message}")
+                        ""
                     }
-                }
 
-                Log.e(AUDIO_TAG, "[transcribeViaGeminiFallback] ALL models failed. Last error: $lastError")
-                return@withContext ""
+                    if (transcribedText.isNotBlank()) {
+                        Log.i(AUDIO_TAG, "[transcribeViaGroqWhisper] Transcription: \"$transcribedText\"")
+                        return@withContext transcribedText
+                    }
+                    return@withContext ""
+                } else {
+                    val errorBody = response.body?.string() ?: "unknown"
+                    response.close()
+                    Log.w(AUDIO_TAG, "[transcribeViaGroqWhisper] HTTP ${response.code}: ${errorBody.take(300)}")
+                    return@withContext ""
+                }
             } catch (e: Exception) {
-                Log.e(AUDIO_TAG, "[transcribeViaGeminiFallback] Exception: ${e.message}", e)
+                Log.e(AUDIO_TAG, "[transcribeViaGroqWhisper] Exception: ${e.message}", e)
                 ""
             }
         }
@@ -2019,34 +1906,25 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             }
 
             // ═══════════════════════════════════════════════════════════════════
-            // UPGRADE (v6.0): GEMINI FUNCTION CALLING
-            //
-            // First, try sending the query to Gemini with tool definitions.
-            // If Gemini returns a function call (e.g., open_and_search),
-            // we execute it via the TaskExecutorBridge.
-            //
-            // If Gemini returns a text response (no function call), we
-            // fall through to the normal AI processing pipeline.
-            //
-            // This makes JARVIS an AUTONOMOUS AGENT that can plan and
-            // execute multi-step tasks like:
-            //   "Open YouTube, search for X, and play the first video"
+            // v17: GROQ FUNCTION CALLING (replaces Gemini Function Calling)
+            // Groq uses OpenAI-compatible tool calling format.
+            // llama-3.1-8b-instant is fastest, mixtral-8x7b has 32K context.
             // ═══════════════════════════════════════════════════════════════════
-            if (_geminiApiKey.value.isNotBlank()) {
+            if (_groqApiKey.value.isNotBlank()) {
                 try {
-                    Log.d(AUDIO_TAG, "[handleAIQuery] Trying Gemini Function Calling for autonomous task planning")
+                    Log.d(AUDIO_TAG, "[handleAIQuery] Trying Groq Function Calling for autonomous task planning")
                     val toolResult = withContext(Dispatchers.IO) {
-                        GeminiFunctionCaller.processWithTools(
+                        GroqFunctionCaller.processWithTools(
                             query = query,
-                            apiKey = _geminiApiKey.value,
+                            apiKey = _groqApiKey.value,
                             context = context,
                             historyJson = enhancedHistoryJson
                         )
                     }
 
                     when (toolResult) {
-                        is GeminiFunctionCaller.ProcessResult.ToolExecuted -> {
-                            // Gemini returned a function call and we executed it
+                        is GroqFunctionCaller.ProcessResult.ToolExecuted -> {
+                            // Groq returned a function call and we executed it
                             val stepMsg = when (toolResult.stepResult) {
                                 is TaskExecutorBridge.StepResult.Success -> toolResult.stepResult.message
                                 is TaskExecutorBridge.StepResult.Failed -> "Action failed: ${toolResult.stepResult.message}"
@@ -2063,8 +1941,8 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                             trySynthesizeAndPlay(aiMsg, context)
                             return
                         }
-                        is GeminiFunctionCaller.ProcessResult.TextOnly -> {
-                            // Gemini returned a text response — use it directly
+                        is GroqFunctionCaller.ProcessResult.TextOnly -> {
+                            // Groq returned a text response — use it directly
                             val rawResponse = toolResult.response
                             val emotionTag = parseEmotionTag(rawResponse)
                             var cleanResponse = stripEmotionTag(rawResponse)
@@ -2089,7 +1967,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                             trySynthesizeAndPlay(cleanResponse, context)
                             return
                         }
-                        is GeminiFunctionCaller.ProcessResult.MultiStep -> {
+                        is GroqFunctionCaller.ProcessResult.MultiStep -> {
                             // Multiple tool calls were executed
                             val summary = toolResult.steps.zip(toolResult.results).joinToString(". ") { (step, result) ->
                                 when (result) {
@@ -2108,26 +1986,19 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                             trySynthesizeAndPlay(summary, context)
                             return
                         }
-                        is GeminiFunctionCaller.ProcessResult.Error -> {
+                        is GroqFunctionCaller.ProcessResult.Error -> {
                             // Function calling failed — fall through to normal pipeline
-                            Log.w(AUDIO_TAG, "[handleAIQuery] Gemini Function Calling failed: ${toolResult.message} — falling back to normal pipeline")
+                            Log.w(AUDIO_TAG, "[handleAIQuery] Groq Function Calling failed: ${toolResult.message} — falling back to direct pipeline")
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(AUDIO_TAG, "[handleAIQuery] Gemini Function Calling exception: ${e.message} — falling back to normal pipeline")
+                    Log.w(AUDIO_TAG, "[handleAIQuery] Groq Function Calling exception: ${e.message} — falling back to direct pipeline")
                 }
             }
 
             // ═══════════════════════════════════════════════════════════════════
-            // FALLBACK: AI Query Pipeline
-            // Priority: Rust (fast, native) → Gemini Direct (HTTP)
-            //
-            // CRITICAL FIX (v15): When Rust native is NOT ready, do NOT
-            // show the "[ERROR] Native library not ready" message to the
-            // user. Instead, silently skip Rust and go straight to
-            // processQueryViaGeminiDirect which works perfectly fine
-            // without native code. The user should NEVER see an error
-            // about the native library — it's an implementation detail.
+            // FALLBACK: Groq Direct (no tool calling — simple chat)
+            // When GroqFunctionCaller fails, use simple chat completion.
             // ═══════════════════════════════════════════════════════════════════
             var rawResponse = ""
 
@@ -2139,34 +2010,34 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                         RustBridge.processQuery(query, screenContext, historyJson, JARVIS_SYSTEM_PROMPT)
                     } catch (e: Exception) {
                         Log.e(TAG, "[handleAIQuery] JNI processQuery failed", e)
-                        "" // Empty = try Gemini direct next
+                        "" // Empty = try Groq direct next
                     }
                 }
             }
 
-            // If Rust didn't produce a valid response, use Gemini Direct HTTP
-            val needsGeminiDirect = rawResponse.isBlank() ||
+            // If Rust didn't produce a valid response, use Groq Direct
+            val needsGroqDirect = rawResponse.isBlank() ||
                     rawResponse.startsWith("[ERROR]") ||
                     rawResponse.startsWith("ERROR:") ||
                     rawResponse.contains("Native library not loaded") ||
                     rawResponse.contains("Native library not ready")
 
-            if (needsGeminiDirect && _geminiApiKey.value.isNotBlank()) {
-                Log.d(AUDIO_TAG, "[handleAIQuery] Using Gemini Direct HTTP fallback")
+            if (needsGroqDirect && _groqApiKey.value.isNotBlank()) {
+                Log.d(AUDIO_TAG, "[handleAIQuery] Using Groq Direct fallback")
                 val directResponse = withContext(Dispatchers.IO) {
-                    processQueryViaGeminiDirect(query, enhancedHistoryJson)
+                    processQueryViaGroqDirect(query, enhancedHistoryJson)
                 }
                 if (directResponse.isNotBlank() && !directResponse.startsWith("[ERROR]")) {
                     rawResponse = directResponse
-                    Log.i(AUDIO_TAG, "[handleAIQuery] Gemini Direct succeeded, length=${directResponse.length}")
+                    Log.i(AUDIO_TAG, "[handleAIQuery] Groq Direct succeeded, length=${directResponse.length}")
                 } else {
-                    Log.w(AUDIO_TAG, "[handleAIQuery] Gemini Direct also failed: $directResponse")
+                    Log.w(AUDIO_TAG, "[handleAIQuery] Groq Direct also failed: $directResponse")
                     if (rawResponse.isBlank() || rawResponse.startsWith("[ERROR]")) {
-                        rawResponse = directResponse.ifBlank { "[ERROR] Gemini API is not responding. Please check your API key and internet connection in Settings." }
+                        rawResponse = directResponse.ifBlank { "[ERROR] Groq API is not responding. Please check your API key and internet connection in Settings." }
                     }
                 }
             } else if (rawResponse.isBlank()) {
-                rawResponse = "[ERROR] No AI engine available. Please set your Gemini API key in Settings."
+                rawResponse = "[ERROR] No AI engine available. Please set your Groq API key in Settings."
             }
 
             val parsed  = parseErrorResponse(rawResponse)
@@ -2228,27 +2099,30 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // GEMINI DIRECT (Kotlin HTTP fallback — no Rust required)
+    // GROQ DIRECT — Simple chat completion fallback (no tool calling)
     //
-    // v15 UPGRADE: Now uses GeminiApiClient (OkHttp + retry + model fallback)
-    // instead of raw HttpURLConnection. This fixes:
-    //   - Thread.sleep() ANR risk → replaced with suspend delay()
-    //   - No retry on network errors → GeminiApiClient handles retries
-    //   - No model fallback on 404 → GeminiApiClient tries all models
-    //   - Connection pooling → OkHttp handles this automatically
+    // When GroqFunctionCaller fails, use simple Groq chat completion.
+    // Uses GroqApiClient with OkHttp, retry, and model fallback.
     // ═══════════════════════════════════════════════════════════════════════
-    private suspend fun processQueryViaGeminiDirect(query: String, historyJson: String): String {
+    private suspend fun processQueryViaGroqDirect(query: String, historyJson: String): String {
         try {
-            val apiKey = _geminiApiKey.value
+            val apiKey = _groqApiKey.value
             if (apiKey.isBlank()) {
-                Log.w(TAG, "[processQueryViaGeminiDirect] Gemini API key not set")
-                return "[ERROR] Gemini API key not set. Please enter it in Settings."
+                Log.w(TAG, "[processQueryViaGroqDirect] Groq API key not set")
+                return "[ERROR] Groq API key not set. Please enter it in Settings."
             }
 
-            Log.d(TAG, "[processQueryViaGeminiDirect] Sending query to Gemini: \"$query\"")
+            Log.d(TAG, "[processQueryViaGroqDirect] Sending query to Groq: \"$query\"")
 
-            val contentsArray = org.json.JSONArray()
+            val messagesArray = org.json.JSONArray()
 
+            // System message
+            messagesArray.put(org.json.JSONObject().apply {
+                put("role", "system")
+                put("content", JARVIS_SYSTEM_PROMPT)
+            })
+
+            // History messages
             try {
                 val historyArr = org.json.JSONArray(historyJson)
                 for (i in 0 until historyArr.length()) {
@@ -2256,79 +2130,67 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                     val role = entry.optString("role", "user")
                     val content = entry.optString("content", "")
                     if (content.isNotBlank()) {
-                        contentsArray.put(org.json.JSONObject().apply {
-                            put("role", if (role == "model") "model" else "user")
-                            put("parts", org.json.JSONArray().put(
-                                org.json.JSONObject().put("text", content)
-                            ))
+                        messagesArray.put(org.json.JSONObject().apply {
+                            put("role", if (role == "model" || role == "assistant") "assistant" else "user")
+                            put("content", content)
                         })
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "[processQueryViaGeminiDirect] Failed to parse history: ${e.message}")
+                Log.w(TAG, "[processQueryViaGroqDirect] Failed to parse history: ${e.message}")
             }
 
-            contentsArray.put(org.json.JSONObject().apply {
+            // Current query
+            messagesArray.put(org.json.JSONObject().apply {
                 put("role", "user")
-                put("parts", org.json.JSONArray().put(
-                    org.json.JSONObject().put("text", query)
-                ))
+                put("content", query)
             })
 
             val requestBody = org.json.JSONObject().apply {
-                put("contents", contentsArray)
-                put("systemInstruction", org.json.JSONObject().apply {
-                    put("parts", org.json.JSONArray().put(
-                        org.json.JSONObject().put("text", JARVIS_SYSTEM_PROMPT)
-                    ))
-                })
-                put("generationConfig", org.json.JSONObject().apply {
-                    put("temperature", 0.8)
-                    put("maxOutputTokens", 1024)
-                })
+                put("model", "llama-3.1-8b-instant") // Will be replaced by GroqApiClient fallback
+                put("messages", messagesArray)
+                put("temperature", 0.7)
+                put("max_tokens", 2048)
             }.toString()
 
-            // v15: Use GeminiApiClient with OkHttp, retry, and model fallback
-            val result = com.jarvis.assistant.network.GeminiApiClient.postWithRetry(
+            val result = com.jarvis.assistant.network.GroqApiClient.chatCompletion(
                 requestBody = requestBody,
                 apiKey = apiKey.trim(),
                 maxRetries = 3
             )
 
             return when (result) {
-                is com.jarvis.assistant.network.GeminiApiClient.ApiResult.Success -> {
+                is com.jarvis.assistant.network.GroqApiClient.ApiResult.Success -> {
                     val responseText = try {
                         val root = JsonParser.parseString(result.responseBody).asJsonObject
-                        val candidates = root.getAsJsonArray("candidates")
-                        val firstCandidate = candidates?.firstOrNull()?.asJsonObject
-                        val content = firstCandidate?.getAsJsonObject("content")
-                        val parts = content?.getAsJsonArray("parts")
-                        val firstPart = parts?.firstOrNull()?.asJsonObject
-                        firstPart?.get("text")?.asString ?: ""
+                        val choices = root.getAsJsonArray("choices")
+                        val firstChoice = choices?.firstOrNull()?.asJsonObject
+                        val message = firstChoice?.getAsJsonObject("message")
+                        message?.get("content")?.asString ?: ""
                     } catch (e: Exception) {
-                        Log.e(TAG, "[processQueryViaGeminiDirect] JSON parsing failed: ${e.message}")
+                        Log.e(TAG, "[processQueryViaGroqDirect] JSON parsing failed: ${e.message}")
                         ""
                     }
 
                     if (responseText.isNotBlank()) {
-                        Log.i(TAG, "[processQueryViaGeminiDirect] Model ${result.model} response: \"${responseText.take(100)}...\"")
+                        Log.i(TAG, "[processQueryViaGroqDirect] Model ${result.model} response: \"${responseText.take(100)}...\"")
                         responseText
                     } else {
-                        Log.w(TAG, "[processQueryViaGeminiDirect] Model ${result.model} returned empty response")
-                        "[ERROR] Gemini returned an empty response. Please try again."
+                        Log.w(TAG, "[processQueryViaGroqDirect] Model ${result.model} returned empty response")
+                        "[ERROR] Groq returned an empty response. Please try again."
                     }
                 }
-                is com.jarvis.assistant.network.GeminiApiClient.ApiResult.HttpError -> {
-                    Log.e(TAG, "[processQueryViaGeminiDirect] HTTP error: ${result.code} — ${result.message}")
-                    "[ERROR] Gemini API error: ${result.message}"
+                is com.jarvis.assistant.network.GroqApiClient.ApiResult.HttpError -> {
+                    Log.e(TAG, "[processQueryViaGroqDirect] HTTP error: ${result.code} — ${result.message}")
+                    "[ERROR] Groq API error: ${result.message}"
                 }
-                is com.jarvis.assistant.network.GeminiApiClient.ApiResult.NetworkError -> {
-                    Log.e(TAG, "[processQueryViaGeminiDirect] Network error: ${result.message}")
+                is com.jarvis.assistant.network.GroqApiClient.ApiResult.NetworkError -> {
+                    Log.e(TAG, "[processQueryViaGroqDirect] Network error: ${result.message}")
                     "[ERROR] Network error: ${result.message}"
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "[processQueryViaGeminiDirect] Exception: ${e.message}", e)
+            Log.e(TAG, "[processQueryViaGroqDirect] Exception: ${e.message}", e)
             return "[ERROR] Query processing failed: ${e.message?.take(200)}"
         }
     }
@@ -2350,7 +2212,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
 
             Regex("""\b429\b""").containsMatchIn(lower) ||
                     lower.contains("resource_exhausted") || lower.contains("quota") ->
-                "[ERROR] Sir, the Gemini API quota has been exhausted. Please update the key in Settings. (429)"
+                "[ERROR] Sir, the Groq API quota has been exhausted. Please update the key in Settings. (429)"
 
             Regex("""\b403\b""").containsMatchIn(lower) ||
                     lower.contains("permission_denied") || lower.contains("api_key_invalid") ->
@@ -2669,7 +2531,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * Capture a photo and analyze it with Gemini Vision.
+     * Capture a photo and analyze it with AI Vision.
      * Triggered by vision commands like "kya hai yeh", "what is this", "dekh kya hai".
      */
     fun captureAndAnalyzeVision(context: Context, prompt: String = "What do you see?") {
@@ -2680,7 +2542,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 addAssistantMessage("Let me take a look, Sir...", "calm")
 
                 val result = withContext(Dispatchers.IO) {
-                    visionManager.captureAndAnalyze(context, prompt, _geminiApiKey.value)
+                    visionManager.captureAndAnalyze(context, prompt, _groqApiKey.value)
                 }
 
                 _emotion.value = "surprised"
@@ -2717,7 +2579,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 addAssistantMessage("Let me prepare your daily brief, Sir...", "calm")
 
                 val brief = withContext(Dispatchers.IO) {
-                    DailyBriefGenerator.generateBrief(context, _geminiApiKey.value)
+                    DailyBriefGenerator.generateBrief(context, _groqApiKey.value)
                 }
 
                 _emotion.value = "calm"
@@ -3221,10 +3083,11 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     // PER-FIELD SETTERS
     // ═══════════════════════════════════════════════════════════════════════
 
-    fun setGeminiApiKey(key: String) {
-        _geminiApiKey.value = key
+    fun setGroqApiKey(key: String) {
+        _groqApiKey.value = key
+        JarviewModel.groqApiKey = key
         viewModelScope.launch(Dispatchers.IO) {
-            try { settingsRepository.setGeminiApiKey(key) } catch (e: Exception) { Log.e(TAG, "Persist Gemini API key failed: ${e.message}") }
+            try { settingsRepository.setGroqApiKey(key) } catch (e: Exception) { Log.e(TAG, "Persist Groq API key failed: ${e.message}") }
         }
     }
 

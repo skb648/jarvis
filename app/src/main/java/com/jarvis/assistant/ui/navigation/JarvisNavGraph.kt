@@ -65,7 +65,7 @@ fun JarvisNavGraph(
     deviceCount: Int,
     activeDeviceCount: Int,
     // Settings state
-    geminiApiKey: String,
+    groqApiKey: String,
     elevenLabsApiKey: String,
     ttsVoiceId: String,
     isWakeWordEnabled: Boolean,
@@ -87,7 +87,7 @@ fun JarvisNavGraph(
     onRefreshDevices: () -> Unit,
     onQuickAction: (String) -> Unit,
     onShowOverlay: () -> Unit = {},
-    onGeminiApiKeyChange: (String) -> Unit,
+    onGroqApiKeyChange: (String) -> Unit,
     onElevenLabsApiKeyChange: (String) -> Unit,
     onTtsVoiceChange: (String) -> Unit,
     onWakeWordToggle: (Boolean) -> Unit,
@@ -364,7 +364,7 @@ fun JarvisNavGraph(
             }
             composable("settings") {
                 SettingsScreen(
-                    geminiApiKey = geminiApiKey,
+                    groqApiKey = groqApiKey,
                     elevenLabsApiKey = elevenLabsApiKey,
                     ttsVoiceId = ttsVoiceId,
                     isWakeWordEnabled = isWakeWordEnabled,
@@ -377,7 +377,7 @@ fun JarvisNavGraph(
                     isBatteryOptimized = isBatteryOptimized,
                     isShizukuAvailable = isShizukuAvailable,
                     isRustReady = isRustReady,
-                    onGeminiApiKeyChange = onGeminiApiKeyChange,
+                    onGroqApiKeyChange = onGroqApiKeyChange,
                     onElevenLabsApiKeyChange = onElevenLabsApiKeyChange,
                     onTtsVoiceChange = onTtsVoiceChange,
                     onWakeWordToggle = onWakeWordToggle,

@@ -110,7 +110,7 @@ class MainActivity : ComponentActivity() {
         val devices by viewModel.devices.collectAsState()
         val isMqttConnected by viewModel.isMqttConnected.collectAsState()
         val mqttLabel by viewModel.mqttLabel.collectAsState()
-        val geminiApiKey by viewModel.geminiApiKey.collectAsState()
+        val groqApiKey by viewModel.groqApiKey.collectAsState()
         val elevenLabsApiKey by viewModel.elevenLabsApiKey.collectAsState()
         val ttsVoiceId by viewModel.ttsVoiceId.collectAsState()
         val isWakeWordEnabled by viewModel.isWakeWordEnabled.collectAsState()
@@ -150,7 +150,7 @@ class MainActivity : ComponentActivity() {
             mqttLabel = mqttLabel,
             deviceCount = viewModel.deviceCount,
             activeDeviceCount = viewModel.activeDeviceCount,
-            geminiApiKey = geminiApiKey,
+            groqApiKey = groqApiKey,
             elevenLabsApiKey = elevenLabsApiKey,
             ttsVoiceId = ttsVoiceId,
             isWakeWordEnabled = isWakeWordEnabled,
@@ -188,7 +188,7 @@ class MainActivity : ComponentActivity() {
                     else       -> viewModel.sendMessage(action, context)
                 }
             },
-            onGeminiApiKeyChange = { viewModel.setGeminiApiKey(it) },
+            onGroqApiKeyChange = { viewModel.setGroqApiKey(it) },
             onElevenLabsApiKeyChange = { viewModel.setElevenLabsApiKey(it) },
             onTtsVoiceChange = { viewModel.setTtsVoiceId(it) },
             onWakeWordToggle = { viewModel.setWakeWordEnabled(it) },
@@ -206,13 +206,13 @@ class MainActivity : ComponentActivity() {
                     viewModel.updateAmplitude(if (healthy) 1f else 0f)
                 }
             },
-            onSaveAndApplyKeys = { gemini, elevenlabs ->
-                viewModel.saveAndApplyApiKeys(gemini, elevenlabs)
+            onSaveAndApplyKeys = { groq, elevenlabs ->
+                viewModel.saveAndApplyApiKeys(groq, elevenlabs)
             },
             onShizukuRequestPermission = { viewModel.requestShizukuPermission(this@MainActivity) },
             apiKeySaveResult = apiKeySaveResult,
             onConsumeApiKeySaveResult = { viewModel.consumeApiKeySaveResult() },
-            onTestApiKeys = { gemini, eleven -> viewModel.testApiKeys(gemini, eleven) },
+            onTestApiKeys = { groq, eleven -> viewModel.testApiKeys(groq, eleven) },
             apiKeyTestResult = apiKeyTestResult,
             onClearApiKeyTestResult = { viewModel.clearApiKeyTestResult() },
             // Chat session drawer

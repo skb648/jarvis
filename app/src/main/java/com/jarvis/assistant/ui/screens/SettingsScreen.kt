@@ -59,7 +59,7 @@ import com.jarvis.assistant.viewmodel.ApiKeySaveResult
  *   2. The ViewModel writes them to DataStore (persistent storage)
  *   3. The ViewModel IMMEDIATELY calls RustBridge.initialize(newKey, newKey)
  *   4. The Rust backend writes to RwLock<ApiKeys> (no OnceCell rejection)
- *   5. Subsequent Gemini/ElevenLabs API calls use the new keys instantly
+ *   5. Subsequent Groq/ElevenLabs API calls use the new keys instantly
  *
  * No app restart needed. No "keys already initialized" error.
  * ═══════════════════════════════════════════════════════════════════════
@@ -67,7 +67,7 @@ import com.jarvis.assistant.viewmodel.ApiKeySaveResult
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    geminiApiKey: String,
+    groqApiKey: String,
     elevenLabsApiKey: String,
     ttsVoiceId: String,
     isWakeWordEnabled: Boolean,
@@ -83,7 +83,7 @@ fun SettingsScreen(
     isMqttConnected: Boolean = false,
     isAccessibilityEnabled: Boolean = false,
     // Per-field real-time setters
-    onGeminiApiKeyChange: (String) -> Unit,
+    onGroqApiKeyChange: (String) -> Unit,
     onElevenLabsApiKeyChange: (String) -> Unit,
     onTtsVoiceChange: (String) -> Unit,
     onWakeWordToggle: (Boolean) -> Unit,
@@ -97,12 +97,12 @@ fun SettingsScreen(
     onPermissionsRequest: () -> Unit,
     onHealthCheck: () -> Unit,
     // Batch Save & Apply — this is the HOT-SWAP trigger
-    onSaveAndApplyKeys: (gemini: String, elevenLabs: String) -> Unit = { _, _ -> },
+    onSaveAndApplyKeys: (groq: String, elevenLabs: String) -> Unit = { _, _ -> },
     onShizukuRequestPermission: () -> Unit = {},
     apiKeySaveResult: ApiKeySaveResult = ApiKeySaveResult.NONE,
     onConsumeApiKeySaveResult: () -> Unit = {},
     // A3: API key test
-    onTestApiKeys: (gemini: String, elevenLabs: String) -> Unit = { _, _ -> },
+    onTestApiKeys: (groq: String, elevenLabs: String) -> Unit = { _, _ -> },
     apiKeyTestResult: String = "",
     onClearApiKeyTestResult: () -> Unit = {},
     // About section
@@ -115,7 +115,7 @@ fun SettingsScreen(
     // These are initialized from the ViewModel's StateFlow values
     // (which come from DataStore) and allow the user to edit them
     // before hitting "SAVE & APPLY".
-    var localGemini    by remember(geminiApiKey)     { mutableStateOf(geminiApiKey) }
+    var localGroq      by remember(groqApiKey)       { mutableStateOf(groqApiKey) }
     var localEleven    by remember(elevenLabsApiKey) { mutableStateOf(elevenLabsApiKey) }
 
     // ── Save button color flash animation state ─────────────────────────────
@@ -173,13 +173,13 @@ fun SettingsScreen(
 
         val setupSteps = remember(
             isShizukuAvailable, isAccessibilityEnabled,
-            geminiApiKey, elevenLabsApiKey, isWakeWordEnabled
+            groqApiKey, elevenLabsApiKey, isWakeWordEnabled
         ) {
             listOf(
                 SetupStep("Grant Permissions", isComplete = true, icon = Icons.Filled.VerifiedUser),
                 SetupStep("Enable Accessibility", isComplete = isAccessibilityEnabled, icon = Icons.Filled.AccessibilityNew),
                 SetupStep("Configure Shizuku", isComplete = isShizukuAvailable, icon = Icons.Filled.Usb),
-                SetupStep("Enter API Key", isComplete = geminiApiKey.isNotBlank(), icon = Icons.Filled.Key),
+                SetupStep("Enter API Key", isComplete = groqApiKey.isNotBlank(), icon = Icons.Filled.Key),
                 SetupStep("Test Voice", isComplete = isWakeWordEnabled && elevenLabsApiKey.isNotBlank(), icon = Icons.Filled.Mic)
             )
         }
@@ -451,17 +451,17 @@ fun SettingsScreen(
                     }
                 }
 
-                // Gemini key — NO validation, trust user input completely
+                // Groq key — NO validation, trust user input completely
                 ApiKeyField(
-                    value        = localGemini,
-                    onValueChange = { localGemini = it },
-                    label        = "Gemini API Key",
-                    placeholder  = "AIzaSy…",
+                    value        = localGroq,
+                    onValueChange = { localGroq = it },
+                    label        = "Groq API Key",
+                    placeholder  = "gsk_…",
                     icon         = Icons.Filled.Android
                 )
 
-                // ── Gemini key validation indicator ─────────────────────────
-                KeyValidationIndicator(localGemini)
+                // ── Groq key validation indicator ─────────────────────────
+                KeyValidationIndicator(localGroq)
 
                 // ElevenLabs key — NO validation, trust user input completely
                 ApiKeyField(
@@ -479,7 +479,7 @@ fun SettingsScreen(
                 // TEST BUTTON — validates keys before saving
                 // ══════════════════════════════════════════════════════════════
                 OutlinedButton(
-                    onClick  = { onTestApiKeys(localGemini, localEleven) },
+                    onClick  = { onTestApiKeys(localGroq, localEleven) },
                     modifier = Modifier.fillMaxWidth(),
                     colors   = ButtonDefaults.outlinedButtonColors(contentColor = JarvisGreen),
                     border   = ButtonDefaults.outlinedButtonBorder(enabled = true)
@@ -491,8 +491,8 @@ fun SettingsScreen(
 
                 // Test result display
                 if (apiKeyTestResult.isNotBlank()) {
-                    // CRITICAL FIX (v14): Show green for Gemini OK even without ElevenLabs
-                    val isSuccess = apiKeyTestResult.contains("Gemini OK", ignoreCase = true) ||
+                    // CRITICAL FIX (v14): Show green for Groq OK even without ElevenLabs
+                    val isSuccess = apiKeyTestResult.contains("Groq OK", ignoreCase = true) ||
                         apiKeyTestResult.contains("All keys valid", ignoreCase = true)
                     Text(
                         apiKeyTestResult,
@@ -547,7 +547,7 @@ fun SettingsScreen(
                         .padding(1.5.dp)
                 ) {
                     Button(
-                        onClick  = { onSaveAndApplyKeys(localGemini, localEleven) },
+                        onClick  = { onSaveAndApplyKeys(localGroq, localEleven) },
                         modifier = Modifier.fillMaxWidth(),
                         colors   = ButtonDefaults.buttonColors(
                             containerColor = saveButtonColor,
@@ -568,7 +568,7 @@ fun SettingsScreen(
 
                 // Model info — hardcoded in Rust
                 Text(
-                    "Model: gemini-2.5-flash (audio + text + vision)",
+                    "Model: llama-3.3-70b (via Groq)",
                     color    = TextTertiary,
                     fontSize = 9.sp,
                     fontFamily = FontFamily.Monospace
@@ -820,7 +820,7 @@ fun SettingsScreen(
 
                     // Powered by
                     Text(
-                        "Powered by Gemini 2.5 Flash + ElevenLabs",
+                        "Powered by Groq + ElevenLabs",
                         color = TextTertiary,
                         fontSize = 9.sp,
                         fontFamily = FontFamily.Monospace
@@ -1031,7 +1031,7 @@ private fun SystemHealthCard(isRustReady: Boolean) {
         // Health score indicator (progress bar)
         val healthScore = listOf(
             isRustReady,
-            true, // Gemini API: assume connected if we got this far
+            true, // Groq API: assume connected if we got this far
             true  // Audio Engine: assume ready
         ).count { it }.toFloat() / 3f
 
@@ -1086,7 +1086,7 @@ private fun SystemHealthCard(isRustReady: Boolean) {
             offlineText = "Offline"
         )
         HealthStatusRow(
-            label = "Gemini API",
+            label = "Groq API",
             isOnline = true, // Assume connected; real check is via TEST button
             onlineText = "Connected",
             offlineText = "Disconnected"
@@ -1336,7 +1336,7 @@ private val RecentChanges = listOf(
         date = "Latest",
         changes = listOf(
             "Rust-powered hot-swap API keys",
-            "Gemini 2.5 Flash multimodal engine",
+            "Groq multimodal engine",
             "Enhanced glassmorphic UI overhaul",
             "Voice wake word detection",
             "Smart home MQTT integration"

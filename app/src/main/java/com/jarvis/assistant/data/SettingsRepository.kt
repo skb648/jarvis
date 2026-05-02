@@ -57,7 +57,7 @@ class SettingsRepository(private val context: Context) {
         private const val TAG = "JarvisSettings"
 
         // AI Keys
-        val GEMINI_API_KEY = stringPreferencesKey("gemini_api_key")
+        val GROQ_API_KEY = stringPreferencesKey("groq_api_key")
         val ELEVENLABS_API_KEY = stringPreferencesKey("elevenlabs_api_key")
         val TTS_VOICE_ID = stringPreferencesKey("tts_voice_id")
 
@@ -88,7 +88,7 @@ class SettingsRepository(private val context: Context) {
         const val DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
         // PrivacyVault key aliases for encrypting sensitive values
-        private const val VAULT_KEY_GEMINI = "gemini_api_key"
+        private const val VAULT_KEY_GROQ = "groq_api_key"
         private const val VAULT_KEY_ELEVENLABS = "elevenlabs_api_key"
     }
 
@@ -97,7 +97,7 @@ class SettingsRepository(private val context: Context) {
     // If decryption fails (key was stored as plaintext before the vault
     // was integrated), the raw value is used and re-encrypted.
 
-    suspend fun getGeminiApiKey(): String = readEncryptedString(GEMINI_API_KEY, VAULT_KEY_GEMINI, "")
+    suspend fun getGroqApiKey(): String = readEncryptedString(GROQ_API_KEY, VAULT_KEY_GROQ, "")
     suspend fun getElevenLabsApiKey(): String = readEncryptedString(ELEVENLABS_API_KEY, VAULT_KEY_ELEVENLABS, "")
     suspend fun getTtsVoiceId(): String = readString(TTS_VOICE_ID, DEFAULT_VOICE_ID)
     suspend fun isWakeWordEnabled(): Boolean = readBoolean(WAKE_WORD_ENABLED, false)
@@ -115,7 +115,7 @@ class SettingsRepository(private val context: Context) {
     // ─── Write Operations (suspend) ──────────────────────────────
     // API keys are encrypted via PrivacyVault before storing in DataStore.
 
-    suspend fun setGeminiApiKey(key: String) = writeEncryptedString(GEMINI_API_KEY, VAULT_KEY_GEMINI, key)
+    suspend fun setGroqApiKey(key: String) = writeEncryptedString(GROQ_API_KEY, VAULT_KEY_GROQ, key)
     suspend fun setElevenLabsApiKey(key: String) = writeEncryptedString(ELEVENLABS_API_KEY, VAULT_KEY_ELEVENLABS, key)
     suspend fun setTtsVoiceId(id: String) = writeString(TTS_VOICE_ID, id)
     suspend fun setWakeWordEnabled(enabled: Boolean) = writeBoolean(WAKE_WORD_ENABLED, enabled)
@@ -133,7 +133,7 @@ class SettingsRepository(private val context: Context) {
     // ─── Save all settings at once (transactional) ───────────────
 
     suspend fun saveAllSettings(
-        geminiApiKey: String,
+        groqApiKey: String,
         elevenLabsApiKey: String,
         ttsVoiceId: String,
         wakeWordEnabled: Boolean,
@@ -145,11 +145,11 @@ class SettingsRepository(private val context: Context) {
         keepAliveEnabled: Boolean
     ) {
         // Encrypt API keys before storing
-        val encryptedGemini = encryptValue(VAULT_KEY_GEMINI, geminiApiKey)
+        val encryptedGroq = encryptValue(VAULT_KEY_GROQ, groqApiKey)
         val encryptedElevenLabs = encryptValue(VAULT_KEY_ELEVENLABS, elevenLabsApiKey)
 
         context.dataStore.edit { prefs ->
-            prefs[GEMINI_API_KEY] = encryptedGemini
+            prefs[GROQ_API_KEY] = encryptedGroq
             prefs[ELEVENLABS_API_KEY] = encryptedElevenLabs
             prefs[TTS_VOICE_ID] = ttsVoiceId
             prefs[WAKE_WORD_ENABLED] = wakeWordEnabled
@@ -164,7 +164,7 @@ class SettingsRepository(private val context: Context) {
 
     // ─── Blocking read (for Application.onCreate / BroadcastReceiver) ───
 
-    fun getGeminiApiKeyBlocking(): String = readEncryptedStringBlocking(GEMINI_API_KEY, VAULT_KEY_GEMINI, "")
+    fun getGroqApiKeyBlocking(): String = readEncryptedStringBlocking(GROQ_API_KEY, VAULT_KEY_GROQ, "")
     fun getElevenLabsApiKeyBlocking(): String = readEncryptedStringBlocking(ELEVENLABS_API_KEY, VAULT_KEY_ELEVENLABS, "")
     fun isWakeWordEnabledBlocking(): Boolean = readBooleanBlocking(WAKE_WORD_ENABLED, false)
     fun isKeepAliveEnabledBlocking(): Boolean = readBooleanBlocking(KEEP_ALIVE_ENABLED, false)

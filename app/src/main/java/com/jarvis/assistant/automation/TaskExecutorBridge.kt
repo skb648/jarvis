@@ -13,13 +13,13 @@ import com.jarvis.assistant.shizuku.ShizukuManager
 import java.lang.ref.WeakReference
 
 /**
- * TaskExecutorBridge — Executes autonomous task chains from Gemini Function Calling.
+ * TaskExecutorBridge — Executes autonomous task chains from Groq Function Calling.
  *
  * ═══════════════════════════════════════════════════════════════════════
  * UPGRADE (v6.0) — AUTONOMOUS AGENT TASK EXECUTION:
  *
- * This bridge connects Gemini's structured tool-call responses to actual
- * Android actions. When Gemini returns a function call like:
+ * This bridge connects Groq's structured tool-call responses to actual
+ * Android actions. When Groq returns a function call like:
  *   {"name": "open_and_search", "args": {"app": "youtube", "query": "cats"}}
  *
  * This bridge:
@@ -53,7 +53,7 @@ object TaskExecutorBridge {
     }
 
     /**
-     * Execute a single tool call from Gemini's function calling response.
+     * Execute a single tool call from Groq's function calling response.
      *
      * @param toolName The name of the tool to call
      * @param args The arguments for the tool
@@ -746,7 +746,7 @@ object TaskExecutorBridge {
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * generate_image — Generate an image using Gemini Imagen API.
+     * generate_image — Generate an image using Groq API.
      * Calls the v1beta/models/imagen-3.0-generate-002:predict endpoint.
      */
     private suspend fun executeGenerateImage(args: Map<String, String>): StepResult {
@@ -756,9 +756,9 @@ object TaskExecutorBridge {
         return withContext(Dispatchers.IO) {
             try {
                 // Get API key from JarviewModel
-                val apiKey = com.jarvis.assistant.channels.JarviewModel.geminiApiKey
+                val apiKey = com.jarvis.assistant.channels.JarviewModel.groqApiKey
                 if (apiKey.isBlank()) {
-                    return@withContext StepResult.Failed("Gemini API key not set — cannot generate image")
+                    return@withContext StepResult.Failed("Groq API key not set — cannot generate image")
                 }
 
                 val fullPrompt = if (style.isNotBlank()) "$prompt, $style style" else prompt
@@ -811,7 +811,7 @@ object TaskExecutorBridge {
                     Log.i(TAG, "[generateImage] Image saved to ${imageFile.absolutePath}")
                     StepResult.Success("Image generated and saved to ${imageFile.absolutePath}. Prompt: \"$fullPrompt\"")
                 } else {
-                    StepResult.Success("Image generation request sent for: \"$fullPrompt\". Check the Gemini API response for the generated image.")
+                    StepResult.Success("Image generation request sent for: \"$fullPrompt\". Check the Groq API response for the generated image.")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "[generateImage] Failed: ${e.message}")
@@ -822,7 +822,7 @@ object TaskExecutorBridge {
 
     /**
      * generate_video — Placeholder for future Veo API integration.
-     * Video generation is not yet available through the public Gemini API.
+     * Video generation is not yet available through the public Groq API.
      */
     private fun executeGenerateVideo(args: Map<String, String>): StepResult {
         val prompt = args["prompt"]?.trim() ?: return StepResult.Failed("Missing 'prompt' argument")
