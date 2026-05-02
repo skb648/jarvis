@@ -62,12 +62,13 @@ fun GlassmorphicCard(
         label = "border-shift"
     )
 
+    // Shift between cyan and purple for the animated border
+    val borderR = JarvisCyan.red + (JarvisPurple.red - JarvisCyan.red) * borderShift
+    val borderG = JarvisCyan.green + (JarvisPurple.green - JarvisCyan.green) * borderShift
+    val borderB = JarvisCyan.blue + (JarvisPurple.blue - JarvisCyan.blue) * borderShift
+
     val animatedBorderColor = if (animatedBorder) {
-        // Shift between cyan and purple for the border
-        val r = JarvisCyan.red + (JarvisPurple.red - JarvisCyan.red) * borderShift
-        val g = JarvisCyan.green + (JarvisPurple.green - JarvisCyan.green) * borderShift
-        val b = JarvisCyan.blue + (JarvisPurple.blue - JarvisCyan.blue) * borderShift
-        Color(r, g, b, alpha = GlassBorder.alpha)
+        Color(borderR, borderG, borderB, alpha = GlassBorder.alpha)
     } else {
         borderColor
     }
@@ -109,9 +110,9 @@ fun GlassmorphicCard(
                 brush = Brush.horizontalGradient(
                     colors = listOf(
                         JarvisCyan.copy(alpha = 0.0f),
-                        Color(r, g, b, alpha = 0.15f),
+                        Color(borderR, borderG, borderB, alpha = 0.15f),
                         JarvisPurple.copy(alpha = 0.0f),
-                        Color(r, g, b, alpha = 0.10f),
+                        Color(borderR, borderG, borderB, alpha = 0.10f),
                         JarvisCyan.copy(alpha = 0.0f)
                     ),
                     startX = borderShift * size.width - size.width * 0.3f,

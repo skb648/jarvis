@@ -300,7 +300,7 @@ object TaskExecutorBridge {
             Log.i(TAG, "[click_button] Accessibility failed, trying Shizuku fallback for '$label'")
             // Use input keyevent as a generic tap substitute
             val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENTER")
-            return if (result.success) {
+            return if (result.isSuccess) {
                 StepResult.Success("Attempted click via Shizuku for '$label'")
             } else {
                 StepResult.Failed("Shizuku fallback failed for '$label': ${result.stderr}")
@@ -330,7 +330,7 @@ object TaskExecutorBridge {
                 .replace("*", "\\*").replace("~", "\\~").replace("\"", "\\\"")
                 .replace("'", "\\'").replace("`", "\\`")
             val result = ShizukuManager.executeShellCommand("input text \"$encodedContent\"")
-            return if (result.success) {
+            return if (result.isSuccess) {
                 StepResult.Success("Injected text via Shizuku: ${content.length} chars")
             } else {
                 StepResult.Failed("Shizuku text injection failed: ${result.stderr}")
@@ -363,7 +363,7 @@ object TaskExecutorBridge {
             }
             if (swipeCmd != null) {
                 val result = ShizukuManager.executeShellCommand(swipeCmd)
-                return if (result.success) {
+                return if (result.isSuccess) {
                     StepResult.Success("Scrolled $direction via Shizuku")
                 } else {
                     StepResult.Failed("Shizuku scroll $direction failed: ${result.stderr}")
@@ -385,7 +385,7 @@ object TaskExecutorBridge {
         if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
             Log.i(TAG, "[go_back] Accessibility failed, trying Shizuku fallback")
             val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_BACK")
-            return if (result.success) {
+            return if (result.isSuccess) {
                 StepResult.Success("Went back via Shizuku")
             } else {
                 StepResult.Failed("Shizuku go back failed: ${result.stderr}")
@@ -406,7 +406,7 @@ object TaskExecutorBridge {
         if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
             Log.i(TAG, "[go_home] Accessibility failed, trying Shizuku fallback")
             val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_HOME")
-            return if (result.success) {
+            return if (result.isSuccess) {
                 StepResult.Success("Went home via Shizuku")
             } else {
                 StepResult.Failed("Shizuku go home failed: ${result.stderr}")
@@ -488,7 +488,7 @@ object TaskExecutorBridge {
         if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
             Log.i(TAG, "[click_ui_element] Accessibility failed, trying Shizuku fallback for '$textOrId'")
             val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENTER")
-            return if (result.success) {
+            return if (result.isSuccess) {
                 StepResult.Success("Attempted click via Shizuku for '$textOrId'")
             } else {
                 StepResult.Failed("Shizuku fallback failed for '$textOrId': ${result.stderr}")
@@ -526,7 +526,7 @@ object TaskExecutorBridge {
             }
             if (swipeCmd != null) {
                 val result = ShizukuManager.executeShellCommand(swipeCmd)
-                return if (result.success) {
+                return if (result.isSuccess) {
                     StepResult.Success("Scrolled $direction via Shizuku")
                 } else {
                     StepResult.Failed("Shizuku scroll $direction failed: ${result.stderr}")
@@ -574,7 +574,7 @@ object TaskExecutorBridge {
             }
             if (shellCmd != null) {
                 val result = ShizukuManager.executeShellCommand(shellCmd)
-                return if (result.success) {
+                return if (result.isSuccess) {
                     StepResult.Success("Performed $actionType via Shizuku")
                 } else {
                     StepResult.Failed("Shizuku $actionType failed: ${result.stderr}")
@@ -617,7 +617,7 @@ object TaskExecutorBridge {
                 else -> return StepResult.Failed("Unknown gesture action: $action")
             }
             val result = ShizukuManager.executeShellCommand(shellCmd)
-            return if (result.success) {
+            return if (result.isSuccess) {
                 StepResult.Success("Dispatched gesture via Shizuku: $action at ($x, $y)")
             } else {
                 StepResult.Failed("Shizuku gesture $action failed: ${result.stderr}")
@@ -643,7 +643,7 @@ object TaskExecutorBridge {
         if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
             Log.i(TAG, "[dump_screen] Accessibility failed, trying Shizuku fallback")
             val result = ShizukuManager.executeShellCommand("uiautomator dump /dev/tty 2>/dev/null")
-            return if (result.success && result.stdout.isNotBlank()) {
+            return if (result.isSuccess && result.stdout.isNotBlank()) {
                 StepResult.Success("Screen dump via Shizuku (raw XML): ${result.stdout.take(3000)}")
             } else {
                 StepResult.Failed("Shizuku screen dump failed: ${result.stderr}")

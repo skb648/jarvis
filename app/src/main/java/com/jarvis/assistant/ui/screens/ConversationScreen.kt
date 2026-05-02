@@ -278,6 +278,9 @@ fun ConversationScreen(
                 }
             }
 
+            // ── Quick Actions Row (always visible) ───────────────────────────
+            QuickActionsRow(onSendMessage = onSendMessage)
+
             // ── Suggested Prompts Section (only when no messages) ──────────
             if (messages.isEmpty()) {
                 LazyRow(
@@ -464,6 +467,11 @@ fun ConversationScreen(
                         modifier = Modifier.size(20.dp)
                     )
                 }
+            }
+
+            // ── Voice Activity Indicator Bar (when voice mode is active) ──
+            if (isVoiceMode) {
+                VoiceActivityWaveform()
             }
         }
     }
@@ -1341,6 +1349,106 @@ private fun TypingIndicator() {
                     fontFamily = FontFamily.Monospace,
                     fontSize = 9.sp
                 )
+            )
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VOICE ACTIVITY WAVEFORM — Horizontal animated waveform when voice is active
+// ═══════════════════════════════════════════════════════════════════════════════
+
+@Composable
+private fun VoiceActivityWaveform(modifier: Modifier = Modifier) {
+    val infiniteTransition = rememberInfiniteTransition(label = "voice-waveform")
+    val barCount = 32
+    val timeOffset by infiniteTransition.animateFloat(
+        initialValue = 0f, targetValue = 100f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ), label = "waveform-time"
+    )
+
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(24.dp)
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+    ) {
+        val barWidth = size.width / (barCount * 1.5f)
+        val maxHeight = size.height * 0.8f
+        val minHeight = size.height * 0.15f
+
+        for (i in 0 until barCount) {
+            val phase = timeOffset * 0.15f + i * 0.4f
+            val amplitude = 0.3f + 0.7f * (0.5f + 0.5f * kotlin.math.sin(phase.toDouble()).toFloat())
+            val barHeight = minHeight + (maxHeight - minHeight) * amplitude
+            val x = i * (barWidth * 1.5f)
+            val y = (size.height - barHeight) / 2f
+
+            drawRoundRect(
+                color = JarvisGreen.copy(alpha = 0.3f + amplitude * 0.5f),
+                topLeft = Offset(x, y),
+                size = Size(barWidth, barHeight),
+                cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f)
+            )
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUICK ACTIONS ROW — Preset voice commands above input field
+// ═══════════════════════════════════════════════════════════════════════════════
+
+@Composable
+private fun QuickActionsRow(onSendMessage: (String) -> Unit) {
+    val quickActions = listOf(
+        "What time is it?" to Icons.Filled.Schedule,
+        "Set timer" to Icons.Filled.Timer,
+        "Take screenshot" to Icons.Filled.PhotoCamera,
+        "Tell me a joke" to Icons.Filled.EmojiEmotions
+    )
+
+    LazyRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        contentPadding = PaddingValues(horizontal = 4.dp)
+    ) {
+        items(quickActions) { (label, icon) ->
+            FilterChip(
+                selected = false,
+                onClick = { onSendMessage(label) },
+                label = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(icon, contentDescription = label, modifier = Modifier.size(12.dp), tint = JarvisCyan)
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = TextSecondary,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp
+                            )
+                        )
+                    }
+                },
+                border = FilterChipDefaults.filterChipBorder(
+                    borderColor = JarvisCyan.copy(alpha = 0.3f),
+                    selectedBorderColor = JarvisCyan,
+                    enabled = true,
+                    selected = false,
+                    borderWidth = 1.dp
+                ),
+                colors = FilterChipDefaults.filterChipColors(
+                    containerColor = Color.Transparent,
+                    selectedContainerColor = JarvisCyan.copy(alpha = 0.1f)
+                ),
+                shape = RoundedCornerShape(16.dp)
             )
         }
     }

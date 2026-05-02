@@ -80,6 +80,8 @@ fun SettingsScreen(
     isBatteryOptimized: Boolean,
     isShizukuAvailable: Boolean,
     isRustReady: Boolean = false,
+    isMqttConnected: Boolean = false,
+    isAccessibilityEnabled: Boolean = false,
     // Per-field real-time setters
     onGeminiApiKeyChange: (String) -> Unit,
     onElevenLabsApiKeyChange: (String) -> Unit,
@@ -163,6 +165,263 @@ fun SettingsScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+
+        // ══════════════════════════════════════════════════════════════════════
+        // QUICK SETUP — Step-by-step checklist for first-time users
+        // ══════════════════════════════════════════════════════════════════════
+        SectionHeader("QUICK SETUP", Icons.Filled.Checklist)
+
+        val setupSteps = remember(
+            isShizukuAvailable, isAccessibilityEnabled,
+            geminiApiKey, elevenLabsApiKey, isWakeWordEnabled
+        ) {
+            listOf(
+                SetupStep("Grant Permissions", isComplete = true, icon = Icons.Filled.VerifiedUser),
+                SetupStep("Enable Accessibility", isComplete = isAccessibilityEnabled, icon = Icons.Filled.AccessibilityNew),
+                SetupStep("Configure Shizuku", isComplete = isShizukuAvailable, icon = Icons.Filled.Usb),
+                SetupStep("Enter API Key", isComplete = geminiApiKey.isNotBlank(), icon = Icons.Filled.Key),
+                SetupStep("Test Voice", isComplete = isWakeWordEnabled && elevenLabsApiKey.isNotBlank(), icon = Icons.Filled.Mic)
+            )
+        }
+        val completedSteps = setupSteps.count { it.isComplete }
+        val totalSteps = setupSteps.size
+        val allComplete = completedSteps == totalSteps
+
+        GlassmorphicCardSimple(
+            backgroundColor = if (allComplete) JarvisGreen.copy(alpha = 0.06f) else WarningAmber.copy(alpha = 0.04f),
+            borderColor = if (allComplete) JarvisGreen.copy(alpha = 0.3f) else WarningAmber.copy(alpha = 0.25f)
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // Header row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "First-Time Setup",
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        "$completedSteps/$totalSteps",
+                        color = if (allComplete) JarvisGreen else WarningAmber,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+
+                // Progress bar
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .background(GlassBorder.copy(alpha = 0.3f), shape = RoundedCornerShape(2.dp))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(completedSteps.toFloat() / totalSteps)
+                            .background(
+                                if (allComplete) JarvisGreen else WarningAmber,
+                                shape = RoundedCornerShape(2.dp)
+                            )
+                    )
+                }
+
+                // Step items
+                setupSteps.forEachIndexed { index, step ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Step number circle or checkmark
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (step.isComplete) JarvisGreen.copy(alpha = 0.2f)
+                                    else GlassBorder.copy(alpha = 0.15f)
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (step.isComplete) {
+                                Icon(
+                                    Icons.Filled.Check,
+                                    contentDescription = "Done",
+                                    tint = JarvisGreen,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            } else {
+                                Text(
+                                    "${index + 1}",
+                                    color = TextTertiary,
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                        Icon(
+                            step.icon,
+                            contentDescription = step.label,
+                            tint = if (step.isComplete) JarvisGreen else TextTertiary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            step.label,
+                            color = if (step.isComplete) JarvisGreen else TextSecondary,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+
+                if (allComplete) {
+                    Text(
+                        "All setup steps complete — JARVIS is ready!",
+                        color = JarvisGreen,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+        }
+
+        GradientDivider()
+
+        // ══════════════════════════════════════════════════════════════════════
+        // CONNECTION STATUS — Real-time status of core services with health score
+        // ══════════════════════════════════════════════════════════════════════
+        SectionHeader("CONNECTION STATUS", Icons.Filled.Wifi)
+
+        // ── Animated scan line for connection card ─────────────────────────
+        val connScanTransition = rememberInfiniteTransition(label = "conn-scan")
+        val connScanOffset by connScanTransition.animateFloat(
+            initialValue = -0.3f,
+            targetValue = 1.3f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 4000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "conn-scan-offset"
+        )
+
+        GlassmorphicCardSimple(
+            backgroundColor = if (isRustReady && isShizukuAvailable && isMqttConnected && isAccessibilityEnabled)
+                JarvisGreen.copy(alpha = 0.04f) else SurfaceNavy
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // ── Connection Health Summary ──────────────────────────────
+                val connectedCount = listOf(isShizukuAvailable, isMqttConnected, isAccessibilityEnabled, isRustReady).count { it }
+                val totalCount = 4
+                val healthFraction = connectedCount.toFloat() / totalCount
+                val healthColor = when {
+                    healthFraction >= 0.75f -> JarvisGreen
+                    healthFraction >= 0.5f  -> JarvisCyan
+                    healthFraction >= 0.25f -> WarningAmber
+                    else                    -> JarvisRedPink
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Service Health",
+                        color = TextPrimary,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            "$connectedCount/$totalCount",
+                            color = healthColor,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        // Overall health dot
+                        Box(contentAlignment = Alignment.Center) {
+                            Canvas(modifier = Modifier.size(14.dp)) {
+                                drawCircle(
+                                    color = healthColor.copy(alpha = 0.25f),
+                                    radius = size.minDimension / 2f * (0.8f + healthFraction * 0.6f)
+                                )
+                            }
+                            Canvas(modifier = Modifier.size(8.dp)) {
+                                drawCircle(color = healthColor)
+                            }
+                        }
+                    }
+                }
+
+                // Health progress bar with scan line overlay
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .background(GlassBorder.copy(alpha = 0.2f), shape = RoundedCornerShape(3.dp))
+                ) {
+                    // Filled portion
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(healthFraction)
+                            .background(healthColor, shape = RoundedCornerShape(3.dp))
+                    )
+                    // Animated scan line
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val scanX = connScanOffset * size.width
+                        val sweepWidth = size.width * 0.2f
+                        drawRect(
+                            brush = Brush.horizontalGradient(
+                                colors = listOf(
+                                    Color.White.copy(alpha = 0f),
+                                    Color.White.copy(alpha = 0.15f),
+                                    Color.White.copy(alpha = 0f)
+                                ),
+                                startX = scanX - sweepWidth / 2f,
+                                endX = scanX + sweepWidth / 2f
+                            )
+                        )
+                    }
+                }
+
+                GradientDivider(thickness = 0.5.dp)
+
+                // Shizuku status
+                ConnectionStatusRow(
+                    label = "Shizuku",
+                    status = if (isShizukuAvailable) ConnectionState.CONNECTED else ConnectionState.DISCONNECTED,
+                    icon = Icons.Filled.Usb
+                )
+                // MQTT status
+                ConnectionStatusRow(
+                    label = "MQTT",
+                    status = if (isMqttConnected) ConnectionState.CONNECTED else ConnectionState.DISCONNECTED,
+                    icon = Icons.Filled.Hub
+                )
+                // Accessibility Service status
+                ConnectionStatusRow(
+                    label = "Accessibility",
+                    status = if (isAccessibilityEnabled) ConnectionState.CONNECTED else ConnectionState.DISCONNECTED,
+                    icon = Icons.Filled.AccessibilityNew
+                )
+                // Rust Engine status
+                ConnectionStatusRow(
+                    label = "Rust Engine",
+                    status = if (isRustReady) ConnectionState.CONNECTED else ConnectionState.DISCONNECTED,
+                    icon = Icons.Filled.Memory
+                )
+            }
+        }
+
+        GradientDivider()
 
         // ── 1. API Keys — batch Save & Apply (HOT-SWAP) ────────────────────
         SectionHeader("API KEYS", Icons.Filled.Key)
@@ -1233,3 +1492,41 @@ private fun tfColors() = OutlinedTextFieldDefaults.colors(
     unfocusedContainerColor = Color.Transparent,
     focusedContainerColor   = Color.Transparent
 )
+
+private data class SetupStep(val label: String, val isComplete: Boolean, val icon: ImageVector)
+
+private enum class ConnectionState(val label: String, val color: Color) {
+    CONNECTED("Connected", JarvisGreen),
+    CONNECTING("Connecting", WarningAmber),
+    DISCONNECTED("Disconnected", JarvisRedPink)
+}
+
+@Composable
+private fun ConnectionStatusRow(label: String, status: ConnectionState, icon: ImageVector) {
+    val infiniteTransition = rememberInfiniteTransition(label = "conn-$label")
+    val dotAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = if (status == ConnectionState.CONNECTING) 600 else 2000, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ), label = "conn-dot-$label"
+    )
+    val dotScale by infiniteTransition.animateFloat(
+        initialValue = 0.8f, targetValue = if (status == ConnectionState.CONNECTING) 1.4f else 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = if (status == ConnectionState.CONNECTING) 600 else 2000, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ), label = "conn-scale-$label"
+    )
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(contentAlignment = Alignment.Center) {
+                Canvas(modifier = Modifier.size(14.dp)) { drawCircle(color = status.color.copy(alpha = dotAlpha * 0.3f), radius = size.minDimension / 2f * dotScale) }
+                Canvas(modifier = Modifier.size(8.dp)) { drawCircle(color = status.color.copy(alpha = dotAlpha), radius = size.minDimension / 2f) }
+            }
+            Icon(icon, contentDescription = label, tint = status.color, modifier = Modifier.size(16.dp))
+            Text(label, color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+        }
+        Text(status.label, color = status.color, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+    }
+}

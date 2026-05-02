@@ -10,23 +10,29 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -84,6 +90,19 @@ fun SmartHomeScreen(
     onRefresh: () -> Unit,
     onQuickAction: (String) -> Unit = {},
     onGoToSettings: () -> Unit = {},
+    // MQTT Setup parameters
+    mqttBrokerUrl: String = "",
+    mqttUsername: String = "",
+    mqttPassword: String = "",
+    onMqttBrokerChange: (String) -> Unit = {},
+    onMqttUsernameChange: (String) -> Unit = {},
+    onMqttPasswordChange: (String) -> Unit = {},
+    onMqttConnect: () -> Unit = {},
+    // Home Assistant parameters
+    homeAssistantUrl: String = "",
+    homeAssistantToken: String = "",
+    onHomeAssistantUrlChange: (String) -> Unit = {},
+    onHomeAssistantTokenChange: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedRoom by remember { mutableStateOf("All") }
@@ -339,6 +358,208 @@ fun SmartHomeScreen(
             }
         }
 
+        // ── Setup MQTT Connection Card (when MQTT not connected) ──────────────
+        if (!isConnected) {
+            // Animated pulse for the setup card header
+            val setupPulseTransition = rememberInfiniteTransition(label = "mqtt-setup-pulse")
+            val setupPulseAlpha by setupPulseTransition.animateFloat(
+                initialValue = 0.4f, targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 2000, easing = LinearEasing),
+                    repeatMode = RepeatMode.Reverse
+                ), label = "setup-pulse-alpha"
+            )
+
+            GlassmorphicCardSimple(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                backgroundColor = WarningAmber.copy(alpha = 0.04f),
+                borderColor = WarningAmber.copy(alpha = 0.25f),
+                cornerRadius = 16.dp
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // ── Card Header with animated indicator ──────────────
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Box(contentAlignment = Alignment.Center) {
+                                // Glow ring
+                                Canvas(modifier = Modifier.size(28.dp)) {
+                                    drawCircle(
+                                        color = WarningAmber.copy(alpha = setupPulseAlpha * 0.15f),
+                                        radius = size.minDimension / 2f
+                                    )
+                                }
+                                Icon(Icons.Filled.Hub, contentDescription = "MQTT", tint = WarningAmber, modifier = Modifier.size(20.dp))
+                            }
+                            Column {
+                                Text(
+                                    "Setup MQTT Connection",
+                                    color = TextPrimary,
+                                    fontSize = 14.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    "Not connected",
+                                    color = WarningAmber.copy(alpha = setupPulseAlpha),
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                        // Disconnected badge
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(JarvisRedPink.copy(alpha = 0.15f))
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                "OFFLINE",
+                                color = JarvisRedPink,
+                                fontSize = 8.sp,
+                                fontFamily = FontFamily.Monospace,
+                                letterSpacing = 1.sp
+                            )
+                        }
+                    }
+
+                    Text(
+                        "Enter your MQTT broker details to connect and discover smart home devices.",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 15.sp
+                    )
+
+                    // ── Broker URL Input ────────────────────────────────
+                    OutlinedTextField(
+                        value = mqttBrokerUrl,
+                        onValueChange = onMqttBrokerChange,
+                        label = { Text("Broker URL") },
+                        placeholder = { Text("mqtt://192.168.1.x:1883", color = TextTertiary) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = tfColorsSmartHome(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        leadingIcon = { Icon(Icons.Filled.Hub, null, tint = TextSecondary) }
+                    )
+
+                    // ── Username Input (optional) ──────────────────────
+                    OutlinedTextField(
+                        value = mqttUsername,
+                        onValueChange = onMqttUsernameChange,
+                        label = { Text("Username (optional)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = tfColorsSmartHome(),
+                        leadingIcon = { Icon(Icons.Filled.Person, null, tint = TextSecondary) }
+                    )
+
+                    // ── Password Input (optional) ──────────────────────
+                    OutlinedTextField(
+                        value = mqttPassword,
+                        onValueChange = onMqttPasswordChange,
+                        label = { Text("Password (optional)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = tfColorsSmartHome(),
+                        visualTransformation = PasswordVisualTransformation(),
+                        leadingIcon = { Icon(Icons.Filled.Lock, null, tint = TextSecondary) }
+                    )
+
+                    // ── Connect Button with gradient border ────────────
+                    val connectBorderTransition = rememberInfiniteTransition(label = "connect-border")
+                    val connectBorderShift by connectBorderTransition.animateFloat(
+                        initialValue = 0f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(durationMillis = 3000, easing = LinearEasing),
+                            repeatMode = RepeatMode.Restart
+                        ),
+                        label = "connect-border-shift"
+                    )
+
+                    val connectBorderBrush = Brush.horizontalGradient(
+                        colors = listOf(
+                            JarvisCyan.copy(alpha = 0.5f + connectBorderShift * 0.5f),
+                            JarvisGreen.copy(alpha = 0.3f + connectBorderShift * 0.4f),
+                            JarvisCyan.copy(alpha = 0.5f + (1f - connectBorderShift) * 0.5f)
+                        )
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(connectBorderBrush)
+                            .padding(1.5.dp)
+                    ) {
+                        Button(
+                            onClick = onMqttConnect,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = JarvisCyan,
+                                contentColor = DeepNavy
+                            ),
+                            shape = RoundedCornerShape(7.dp)
+                        ) {
+                            Icon(Icons.Filled.CloudDone, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "CONNECT",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                                letterSpacing = 1.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Home Assistant Configuration Card ────────────────────────────────
+        GlassmorphicCardSimple(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            cornerRadius = 16.dp
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Filled.Home, contentDescription = "Home Assistant", tint = JarvisPurple, modifier = Modifier.size(20.dp))
+                    Text("Home Assistant", color = TextPrimary, fontSize = 14.sp, fontFamily = FontFamily.Monospace)
+                }
+                Text("Connect to your Home Assistant instance for device control.", color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+
+                OutlinedTextField(
+                    value = homeAssistantUrl,
+                    onValueChange = onHomeAssistantUrlChange,
+                    label = { Text("HA Base URL") },
+                    placeholder = { Text("http://homeassistant.local:8123", color = TextTertiary) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = tfColorsSmartHome(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    leadingIcon = { Icon(Icons.Filled.Cloud, null, tint = TextSecondary) }
+                )
+                OutlinedTextField(
+                    value = homeAssistantToken,
+                    onValueChange = onHomeAssistantTokenChange,
+                    label = { Text("Long-Lived Access Token") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = tfColorsSmartHome(),
+                    visualTransformation = PasswordVisualTransformation(),
+                    leadingIcon = { Icon(Icons.Filled.VpnKey, null, tint = TextSecondary) }
+                )
+            }
+        }
+
         // ── Empty State Illustration ─────────────────────────────────
         if (devices.isEmpty()) {
             Box(
@@ -367,7 +588,7 @@ fun SmartHomeScreen(
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Connect to MQTT or Home Assistant\nin Settings to discover devices",
+                        text = "Connect to MQTT or Home Assistant\nto discover devices",
                         style = MaterialTheme.typography.bodySmall.copy(
                             fontFamily = FontFamily.Monospace,
                             color = TextTertiary,
@@ -654,3 +875,18 @@ private fun DeviceCard(
         }
     }
 }
+
+// ─── Text field colors for SmartHome screen ──────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+private fun tfColorsSmartHome() = OutlinedTextFieldDefaults.colors(
+    focusedBorderColor = JarvisCyan,
+    unfocusedBorderColor = GlassBorder,
+    focusedContainerColor = SurfaceNavy,
+    unfocusedContainerColor = SurfaceNavy,
+    focusedTextColor = TextPrimary,
+    unfocusedTextColor = TextPrimary,
+    focusedLabelColor = JarvisCyan,
+    unfocusedLabelColor = TextTertiary,
+    cursorColor = JarvisCyan
+)

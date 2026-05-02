@@ -8,6 +8,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,7 +36,9 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.BatteryStd
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -64,6 +67,7 @@ import com.jarvis.assistant.ui.theme.JarvisGold
 import com.jarvis.assistant.ui.theme.JarvisGreen
 import com.jarvis.assistant.ui.theme.JarvisOrange
 import com.jarvis.assistant.ui.theme.JarvisPurple
+import com.jarvis.assistant.ui.theme.JarvisRedPink
 import com.jarvis.assistant.ui.theme.SuccessGreen
 import com.jarvis.assistant.ui.theme.TextPrimary
 import com.jarvis.assistant.ui.theme.TextSecondary
@@ -71,6 +75,7 @@ import com.jarvis.assistant.ui.theme.TextTertiary
 import com.jarvis.assistant.ui.theme.WarningAmber
 import com.jarvis.assistant.ui.theme.SurfaceNavyLight
 import com.jarvis.assistant.ui.theme.SurfaceGlass
+import com.jarvis.assistant.ui.theme.GlassBorder
 import com.jarvis.assistant.ui.theme.GradientStart
 import com.jarvis.assistant.ui.theme.GradientMid
 import com.jarvis.assistant.ui.theme.GradientEnd
@@ -110,6 +115,10 @@ fun HomeScreen(
     isRustReady: Boolean = false,
     engineStatusText: String = "AI engine starting...",
     locationContext: String = "",
+    batteryLevel: Int = -1,
+    isCharging: Boolean = false,
+    availableMemoryMb: Long = -1L,
+    recentCommands: List<String> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -397,11 +406,23 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(28.dp))
 
             // ══════════════════════════════════════════════════════════════
-            // WEATHER CARD — Animated icon with temperature display
+            // SYSTEM STATUS CARD — Device info (battery, charging, memory)
             // ══════════════════════════════════════════════════════════════
-            WeatherCard()
+            SystemStatusCard(
+                batteryLevel = batteryLevel,
+                isCharging = isCharging,
+                availableMemoryMb = availableMemoryMb
+            )
 
             Spacer(modifier = Modifier.height(12.dp))
+
+            // ══════════════════════════════════════════════════════════════
+            // RECENT VOICE COMMANDS — Last 3 commands from chat history
+            // ══════════════════════════════════════════════════════════════
+            if (recentCommands.isNotEmpty()) {
+                RecentVoiceCommandsCard(recentCommands = recentCommands)
+                Spacer(modifier = Modifier.height(12.dp))
+            }
 
             // ── Daily Brief Card (Featured with golden border) ───────────
             GlassmorphicFeaturedCard(
@@ -708,113 +729,7 @@ private fun AiEngineStatusBar(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// WEATHER CARD — Animated sun icon with temperature display
-// ═══════════════════════════════════════════════════════════════════════════════
 
-@Composable
-private fun WeatherCard() {
-    val infiniteTransition = rememberInfiniteTransition(label = "weather-anim")
-
-    // Rotating sun rays animation
-    val sunRotation by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 20000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "sun-rotation"
-    )
-
-    // Pulsing glow
-    val sunPulse by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 0.7f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "sun-pulse"
-    )
-
-    GlassmorphicCardSimple(
-        modifier = Modifier.fillMaxWidth(),
-        showHighlight = true,
-        highlightColor = JarvisGold.copy(alpha = 0.04f)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Animated sun icon
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier.size(48.dp)
-            ) {
-                // Sun glow
-                Canvas(modifier = Modifier.size(48.dp)) {
-                    drawCircle(
-                        color = JarvisGold.copy(alpha = sunPulse * 0.15f),
-                        radius = size.minDimension / 2f
-                    )
-                }
-                // Sun rays
-                Canvas(modifier = Modifier.size(40.dp)) {
-                    val center = Offset(size.width / 2f, size.height / 2f)
-                    val rayLength = 6.dp.toPx()
-                    val innerRadius = 10.dp.toPx()
-                    for (i in 0..7) {
-                        val angle = Math.toRadians(sunRotation + i * 45.0)
-                        val startX = center.x + innerRadius * kotlin.math.cos(angle).toFloat()
-                        val startY = center.y + innerRadius * kotlin.math.sin(angle).toFloat()
-                        val endX = center.x + (innerRadius + rayLength) * kotlin.math.cos(angle).toFloat()
-                        val endY = center.y + (innerRadius + rayLength) * kotlin.math.sin(angle).toFloat()
-                        drawLine(
-                            color = JarvisGold.copy(alpha = sunPulse),
-                            start = Offset(startX, startY),
-                            end = Offset(endX, endY),
-                            strokeWidth = 2.dp.toPx()
-                        )
-                    }
-                }
-                // Core sun
-                Icon(
-                    imageVector = Icons.Filled.WbSunny,
-                    contentDescription = "Weather",
-                    tint = JarvisGold,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Weather",
-                    style = MaterialTheme.typography.titleSmall.copy(
-                        fontFamily = FontFamily.Monospace,
-                        color = TextPrimary
-                    )
-                )
-                Text(
-                    text = "Tap to check weather",
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        color = TextSecondary
-                    )
-                )
-            }
-            Text(
-                text = "—°",
-                style = MaterialTheme.typography.headlineSmall.copy(
-                    fontFamily = FontFamily.Monospace,
-                    color = JarvisGold.copy(alpha = 0.6f)
-                )
-            )
-        }
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // RECENT CONVERSATIONS — Bubble-style preview entries
@@ -890,6 +805,388 @@ private fun RecentConversationsCard() {
                             color = TextTertiary,
                             fontSize = 9.sp
                         )
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SYSTEM STATUS CARD — Device info with battery, charging, memory
+// ═══════════════════════════════════════════════════════════════════════════════
+
+@Composable
+private fun SystemStatusCard(
+    batteryLevel: Int,
+    isCharging: Boolean,
+    availableMemoryMb: Long
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "sys-status")
+
+    // Pulse for charging indicator
+    val chargePulse by infiniteTransition.animateFloat(
+        initialValue = 0.5f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1500, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ), label = "charge-pulse"
+    )
+
+    // Animated sweep for the status card
+    val statusSweep by infiniteTransition.animateFloat(
+        initialValue = -0.3f, targetValue = 1.3f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 5000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ), label = "status-sweep"
+    )
+
+    // Battery color based on level
+    val batteryColor = when {
+        isCharging -> JarvisGreen
+        batteryLevel > 50 -> JarvisGreen
+        batteryLevel > 20 -> WarningAmber
+        batteryLevel > 0 -> JarvisRedPink
+        else -> TextTertiary
+    }
+
+    // Memory color based on available MB
+    val memColor = when {
+        availableMemoryMb >= 2048 -> JarvisGreen
+        availableMemoryMb >= 1024 -> JarvisCyan
+        availableMemoryMb >= 512 -> WarningAmber
+        availableMemoryMb >= 0 -> JarvisRedPink
+        else -> TextTertiary
+    }
+
+    GlassmorphicCardSimple(
+        modifier = Modifier.fillMaxWidth(),
+        showHighlight = true,
+        highlightColor = batteryColor.copy(alpha = 0.04f)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // ── Card Header ────────────────────────────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "SYSTEM STATUS",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        color = TextTertiary,
+                        letterSpacing = 2.sp,
+                        fontSize = 9.sp
+                    )
+                )
+                // Animated scan indicator
+                Canvas(modifier = Modifier.size(6.dp)) {
+                    drawCircle(
+                        color = JarvisCyan.copy(
+                            alpha = 0.4f + (statusSweep.coerceIn(0f, 1f)) * 0.6f
+                        )
+                    )
+                }
+            }
+
+            // ── Battery Section with Circular Gauge ─────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                // Circular battery gauge
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.size(64.dp)
+                ) {
+                    // Background ring
+                    Canvas(modifier = Modifier.size(64.dp)) {
+                        val strokeWidth = 4.dp.toPx()
+                        val radius = (size.minDimension - strokeWidth) / 2f
+                        drawCircle(
+                            color = GlassBorder.copy(alpha = 0.2f),
+                            radius = radius,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeWidth)
+                        )
+                    }
+                    // Filled arc based on battery level
+                    Canvas(modifier = Modifier.size(64.dp)) {
+                        if (batteryLevel >= 0) {
+                            val strokeWidth = 4.dp.toPx()
+                            val radius = (size.minDimension - strokeWidth) / 2f
+                            val sweepAngle = 360f * (batteryLevel / 100f)
+                            drawArc(
+                                color = batteryColor,
+                                startAngle = -90f,
+                                sweepAngle = sweepAngle,
+                                useCenter = false,
+                                style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                    width = strokeWidth,
+                                    cap = androidx.compose.ui.graphics.StrokeCap.Round
+                                )
+                            )
+                        }
+                    }
+                    // Charging glow pulse
+                    if (isCharging) {
+                        Canvas(modifier = Modifier.size(64.dp)) {
+                            drawCircle(
+                                color = JarvisGreen.copy(alpha = chargePulse * 0.12f),
+                                radius = size.minDimension / 2f
+                            )
+                        }
+                    }
+                    // Center text
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = if (batteryLevel >= 0) "$batteryLevel%" else "—",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontFamily = FontFamily.Monospace,
+                                color = batteryColor,
+                                fontSize = 16.sp
+                            )
+                        )
+                        if (isCharging) {
+                            Icon(
+                                imageVector = Icons.Filled.BatteryChargingFull,
+                                contentDescription = "Charging",
+                                tint = JarvisGreen.copy(alpha = chargePulse),
+                                modifier = Modifier.size(12.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Battery details
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isCharging) Icons.Filled.BatteryChargingFull else Icons.Filled.BatteryStd,
+                            contentDescription = "Battery",
+                            tint = batteryColor,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "Battery",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                color = TextPrimary,
+                                fontSize = 13.sp
+                            )
+                        )
+                    }
+                    Text(
+                        text = if (isCharging) "⚡ Charging" else if (batteryLevel >= 0) "On Battery" else "Status unknown",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = if (isCharging) JarvisGreen else TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    )
+                    // Linear progress bar under details
+                    if (batteryLevel >= 0) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(3.dp)
+                                .background(
+                                    GlassBorder.copy(alpha = 0.2f),
+                                    shape = RoundedCornerShape(2.dp)
+                                )
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(batteryLevel / 100f)
+                                    .background(batteryColor, shape = RoundedCornerShape(2.dp))
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ── Subtle divider with sweep animation ─────────────────────
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    drawRect(
+                        brush = Brush.horizontalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                GlassBorder.copy(alpha = 0.4f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+                    // Animated sweep highlight
+                    val sweepX = statusSweep * size.width
+                    val sweepWidth = size.width * 0.3f
+                    drawRect(
+                        brush = Brush.horizontalGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = 0f),
+                                JarvisCyan.copy(alpha = 0.2f),
+                                Color.White.copy(alpha = 0f)
+                            ),
+                            startX = sweepX - sweepWidth / 2f,
+                            endX = sweepX + sweepWidth / 2f
+                        )
+                    )
+                }
+            }
+
+            // ── Memory Section ──────────────────────────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Memory,
+                    contentDescription = "Memory",
+                    tint = memColor,
+                    modifier = Modifier.size(22.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (availableMemoryMb >= 0) {
+                                if (availableMemoryMb >= 1024) "${availableMemoryMb / 1024} GB free" else "${availableMemoryMb} MB free"
+                            } else "Memory info N/A",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                color = TextPrimary,
+                                fontSize = 13.sp
+                            )
+                        )
+                        if (availableMemoryMb >= 0) {
+                            Text(
+                                text = when {
+                                    availableMemoryMb >= 2048 -> "Good"
+                                    availableMemoryMb >= 1024 -> "OK"
+                                    else -> "Low"
+                                },
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    color = memColor,
+                                    fontSize = 10.sp
+                                )
+                            )
+                        }
+                    }
+                    Text(
+                        text = "Available RAM",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    )
+                    // Memory bar
+                    if (availableMemoryMb >= 0) {
+                        val memFraction = (availableMemoryMb.toFloat() / 4096f).coerceIn(0f, 1f)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(3.dp)
+                                .background(
+                                    GlassBorder.copy(alpha = 0.2f),
+                                    shape = RoundedCornerShape(2.dp)
+                                )
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(memFraction)
+                                    .background(memColor, shape = RoundedCornerShape(2.dp))
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RECENT VOICE COMMANDS — Shows the last 3 commands from chat history
+// ═══════════════════════════════════════════════════════════════════════════════
+
+@Composable
+private fun RecentVoiceCommandsCard(recentCommands: List<String>) {
+    val commandColors = listOf(JarvisCyan, JarvisPurple, JarvisGreen)
+
+    GlassmorphicCardSimple(
+        modifier = Modifier.fillMaxWidth(),
+        showHighlight = true
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Text(
+                "RECENT VOICE COMMANDS",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    color = TextTertiary,
+                    letterSpacing = 2.sp,
+                    fontSize = 9.sp
+                )
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+
+            recentCommands.take(3).forEachIndexed { index, command ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Colored dot indicator
+                    Canvas(modifier = Modifier.size(6.dp)) {
+                        drawCircle(
+                            color = commandColors[index % commandColors.size],
+                            radius = size.minDimension / 2f
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.Filled.Mic,
+                        contentDescription = "Voice command",
+                        tint = commandColors[index % commandColors.size],
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = command,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = TextPrimary,
+                            fontSize = 12.sp
+                        ),
+                        maxLines = 1
                     )
                 }
             }
