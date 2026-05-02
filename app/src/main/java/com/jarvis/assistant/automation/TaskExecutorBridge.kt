@@ -841,24 +841,23 @@ object TaskExecutorBridge {
         val enable = args["enable"]?.toBoolean() ?: return StepResult.Failed("Missing 'enable' argument")
         return try {
             // Try Shizuku first
-            val shizukuResult = com.jarvis.assistant.shizuku.ShizukuManager.executeCommand("svc wifi ${if (enable) "enable" else "disable"}")
-            if (shizukuResult) {
-                Log.i(TAG, "[toggleWifi] WiFi ${if (enable) "enabled" else "disabled"} via Shizuku")
-                StepResult.Success("WiFi ${if (enable) "enabled" else "disabled"} via Shizuku")
-            } else {
-                // Try accessibility service to open WiFi settings
-                val svc = accessibilityService?.get()
-                if (svc != null) {
-                    val intent = Intent(android.provider.Settings.ACTION_WIFI_SETTINGS).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    context.startActivity(intent)
-                    kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(1000) }
-                    svc.autoClick(if (enable) "Wi-Fi" else "Off")
-                    StepResult.Success("Opened WiFi settings — please toggle manually if needed")
-                } else {
-                    StepResult.Failed("Cannot toggle WiFi — enable Shizuku or Accessibility Service")
+            if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+                val shizukuResult = ShizukuManager.executeShellCommand("svc wifi ${if (enable) "enable" else "disable"}")
+                if (shizukuResult.isSuccess) {
+                    Log.i(TAG, "[toggleWifi] WiFi ${if (enable) "enabled" else "disabled"} via Shizuku")
+                    return StepResult.Success("WiFi ${if (enable) "enabled" else "disabled"} via Shizuku")
                 }
+            }
+            // Fallback: Open WiFi settings via accessibility
+            val svc = accessibilityService?.get()
+            if (svc != null) {
+                val intent = Intent(android.provider.Settings.ACTION_WIFI_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                StepResult.Success("Opened WiFi settings — please toggle manually if needed")
+            } else {
+                StepResult.Failed("Cannot toggle WiFi — enable Shizuku or Accessibility Service")
             }
         } catch (e: Exception) {
             StepResult.Failed("Failed to toggle WiFi: ${e.message}")
@@ -868,16 +867,18 @@ object TaskExecutorBridge {
     private fun executeToggleBluetooth(args: Map<String, String>, context: Context): StepResult {
         val enable = args["enable"]?.toBoolean() ?: return StepResult.Failed("Missing 'enable' argument")
         return try {
-            val shizukuResult = com.jarvis.assistant.shizuku.ShizukuManager.executeCommand("svc bluetooth ${if (enable) "enable" else "disable"}")
-            if (shizukuResult) {
-                StepResult.Success("Bluetooth ${if (enable) "enabled" else "disabled"} via Shizuku")
-            } else {
-                val intent = Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+                val shizukuResult = ShizukuManager.executeShellCommand("svc bluetooth ${if (enable) "enable" else "disable"}")
+                if (shizukuResult.isSuccess) {
+                    return StepResult.Success("Bluetooth ${if (enable) "enabled" else "disabled"} via Shizuku")
                 }
-                context.startActivity(intent)
-                StepResult.Success("Opened Bluetooth settings — please toggle manually if needed")
             }
+            // Fallback: Open Bluetooth settings
+            val intent = Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            StepResult.Success("Opened Bluetooth settings — please toggle manually if needed")
         } catch (e: Exception) {
             StepResult.Failed("Failed to toggle Bluetooth: ${e.message}")
         }
