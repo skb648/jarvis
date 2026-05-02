@@ -179,6 +179,13 @@ class MainActivity : ComponentActivity() {
                     "capture"  -> viewModel.sendMessage("capture and describe what you see", context)
                     "chat"     -> { /* handled by NavGraph navigation */ }
                     "devices"  -> { /* handled by NavGraph navigation */ }
+                    "notes"    -> { /* handled by NavGraph navigation */ }
+                    "music"    -> viewModel.showMusic()
+                    "weather"  -> viewModel.sendMessage("What's the weather like today?", context)
+                    "battery"  -> viewModel.sendMessage("How's my battery and device status?", context)
+                    "alarm"    -> viewModel.sendMessage("Set an alarm", context)
+                    "search"   -> viewModel.sendMessage("What do you want me to search for?", context)
+                    else       -> viewModel.sendMessage(action, context)
                 }
             },
             onGeminiApiKeyChange = { viewModel.setGeminiApiKey(it) },
@@ -224,7 +231,7 @@ class MainActivity : ComponentActivity() {
             locationContext = viewModel.locationContext.value,
             // Wake flash effect
             wakeFlash = wakeFlash,
-            // Voice direction for snake game
+            // Voice direction (reserved for future use)
             voiceDirection = voiceDirection,
             // Diagnostics state
             diagnosticsBatteryLevel = viewModel.deviceBatteryLevel.value,
@@ -242,7 +249,16 @@ class MainActivity : ComponentActivity() {
             onToggleMusicPlayer = { viewModel.toggleMusicPlayer() },
             onToggleMusicPlayback = { viewModel.toggleMusicPlayback() },
             // Export chat
-            onExportChat = { viewModel.exportChat(context) }
+            onExportChat = { viewModel.exportChat(context) },
+            // Computer Use (AI Mouse Cursor Control)
+            computerUseActive = viewModel.computerUseActive.collectAsState().value,
+            cursorX = viewModel.cursorX.collectAsState().value,
+            cursorY = viewModel.cursorY.collectAsState().value,
+            computerAiStatus = viewModel.computerAiStatus.collectAsState().value,
+            computerActionLog = viewModel.computerActionLog.collectAsState().value,
+            onComputerCommand = { cmd -> viewModel.processComputerCommand(cmd, context) },
+            onActivateComputerUse = { viewModel.activateComputerUse() },
+            onDeactivateComputerUse = { viewModel.deactivateComputerUse() }
         )
     }
 

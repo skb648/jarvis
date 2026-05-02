@@ -43,9 +43,14 @@ data class QuickNote(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun QuickNotesScreen(
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    notes: List<QuickNote> = emptyList(),
+    onAddNote: (String, String) -> Unit = { _, _ -> },
+    onDeleteNote: (String) -> Unit = {}
 ) {
-    var notes by remember { mutableStateOf(listOf<QuickNote>()) }
+    var internalNotes by remember { mutableStateOf(listOf<QuickNote>()) }
+    // Use external notes when provided, otherwise fall back to internal state
+    val displayNotes = if (notes.isNotEmpty()) notes else internalNotes
     var showCreateDialog by remember { mutableStateOf(false) }
     var expandedNoteId by remember { mutableStateOf<String?>(null) }
 
@@ -72,7 +77,7 @@ fun QuickNotesScreen(
                     )
                 )
                 Text(
-                    text = "${notes.size} note${if (notes.size != 1) "s" else ""}",
+                    text = "${displayNotes.size} note${if (displayNotes.size != 1) "s" else ""}",
                     style = MaterialTheme.typography.bodySmall.copy(
                         fontFamily = FontFamily.Monospace,
                         color = TextTertiary
@@ -124,7 +129,7 @@ fun QuickNotesScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         // ── Notes List or Empty State ──────────────────────────────────────
-        if (notes.isEmpty()) {
+        if (displayNotes.isEmpty()) {
             // Empty state with pulsing icon
             Box(
                 modifier = Modifier
@@ -189,7 +194,7 @@ fun QuickNotesScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(bottom = 80.dp)
             ) {
-                items(items = notes, key = { it.id }) { note ->
+                items(items = displayNotes, key = { it.id }) { note ->
                     NoteCard(
                         note = note,
                         isExpanded = expandedNoteId == note.id,
@@ -197,7 +202,8 @@ fun QuickNotesScreen(
                             expandedNoteId = if (expandedNoteId == note.id) null else note.id
                         },
                         onLongPress = {
-                            notes = notes.filterNot { it.id == note.id }
+                            onDeleteNote(note.id)
+                            internalNotes = internalNotes.filterNot { it.id == note.id }
                         }
                     )
                 }
@@ -210,7 +216,8 @@ fun QuickNotesScreen(
         NoteCreateDialog(
             onDismiss = { showCreateDialog = false },
             onSave = { title, content, colorTag ->
-                notes = notes + QuickNote(
+                onAddNote(title, content)
+                internalNotes = internalNotes + QuickNote(
                     title = title,
                     content = content,
                     colorTag = colorTag

@@ -40,6 +40,9 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatteryStd
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.StickyNote2
+import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -295,7 +298,11 @@ fun HomeScreen(
                 QuickAction("Voice", Icons.Filled.Mic, "Start voice command", JarvisCyan),
                 QuickAction("Capture", Icons.Filled.PhotoCamera, "Capture screen", JarvisPurple),
                 QuickAction("Chat", Icons.AutoMirrored.Filled.Chat, "Open conversation", JarvisGreen),
-                QuickAction("Devices", Icons.Filled.Devices, "Smart home", WarningAmber)
+                QuickAction("Devices", Icons.Filled.Devices, "Smart home", WarningAmber),
+                QuickAction("Notes", Icons.Filled.StickyNote2, "Quick notes", JarvisOrange),
+                QuickAction("Music", Icons.Filled.MusicNote, "Play music", JarvisRedPink),
+                QuickAction("Weather", Icons.Filled.WbSunny, "Weather update", JarvisGold),
+                QuickAction("Battery", Icons.Filled.BatteryStd, "Device status", SuccessGreen)
             )
 
             // Shimmer animation offset

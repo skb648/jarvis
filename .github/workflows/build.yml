@@ -78,7 +78,8 @@ jobs:
 
     # ─── Build Rust native libraries ──────────────────────────────
     # Build Rust .so files BEFORE Gradle so they get packaged.
-    # If Rust build fails, we continue — the CMake stub provides fallback.
+    # continue-on-error allows the APK to still build with the CMake stub fallback,
+    # but a separate step will fail the job on main branch if Rust build fails.
     - name: Build Rust native libraries (arm64-v8a + armeabi-v7a)
       id: rust_build
       continue-on-error: true
@@ -97,6 +98,7 @@ jobs:
       env:
         ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        CI: "true"
 
     - name: Verify Rust build output
       if: steps.rust_build.outcome == 'success' && steps.rust_build.outputs.rust_build_failed != 'true'
@@ -118,6 +120,12 @@ jobs:
       if: steps.rust_build.outputs.rust_build_failed == 'true'
       run: |
         echo "::warning::Rust native build failed. The APK will be built with the CMake stub (JNI no-op fallback). Native AI features will not work — app will use Kotlin HTTP fallback."
+
+    - name: Fail on Rust build failure (main branch)
+      if: steps.rust_build.outputs.rust_build_failed == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        echo "::error::Rust native build failed on main branch. This must be fixed before merging. The APK will use the CMake stub (JNI no-op fallback) but native AI features will not work."
+        exit 1
 
     # ─── Ensure jniLibs directories exist ─────────────────────────
     - name: Ensure jniLibs directories exist

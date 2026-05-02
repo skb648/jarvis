@@ -591,21 +591,69 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         }
     }
 
-    // ─── Voice Direction for Snake Game ────────────────────────────────────
-    // Updated by voice commands processed through CommandRouter
+    // ─── Voice Direction (reserved for future use) ──────────────────────────
     private val _voiceDirection = MutableStateFlow("")
     val voiceDirection: StateFlow<String> = _voiceDirection.asStateFlow()
 
-    /** Update voice direction for snake game control */
+    /** Update voice direction */
     fun setVoiceDirection(direction: String) {
         _voiceDirection.value = direction
-        // Auto-clear after 500ms so the snake doesn't keep moving in that direction
         viewModelScope.launch {
             delay(500)
             if (_voiceDirection.value == direction) {
                 _voiceDirection.value = ""
             }
         }
+    }
+
+    // ─── Computer Use State (AI Mouse Cursor Control) ────────────────────
+    private val _computerUseActive = MutableStateFlow(false)
+    val computerUseActive: StateFlow<Boolean> = _computerUseActive.asStateFlow()
+
+    private val _cursorX = MutableStateFlow(0.5f)
+    val cursorX: StateFlow<Float> = _cursorX.asStateFlow()
+
+    private val _cursorY = MutableStateFlow(0.5f)
+    val cursorY: StateFlow<Float> = _cursorY.asStateFlow()
+
+    private val _computerAiStatus = MutableStateFlow("IDLE")
+    val computerAiStatus: StateFlow<String> = _computerAiStatus.asStateFlow()
+
+    private val _computerActionLog = MutableStateFlow<List<String>>(emptyList())
+    val computerActionLog: StateFlow<List<String>> = _computerActionLog.asStateFlow()
+
+    /** Activate AI Computer Use mode */
+    fun activateComputerUse() {
+        _computerUseActive.value = true
+        _computerAiStatus.value = "SEEING"
+        addComputerAction("AI Computer Use activated — analyzing screen")
+    }
+
+    /** Deactivate AI Computer Use mode */
+    fun deactivateComputerUse() {
+        _computerUseActive.value = false
+        _computerAiStatus.value = "IDLE"
+        addComputerAction("AI Computer Use deactivated")
+    }
+
+    /** Move AI cursor to normalized position (0..1, 0..1) */
+    fun moveCursor(x: Float, y: Float) {
+        _cursorX.value = x.coerceIn(0f, 1f)
+        _cursorY.value = y.coerceIn(0f, 1f)
+    }
+
+    /** Process a Computer Use command */
+    fun processComputerCommand(command: String, context: Context) {
+        addComputerAction("Command: $command")
+        _computerAiStatus.value = "SEEING"
+        // Route through processQuery so the AI can use dispatch_gesture, click_ui_element, etc.
+        processQuery(command, context)
+    }
+
+    /** Add an action to the Computer Use log */
+    private fun addComputerAction(action: String) {
+        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(System.currentTimeMillis())
+        _computerActionLog.value = listOf("[$timestamp] $action") + _computerActionLog.value.take(49)
     }
 
     // ─── Quick Notes State ────────────────────────────────────────────────
@@ -701,7 +749,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         _engineStatusText.value = if (_isRustReady.value) {
             "AI engine operational · Rust native"
         } else {
-            "AI engine operational · Kotlin HTTP (Gemini direct)"
+            "AI engine operational · Gemini Cloud"
         }
     }
 
@@ -2071,44 +2119,54 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             }
 
             // ═══════════════════════════════════════════════════════════════════
-            // FALLBACK: Normal AI Query Pipeline (Rust → Gemini Direct)
-            // Used when Function Calling is unavailable or fails
+            // FALLBACK: AI Query Pipeline
+            // Priority: Rust (fast, native) → Gemini Direct (HTTP)
+            //
+            // CRITICAL FIX (v15): When Rust native is NOT ready, do NOT
+            // show the "[ERROR] Native library not ready" message to the
+            // user. Instead, silently skip Rust and go straight to
+            // processQueryViaGeminiDirect which works perfectly fine
+            // without native code. The user should NEVER see an error
+            // about the native library — it's an implementation detail.
             // ═══════════════════════════════════════════════════════════════════
-            Log.d(AUDIO_TAG, "[handleAIQuery] Using standard pipeline — Calling RustBridge.processQuery")
-            var rawResponse = withContext(Dispatchers.IO) {
-                if (RustBridge.isNativeReady()) {
+            var rawResponse = ""
+
+            if (RustBridge.isNativeReady()) {
+                // Rust IS available — use it for faster native AI processing
+                Log.d(AUDIO_TAG, "[handleAIQuery] Rust native ready — using RustBridge.processQuery")
+                rawResponse = withContext(Dispatchers.IO) {
                     try {
                         RustBridge.processQuery(query, screenContext, historyJson, JARVIS_SYSTEM_PROMPT)
                     } catch (e: Exception) {
                         Log.e(TAG, "[handleAIQuery] JNI processQuery failed", e)
-                        "[ERROR] AI processing failed: ${e.message?.take(200) ?: "Unknown"}"
+                        "" // Empty = try Gemini direct next
                     }
-                } else {
-                    Log.w(AUDIO_TAG, "[handleAIQuery] Rust not ready — skipping JNI, using direct Gemini fallback")
-                    "[ERROR] Native library not ready. Using direct Gemini fallback."
                 }
             }
-            Log.d(AUDIO_TAG, "[handleAIQuery] Raw response length=${rawResponse.length}")
 
-            val isRustError = rawResponse.startsWith("[ERROR]") ||
+            // If Rust didn't produce a valid response, use Gemini Direct HTTP
+            val needsGeminiDirect = rawResponse.isBlank() ||
+                    rawResponse.startsWith("[ERROR]") ||
                     rawResponse.startsWith("ERROR:") ||
                     rawResponse.contains("Native library not loaded") ||
                     rawResponse.contains("Native library not ready")
 
-            if (isRustError && _geminiApiKey.value.isNotBlank()) {
-                Log.w(AUDIO_TAG, "[handleAIQuery] Rust failed, falling back to processQueryViaGeminiDirect")
+            if (needsGeminiDirect && _geminiApiKey.value.isNotBlank()) {
+                Log.d(AUDIO_TAG, "[handleAIQuery] Using Gemini Direct HTTP fallback")
                 val directResponse = withContext(Dispatchers.IO) {
                     processQueryViaGeminiDirect(query, enhancedHistoryJson)
                 }
                 if (directResponse.isNotBlank() && !directResponse.startsWith("[ERROR]")) {
                     rawResponse = directResponse
-                    Log.i(AUDIO_TAG, "[handleAIQuery] Gemini direct fallback succeeded, length=${directResponse.length}")
+                    Log.i(AUDIO_TAG, "[handleAIQuery] Gemini Direct succeeded, length=${directResponse.length}")
                 } else {
-                    Log.w(AUDIO_TAG, "[handleAIQuery] Gemini direct fallback also failed: $directResponse")
-                    if (rawResponse.isBlank() || rawResponse == "[ERROR]") {
-                        rawResponse = directResponse.ifBlank { "[ERROR] Gemini API is not responding. Check your API key and internet connection." }
+                    Log.w(AUDIO_TAG, "[handleAIQuery] Gemini Direct also failed: $directResponse")
+                    if (rawResponse.isBlank() || rawResponse.startsWith("[ERROR]")) {
+                        rawResponse = directResponse.ifBlank { "[ERROR] Gemini API is not responding. Please check your API key and internet connection in Settings." }
                     }
                 }
+            } else if (rawResponse.isBlank()) {
+                rawResponse = "[ERROR] No AI engine available. Please set your Gemini API key in Settings."
             }
 
             val parsed  = parseErrorResponse(rawResponse)
@@ -2171,9 +2229,15 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
 
     // ═══════════════════════════════════════════════════════════════════════
     // GEMINI DIRECT (Kotlin HTTP fallback — no Rust required)
+    //
+    // v15 UPGRADE: Now uses GeminiApiClient (OkHttp + retry + model fallback)
+    // instead of raw HttpURLConnection. This fixes:
+    //   - Thread.sleep() ANR risk → replaced with suspend delay()
+    //   - No retry on network errors → GeminiApiClient handles retries
+    //   - No model fallback on 404 → GeminiApiClient tries all models
+    //   - Connection pooling → OkHttp handles this automatically
     // ═══════════════════════════════════════════════════════════════════════
-
-    private fun processQueryViaGeminiDirect(query: String, historyJson: String): String {
+    private suspend fun processQueryViaGeminiDirect(query: String, historyJson: String): String {
         try {
             val apiKey = _geminiApiKey.value
             if (apiKey.isBlank()) {
@@ -2224,87 +2288,48 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 })
             }.toString()
 
-            // A2: Try multiple models with retry
-            var lastError = ""
-            for (model in GEMINI_MODELS) {
-                var connection: HttpURLConnection? = null
-                val maxRetriesPerModel = 2
-                for (retry in 0..maxRetriesPerModel) {
-                    try {
-                        val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}")
-                        connection = url.openConnection() as HttpURLConnection
-                        connection.requestMethod = "POST"
-                        connection.setRequestProperty("Content-Type", "application/json")
-                        connection.doOutput = true
-                        connection.connectTimeout = 15_000
-                        connection.readTimeout = 60_000
+            // v15: Use GeminiApiClient with OkHttp, retry, and model fallback
+            val result = com.jarvis.assistant.network.GeminiApiClient.postWithRetry(
+                requestBody = requestBody,
+                apiKey = apiKey.trim(),
+                maxRetries = 3
+            )
 
-                        connection.outputStream.use { os ->
-                            os.write(requestBody.toByteArray(Charsets.UTF_8))
-                        }
-
-                        val responseCode = connection.responseCode
-                        if (responseCode != HttpURLConnection.HTTP_OK) {
-                            val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                            Log.e(TAG, "[processQueryViaGeminiDirect] Model $model error $responseCode: ${errorBody.take(500)}")
-                            lastError = "Model $model: HTTP $responseCode — ${errorBody.take(200)}"
-
-                            // Retry on 503/429
-                            if ((responseCode == 503 || responseCode == 429) && retry < maxRetriesPerModel) {
-                                val delayMs = if (responseCode == 429) 2000L * (1L shl retry) else 1000L * (1L shl retry)
-                                Log.w(TAG, "[processQueryViaGeminiDirect] Retrying model $model in ${delayMs}ms due to HTTP $responseCode...")
-                                connection.disconnect()
-                                connection = null
-                                Thread.sleep(delayMs)
-                                continue
-                            }
-
-                            connection.disconnect()
-                            connection = null
-                            break // Non-retryable, try next model
-                        }
-
-                        val responseBody = connection.inputStream.bufferedReader().readText()
-                        connection.disconnect()
-                        connection = null
-
-                        val responseText = try {
-                            val root = JsonParser.parseString(responseBody).asJsonObject
-                            val candidates = root.getAsJsonArray("candidates")
-                            val firstCandidate = candidates?.firstOrNull()?.asJsonObject
-                            val content = firstCandidate?.getAsJsonObject("content")
-                            val parts = content?.getAsJsonArray("parts")
-                            val firstPart = parts?.firstOrNull()?.asJsonObject
-                            firstPart?.get("text")?.asString ?: ""
-                        } catch (e: Exception) {
-                            Log.e(TAG, "[processQueryViaGeminiDirect] JSON parsing failed: ${e.message}")
-                            ""
-                        }
-
-                        return if (responseText.isNotBlank()) {
-                            Log.i(TAG, "[processQueryViaGeminiDirect] Model $model response: \"${responseText.take(100)}...\"")
-                            responseText
-                        } else {
-                            Log.w(TAG, "[processQueryViaGeminiDirect] Model $model returned empty response")
-                            ""
-                        }
+            return when (result) {
+                is com.jarvis.assistant.network.GeminiApiClient.ApiResult.Success -> {
+                    val responseText = try {
+                        val root = JsonParser.parseString(result.responseBody).asJsonObject
+                        val candidates = root.getAsJsonArray("candidates")
+                        val firstCandidate = candidates?.firstOrNull()?.asJsonObject
+                        val content = firstCandidate?.getAsJsonObject("content")
+                        val parts = content?.getAsJsonArray("parts")
+                        val firstPart = parts?.firstOrNull()?.asJsonObject
+                        firstPart?.get("text")?.asString ?: ""
                     } catch (e: Exception) {
-                        lastError = "Model $model exception: ${e.message}"
-                        Log.e(TAG, "[processQueryViaGeminiDirect] $lastError")
-                        try { connection?.disconnect() } catch (_: Exception) {}
-                        connection = null
-                        if (retry < maxRetriesPerModel) {
-                            Thread.sleep(1000L * (1L shl retry))
-                            continue
-                        }
+                        Log.e(TAG, "[processQueryViaGeminiDirect] JSON parsing failed: ${e.message}")
+                        ""
+                    }
+
+                    if (responseText.isNotBlank()) {
+                        Log.i(TAG, "[processQueryViaGeminiDirect] Model ${result.model} response: \"${responseText.take(100)}...\"")
+                        responseText
+                    } else {
+                        Log.w(TAG, "[processQueryViaGeminiDirect] Model ${result.model} returned empty response")
+                        "[ERROR] Gemini returned an empty response. Please try again."
                     }
                 }
+                is com.jarvis.assistant.network.GeminiApiClient.ApiResult.HttpError -> {
+                    Log.e(TAG, "[processQueryViaGeminiDirect] HTTP error: ${result.code} — ${result.message}")
+                    "[ERROR] Gemini API error: ${result.message}"
+                }
+                is com.jarvis.assistant.network.GeminiApiClient.ApiResult.NetworkError -> {
+                    Log.e(TAG, "[processQueryViaGeminiDirect] Network error: ${result.message}")
+                    "[ERROR] Network error: ${result.message}"
+                }
             }
-
-            return "[ERROR] All Gemini models failed. Last error: $lastError"
         } catch (e: Exception) {
             Log.e(TAG, "[processQueryViaGeminiDirect] Exception: ${e.message}", e)
-            return "[ERROR] Query processing failed: ${e.message}"
+            return "[ERROR] Query processing failed: ${e.message?.take(200)}"
         }
     }
 

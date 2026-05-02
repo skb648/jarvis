@@ -39,7 +39,7 @@ private val tabs = listOf(
     BottomNavTab("chat",        "Chat",       Icons.AutoMirrored.Filled.Chat),
     BottomNavTab("smarthome",   "Devices",    Icons.Filled.Devices),
     BottomNavTab("notes",       "Notes",      Icons.Filled.StickyNote2),
-    BottomNavTab("snake",       "Snake",      Icons.Filled.VideogameAsset),
+    BottomNavTab("computer",   "Computer",   Icons.Filled.Computer),
     BottomNavTab("diagnostics", "Diag",       Icons.Filled.MonitorHeart),
     BottomNavTab("settings",    "Settings",   Icons.Filled.Settings)
 )
@@ -124,7 +124,7 @@ fun JarvisNavGraph(
     locationContext: String = "",
     // Wake flash effect
     wakeFlash: Boolean = false,
-    // Voice direction for snake game
+    // Voice direction (reserved for future use)
     voiceDirection: String = "",
     // Diagnostics state
     diagnosticsBatteryLevel: Int = 0,
@@ -142,7 +142,16 @@ fun JarvisNavGraph(
     onToggleMusicPlayer: () -> Unit = {},
     onToggleMusicPlayback: () -> Unit = {},
     // Export chat callback
-    onExportChat: () -> Unit = {}
+    onExportChat: () -> Unit = {},
+    // Computer Use state
+    computerUseActive: Boolean = false,
+    cursorX: Float = 0.5f,
+    cursorY: Float = 0.5f,
+    computerAiStatus: String = "IDLE",
+    computerActionLog: List<String> = emptyList(),
+    onComputerCommand: (String) -> Unit = {},
+    onActivateComputerUse: () -> Unit = {},
+    onDeactivateComputerUse: () -> Unit = {}
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -314,11 +323,22 @@ fun JarvisNavGraph(
                 )
             }
             composable("notes") {
-                QuickNotesScreen()
+                QuickNotesScreen(
+                    notes = notes,
+                    onAddNote = onAddNote,
+                    onDeleteNote = onDeleteNote
+                )
             }
-            composable("snake") {
-                SnakeGameScreen(
-                    onVoiceDirection = null
+            composable("computer") {
+                ComputerUseScreen(
+                    isAiActive = computerUseActive,
+                    cursorX = cursorX,
+                    cursorY = cursorY,
+                    aiStatus = computerAiStatus,
+                    actionLog = computerActionLog,
+                    onCommand = onComputerCommand,
+                    onTakeControl = onActivateComputerUse,
+                    onStop = onDeactivateComputerUse
                 )
             }
             composable("diagnostics") {

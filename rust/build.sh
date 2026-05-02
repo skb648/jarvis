@@ -35,6 +35,16 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 JNILIBS_DIR="$PROJECT_ROOT/app/src/main/jniLibs"
 RUST_DIR="$SCRIPT_DIR"
 
+# Detect CI environment
+CI_MODE="${CI:-false}"
+if [ "$CI_MODE" = "true" ]; then
+    echo "[JARVIS] Running in CI mode"
+    # In CI, ensure Cargo.lock is respected for reproducible builds
+    CARGO_LOCKED="--locked"
+else
+    CARGO_LOCKED=""
+fi
+
 # ANSI colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -263,11 +273,23 @@ build_abi() {
         cargo_args+=(build)
     fi
 
+    # In CI, use --locked to ensure Cargo.lock is respected
+    if [ -n "$CARGO_LOCKED" ]; then
+        cargo_args+=("$CARGO_LOCKED")
+    fi
+
     log_info "Running: cargo ${cargo_args[*]}"
 
     # Execute cargo-ndk
     if ! cargo "${cargo_args[@]}" 2>&1; then
         log_err "cargo-ndk build failed for $abi"
+        if [ "$CI_MODE" = "true" ]; then
+            log_err "CI build failed — dumping cargo config info:"
+            rustup show active-toolchain 2>/dev/null || true
+            rustup target list --installed 2>/dev/null | grep android || true
+            echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-unset}"
+            echo "NDK_HOME=${NDK_HOME:-unset}"
+        fi
         return 1
     fi
 

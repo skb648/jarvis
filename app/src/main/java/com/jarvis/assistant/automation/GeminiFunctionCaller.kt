@@ -5,10 +5,6 @@ import android.util.Base64
 import android.util.Log
 import com.google.gson.JsonParser
 import com.jarvis.assistant.channels.JarviewModel
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * GeminiFunctionCaller — Handles Gemini's Function Calling / Tool Use responses.
@@ -818,66 +814,26 @@ IMPORTANT RULES:
      * 429 (Rate Limited) errors. Max 3 retries with 1s, 2s, 4s delays.
      */
     private suspend fun sendToGemini(requestBody: String, apiKey: String): GeminiResponse {
-        return withContext(Dispatchers.IO) {
-            val maxRetries = 3
-            var lastError: GeminiResponse.Error? = null
+        // v15: Use centralized GeminiApiClient for OkHttp + retry + model fallback
+        val result = com.jarvis.assistant.network.GeminiApiClient.postWithRetry(
+            requestBody = requestBody,
+            apiKey = apiKey.trim(),
+            preferredModel = MODEL,
+            maxRetries = 3
+        )
 
-            for (attempt in 0..maxRetries) {
-                try {
-                    val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=${apiKey.trim()}")
-                    val connection = url.openConnection() as HttpURLConnection
-                    connection.requestMethod = "POST"
-                    connection.setRequestProperty("Content-Type", "application/json")
-                    connection.doOutput = true
-                    connection.connectTimeout = 15_000
-                    connection.readTimeout = 60_000
-
-                    connection.outputStream.use { os ->
-                        os.write(requestBody.toByteArray(Charsets.UTF_8))
-                    }
-
-                    val responseCode = connection.responseCode
-                    if (responseCode != HttpURLConnection.HTTP_OK) {
-                        val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                        Log.e(TAG, "[sendToGemini] HTTP $responseCode (attempt ${attempt + 1}/${maxRetries + 1}): ${errorBody.take(500)}")
-                        connection.disconnect()
-
-                        // Retry on 503 (Service Unavailable) or 429 (Rate Limited)
-                        if ((responseCode == 503 || responseCode == 429) && attempt < maxRetries) {
-                            val delayMs = if (responseCode == 429) {
-                                // Rate limited: wait longer (2s, 4s, 8s)
-                                (2000L * (1L shl attempt))
-                            } else {
-                                // Service unavailable: standard backoff (1s, 2s, 4s)
-                                (1000L * (1L shl attempt))
-                            }
-                            Log.w(TAG, "[sendToGemini] Retrying in ${delayMs}ms due to HTTP $responseCode...")
-                            kotlinx.coroutines.delay(delayMs)
-                            lastError = GeminiResponse.Error("Gemini API error: HTTP $responseCode (retrying...)")
-                            continue
-                        }
-
-                        return@withContext GeminiResponse.Error("Gemini API error: HTTP $responseCode — ${errorBody.take(200)}")
-                    }
-
-                    val responseBody = connection.inputStream.bufferedReader().readText()
-                    connection.disconnect()
-
-                    return@withContext parseGeminiResponse(responseBody)
-                } catch (e: Exception) {
-                    Log.e(TAG, "[sendToGemini] Exception (attempt ${attempt + 1}/${maxRetries + 1}): ${e.message}")
-                    if (attempt < maxRetries) {
-                        val delayMs = 1000L * (1L shl attempt)
-                        kotlinx.coroutines.delay(delayMs)
-                        lastError = GeminiResponse.Error("Network error: ${e.message?.take(100)} (retrying...)")
-                        continue
-                    }
-                    return@withContext GeminiResponse.Error("Network error: ${e.message?.take(100)}")
-                }
+        return when (result) {
+            is com.jarvis.assistant.network.GeminiApiClient.ApiResult.Success -> {
+                parseGeminiResponse(result.responseBody)
             }
-
-            // All retries exhausted
-            lastError ?: GeminiResponse.Error("All retries exhausted")
+            is com.jarvis.assistant.network.GeminiApiClient.ApiResult.HttpError -> {
+                Log.e(TAG, "[sendToGemini] HTTP error: ${result.code} — ${result.message}")
+                GeminiResponse.Error("Gemini API error: ${result.message}")
+            }
+            is com.jarvis.assistant.network.GeminiApiClient.ApiResult.NetworkError -> {
+                Log.e(TAG, "[sendToGemini] Network error: ${result.message}")
+                GeminiResponse.Error("Network error: ${result.message}")
+            }
         }
     }
 
