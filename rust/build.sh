@@ -259,18 +259,21 @@ build_abi() {
     mkdir -p "$abi_output_dir"
 
     # Build with cargo-ndk
+    # CRITICAL FIX: --manifest-path is a CARGO option, not a cargo-ndk option.
+    # It MUST be placed AFTER the 'build' subcommand, not before it.
+    # When placed before 'build', cargo-ndk tries to interpret it as its own
+    # flag and fails with "could not find Cargo.toml" errors.
     local cargo_args=(
         ndk
         -t "$target"
         -o "$JNILIBS_DIR"
-        --manifest-path "$RUST_DIR/Cargo.toml"
         --platform "$API_LEVEL"
     )
 
     if [ "$build_type" = "release" ]; then
-        cargo_args+=(build --release)
+        cargo_args+=(build --release --manifest-path "$RUST_DIR/Cargo.toml")
     else
-        cargo_args+=(build)
+        cargo_args+=(build --manifest-path "$RUST_DIR/Cargo.toml")
     fi
 
     # In CI, use --locked to ensure Cargo.lock is respected
