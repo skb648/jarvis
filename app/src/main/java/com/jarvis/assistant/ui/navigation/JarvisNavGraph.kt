@@ -135,7 +135,7 @@ fun JarvisNavGraph(
     // Quick Notes state
     notes: List<QuickNote> = emptyList(),
     onAddNote: (String, String) -> Unit = { _, _ -> },
-    onDeleteNote: (Long) -> Unit = {},
+    onDeleteNote: (String) -> Unit = {},
     // Music Player state
     showMusicPlayer: Boolean = false,
     isMusicPlaying: Boolean = false,

@@ -29,6 +29,10 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.Face
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -1407,7 +1411,7 @@ private fun QuickActionsRow(onSendMessage: (String) -> Unit) {
         "What time is it?" to Icons.Filled.Schedule,
         "Set timer" to Icons.Filled.Timer,
         "Take screenshot" to Icons.Filled.PhotoCamera,
-        "Tell me a joke" to Icons.Filled.EmojiEmotions
+        "Tell me a joke" to Icons.Filled.Face
     )
 
     LazyRow(

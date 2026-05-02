@@ -47,7 +47,12 @@ import com.jarvis.assistant.ui.screens.ChatMessage
 import com.jarvis.assistant.ui.screens.DeviceType
 import com.jarvis.assistant.ui.screens.SmartDevice
 import com.jarvis.assistant.ui.screens.QuickNote
-import com.jarvis.assistant.ui.screens.NoteColorTag
+import androidx.compose.ui.graphics.Color
+import com.jarvis.assistant.ui.theme.JarvisCyan
+import com.jarvis.assistant.ui.theme.JarvisPurple
+import com.jarvis.assistant.ui.theme.JarvisGreen
+import com.jarvis.assistant.ui.theme.WarningAmber
+import com.jarvis.assistant.ui.theme.JarvisRedPink
 import com.jarvis.assistant.vision.VisionManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -609,19 +614,20 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
 
     /** Add a new quick note */
     fun addNote(title: String, content: String) {
+        val noteColors = listOf(JarvisCyan, JarvisPurple, JarvisGreen, WarningAmber, JarvisRedPink)
         val note = QuickNote(
-            id = System.currentTimeMillis(),
+            id = java.util.UUID.randomUUID().toString(),
             title = title,
             content = content,
             timestamp = System.currentTimeMillis(),
-            colorTag = NoteColorTag.entries.random()
+            colorTag = noteColors.random()
         )
         _notes.value = listOf(note) + _notes.value
         Log.i(TAG, "[addNote] Note added: \"$title\"")
     }
 
     /** Delete a note by ID */
-    fun deleteNote(id: Long) {
+    fun deleteNote(id: String) {
         _notes.value = _notes.value.filter { it.id != id }
         Log.i(TAG, "[deleteNote] Note deleted: id=$id")
     }
