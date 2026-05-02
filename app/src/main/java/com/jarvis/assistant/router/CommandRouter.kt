@@ -20,10 +20,10 @@ import com.jarvis.assistant.shizuku.ShizukuManager
  *
  * Determines whether a user query is a SYSTEM command (open app, toggle wifi,
  * volume control, etc.) that can be handled locally, or a CONVERSATIONAL
- * query that needs to be sent to the Gemini AI API.
+ * query that needs to be sent to the Groq AI API.
  *
  * System commands are resolved immediately without AI latency.
- * Conversational queries fall through to the Gemini pipeline.
+ * Conversational queries fall through to the Groq AI pipeline.
  *
  * Supported system commands:
  *   - "open [app name]" / "launch [app name]" → Opens app via Intent or Shizuku
@@ -53,7 +53,7 @@ object CommandRouter {
         /** System command was handled locally — no AI needed */
         data class Handled(val response: String, val emotion: String = "calm") : RouteResult()
 
-        /** Command needs AI processing — fall through to Gemini */
+        /** Command needs AI processing — fall through to Groq */
         data class NeedsAI(val query: String) : RouteResult()
 
         /** Vision command — trigger camera + AI vision */
@@ -77,8 +77,8 @@ object CommandRouter {
         /** Autonomous task — install/download/get an app via AI+accessibility */
         data class AutonomousTask(val taskType: String, val target: String, val prompt: String) : RouteResult()
 
-        /** Game direction command — control snake game via voice */
-        data class GameDirectionCommand(val direction: String) : RouteResult()
+        /** Direction command — navigate/scroll in a direction via voice */
+        data class DirectionCommand(val direction: String) : RouteResult()
 
         /** Quick note command — create a note via voice command */
         data class QuickNoteCommand(val text: String) : RouteResult()
@@ -189,7 +189,7 @@ object CommandRouter {
     /**
      * Route a user query to the appropriate handler.
      * Returns [RouteResult.Handled] if a system command was executed,
-     * or [RouteResult.NeedsAI] if it should go to Gemini.
+     * or [RouteResult.NeedsAI] if it should go to Groq AI.
      */
     fun route(query: String, context: Context): RouteResult {
         val normalized = normalizeHinglish(query.lowercase().trim())
@@ -220,16 +220,10 @@ object CommandRouter {
             return RouteResult.MusicCommand("pause")
         }
 
-        // ─── Game Direction Commands (Snake) ────────────────────────
-        val directionKeywords = mapOf(
-            "up" to "UP", "upar" to "UP", "uper" to "UP", "upward" to "UP",
-            "down" to "DOWN", "niche" to "DOWN", "neeche" to "DOWN", "downward" to "DOWN",
-            "left" to "LEFT", "baaye" to "LEFT", "bayen" to "LEFT", "leftward" to "LEFT",
-            "right" to "RIGHT", "daaye" to "RIGHT", "dayen" to "RIGHT", "rightward" to "RIGHT"
-        )
-        directionKeywords[normalized]?.let {
-            return RouteResult.GameDirectionCommand(it)
-        }
+        // ─── Direction Commands — scroll/navigate via voice ─────────
+        // Note: Standalone direction words are now routed as AI autonomous tasks
+        // so the AI can interpret context (scroll, navigate, etc.)
+        // Only explicit "scroll up/down" etc. is handled as a system command above.
 
         // ─── Call Answer / Reject ────────────────────────────────
         if (normalized == "answer" || normalized == "answer call" || normalized == "receive") {
@@ -327,12 +321,11 @@ object CommandRouter {
             }
         }
 
-        // ─── Image Generation ─────────────────────────────────
+        // ─── Image Generation → route to AI (no built-in image gen) ──
         val imageMatch = Regex("""(?:generate|create|make|draw)\s+(?:a\s+|an\s+)?image\s+(?:of\s+)?(.+)""", RegexOption.IGNORE_CASE).find(normalized)
         if (imageMatch != null) {
             val prompt = imageMatch.groupValues[1].trim()
-            return RouteResult.AutonomousTask("generate_image", prompt,
-                "Generate an image of: $prompt. Use the generate_image tool to create it.")
+            return RouteResult.NeedsAI("Generate an image of: $prompt. Explain that image generation is not currently available but offer alternatives.")
         }
 
         // ─── Install / Download / Get commands (AutonomousTask) ─
@@ -510,7 +503,7 @@ object CommandRouter {
             return RouteResult.DeviceStatusCommand(component)
         }
 
-        // ─── No system command matched → route to Gemini AI ──
+        // ─── No system command matched → route to Groq AI ──
         return RouteResult.NeedsAI(query)
     }
 

@@ -470,15 +470,15 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             }
             Log.w(AUDIO_TAG, "[SpeechRecognizer] onError: $errorMsg ($error)")
 
-            // Mark as error but don't crash — Gemini fallback will handle it
+            // Mark as error but don't crash — Groq Whisper fallback will handle it
             synchronized(speechRecognizerLock) {
                 speechRecognizerError = true
             }
 
-            // For transient errors like NO_MATCH or TIMEOUT, just log and let Gemini handle it
-            // For serious errors (network, permissions), same — Gemini is the safety net
+            // For transient errors like NO_MATCH or TIMEOUT, just log and let Groq Whisper handle it
+            // For serious errors (network, permissions), same — Groq Whisper is the safety net
             if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                Log.d(AUDIO_TAG, "[SpeechRecognizer] Transient error — Gemini fallback will handle transcription")
+                Log.d(AUDIO_TAG, "[SpeechRecognizer] Transient error — Groq Whisper fallback will handle transcription")
             }
         }
 
@@ -519,10 +519,10 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // CRITICAL FIX: Processing Lock — prevents VAD from spamming Gemini API
+    // CRITICAL FIX: Processing Lock — prevents VAD from spamming Groq API
     //
     // BUG: Without this lock, the VAD's silence-after-speech detection
-    // could trigger handleCommandReady() → processQuery() → Gemini API
+    // could trigger handleCommandReady() → processQuery() → Groq API
     // MULTIPLE TIMES per utterance. If VAD detects silence, triggers
     // transcription, but then detects more speech, it would start a
     // SECOND API call while the first is still running. This causes
@@ -896,9 +896,9 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     }
 
     // A3: Test API keys and report result with DETAILED error messages
-    // CRITICAL FIX (v14): Decouple ElevenLabs from Gemini test.
+    // CRITICAL FIX (v14): Decouple ElevenLabs from Groq test.
     // If ElevenLabs key is empty/blank, skip that test entirely and
-    // only report the Gemini result. A missing ElevenLabs key should
+    // only report the Groq result. A missing ElevenLabs key should
     // NOT make the overall test appear to fail — the app has native
     // TTS fallback for speech.
     fun testApiKeys(groqKey: String, elevenLabsKey: String) {
@@ -1255,7 +1255,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             if (srReady && srFinalResult.isNotBlank()) {
                 // SpeechRecognizer got a result — use it (instant, no API call needed)
                 transcription = srFinalResult
-                Log.i(AUDIO_TAG, "[handleCommandReady] Using SpeechRecognizer result: \"$transcription\" (saved ~1-3s vs Gemini)")
+                Log.i(AUDIO_TAG, "[handleCommandReady] Using SpeechRecognizer result: \"$transcription\" (saved ~1-3s vs Groq Whisper)")
             } else if (!srError && speechRecognizerPartialResult.isNotBlank()) {
                 // SpeechRecognizer hasn't errored but has partial results —
                 // give it a brief window (300ms) to deliver final results
@@ -1271,19 +1271,19 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                     transcription = srResultAfterWait
                     Log.i(AUDIO_TAG, "[handleCommandReady] SpeechRecognizer final arrived after wait: \"$transcription\"")
                 } else {
-                    // Still no final result — use partial if meaningful, else Gemini fallback
+                    // Still no final result — use partial if meaningful, else Groq Whisper fallback
                     val partial = speechRecognizerPartialResult
                     if (partial.isNotBlank()) {
                         transcription = partial
                         Log.i(AUDIO_TAG, "[handleCommandReady] Using SpeechRecognizer partial result: \"$transcription\"")
                     } else {
-                        Log.d(AUDIO_TAG, "[handleCommandReady] SpeechRecognizer no result — falling back to Gemini at ${sampleRate}Hz")
+                        Log.d(AUDIO_TAG, "[handleCommandReady] SpeechRecognizer no result — falling back to Groq Whisper at ${sampleRate}Hz")
                         transcription = transcribeViaGroqWhisper(pcmBytes, sampleRate)
                     }
                 }
             } else {
-                // SpeechRecognizer errored or has no results — fall back to Gemini
-                Log.d(AUDIO_TAG, "[handleCommandReady] SpeechRecognizer unavailable (ready=$srReady, error=$srError) — falling back to Gemini at ${sampleRate}Hz")
+                // SpeechRecognizer errored or has no results — fall back to Groq Whisper
+                Log.d(AUDIO_TAG, "[handleCommandReady] SpeechRecognizer unavailable (ready=$srReady, error=$srError) — falling back to Groq Whisper at ${sampleRate}Hz")
                 transcription = transcribeViaGroqWhisper(pcmBytes, sampleRate)
             }
 
@@ -1405,7 +1405,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 val requestBody = okhttp3.MultipartBody.Builder(boundary)
                     .setType(okhttp3.MultipartBody.FORM)
                     .addFormDataPart("model", "distil-whisper-large-v3-en")
-                    .addFormDataPart("language", "en")
+                    // No language parameter — Groq Whisper auto-detects language (supports Hindi/Hinglish)
                     .addFormDataPart("response_format", "json")
                     .addFormDataPart(
                         "file", "recording.wav",
@@ -1757,15 +1757,10 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                         _emotion.value = "confident"
                         handleAIQuery(aiQuery, context, memoryContext = "")
                     }
-                    // Game direction command — control snake game via voice
-                    is CommandRouter.RouteResult.GameDirectionCommand -> {
-                        setVoiceDirection(routeResult.direction)
-                        _emotion.value = "playful"
-                        _lastResponse.value = "Moving ${routeResult.direction.lowercase()}"
-                        _isTyping.value = false
-                        addAssistantMessage("Moving ${routeResult.direction.lowercase()}", "playful")
-                        _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
-                        isProcessing.set(false)
+                    // Snake game was removed — route direction commands as AI tasks
+                    is CommandRouter.RouteResult.DirectionCommand -> {
+                        _emotion.value = "confident"
+                        handleAIQuery("Navigate ${routeResult.direction}", context, memoryContext = "")
                     }
                     // Quick Note command — create a note via voice
                     is CommandRouter.RouteResult.QuickNoteCommand -> {

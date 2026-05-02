@@ -396,6 +396,65 @@ object GroqFunctionCaller {
                 })
             })
         })
+
+        // make_phone_call — Make a phone call
+        put(org.json.JSONObject().apply {
+            put("type", "function")
+            put("function", org.json.JSONObject().apply {
+                put("name", "make_phone_call")
+                put("description", "Make a phone call to the specified phone number.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("phone_number", org.json.JSONObject().apply { put("type", "string"); put("description", "The phone number to call (e.g., '+1234567890')") })
+                    })
+                    put("required", org.json.JSONArray().put("phone_number"))
+                })
+            })
+        })
+
+        // send_sms — Send an SMS message
+        put(org.json.JSONObject().apply {
+            put("type", "function")
+            put("function", org.json.JSONObject().apply {
+                put("name", "send_sms")
+                put("description", "Send an SMS message to the specified phone number.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("phone_number", org.json.JSONObject().apply { put("type", "string"); put("description", "The phone number to send the SMS to (e.g., '+1234567890')") })
+                        put("message", org.json.JSONObject().apply { put("type", "string"); put("description", "The text message to send") })
+                    })
+                    put("required", org.json.JSONArray().put("phone_number").put("message"))
+                })
+            })
+        })
+
+        // take_screenshot — Take a screenshot of the current screen
+        put(org.json.JSONObject().apply {
+            put("type", "function")
+            put("function", org.json.JSONObject().apply {
+                put("name", "take_screenshot")
+                put("description", "Take a screenshot of the current screen.")
+                put("parameters", org.json.JSONObject().apply { put("type", "object"); put("properties", org.json.JSONObject()) })
+            })
+        })
+
+        // set_volume — Set the media volume
+        put(org.json.JSONObject().apply {
+            put("type", "function")
+            put("function", org.json.JSONObject().apply {
+                put("name", "set_volume")
+                put("description", "Set the media volume level.")
+                put("parameters", org.json.JSONObject().apply {
+                    put("type", "object")
+                    put("properties", org.json.JSONObject().apply {
+                        put("level", org.json.JSONObject().apply { put("type", "integer"); put("description", "Volume level from 0 to 15") })
+                    })
+                    put("required", org.json.JSONArray().put("level"))
+                })
+            })
+        })
     }
 
     /**
@@ -541,6 +600,10 @@ AVAILABLE TOOLS:
 - get_device_info: Get device system information
 - toggle_wifi / toggle_bluetooth: Toggle connectivity
 - set_brightness: Set screen brightness
+- make_phone_call: Make a phone call
+- send_sms: Send an SMS message
+- take_screenshot: Take a screenshot of the current screen
+- set_volume: Set the media volume
 
 IMPORTANT RULES:
 1. ALWAYS use function calls for device actions. NEVER just describe actions.

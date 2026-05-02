@@ -87,7 +87,7 @@ data class ChatMessage(
  * Each session captures a complete conversation exchange, identified by
  * its first user message (as title/preview) and a timestamp. Sessions
  * are displayed in the ModalNavigationDrawer for quick switching, like
- * the official Gemini app.
+ * the official ChatGPT app.
  */
 data class ChatSession(
     val id: Long,
@@ -531,7 +531,7 @@ private fun ScrollToBottomFAB(
 // CHAT HISTORY DRAWER CONTENT
 //
 // A ModalNavigationDrawer content that displays past chat sessions in a
-// list, like the official Gemini app. Includes:
+// list, like the official ChatGPT app. Includes:
 //   - Animated gradient header
 //   - "New Chat" button at the top
 //   - Scrollable list of past sessions (GlassmorphicCard styling)

@@ -2,6 +2,7 @@ package com.jarvis.assistant.automation
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.net.Uri
 import android.util.Log
 import com.jarvis.assistant.actions.AppRegistry
@@ -80,8 +81,17 @@ object TaskExecutorBridge {
             "diagnose_system" -> executeDiagnoseSystem(args)
             "search_web" -> executeSearchWeb(args)
             "set_alarm" -> executeSetAlarm(args, context)
-            "generate_image" -> executeGenerateImage(args)
-            "generate_video" -> executeGenerateVideo(args)
+            "open_url" -> executeOpenUrl(args, context)
+            "copy_to_clipboard" -> executeCopyToClipboard(args, context)
+            "get_battery_status" -> executeGetBatteryStatus(context)
+            "get_device_info" -> executeGetDeviceInfo(context)
+            "toggle_wifi" -> executeToggleWifi(args, context)
+            "toggle_bluetooth" -> executeToggleBluetooth(args, context)
+            "set_brightness" -> executeSetBrightness(args, context)
+            "make_phone_call" -> executeMakePhoneCall(args, context)
+            "send_sms" -> executeSendSms(args, context)
+            "take_screenshot" -> executeTakeScreenshot()
+            "set_volume" -> executeSetVolume(args, context)
             else -> StepResult.Failed("Unknown tool: $toolName")
         }
     }
@@ -742,92 +752,287 @@ object TaskExecutorBridge {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Image / Video Generation
+    // NEW v17 TOOLS — Open URL, Clipboard, Battery, Device Info, WiFi, BT, Brightness
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private fun executeOpenUrl(args: Map<String, String>, context: Context): StepResult {
+        val url = args["url"]?.trim() ?: return StepResult.Failed("Missing 'url' argument")
+        return try {
+            var finalUrl = url
+            if (!finalUrl.startsWith("http://") && !finalUrl.startsWith("https://")) {
+                finalUrl = "https://$finalUrl"
+            }
+            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(finalUrl)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            Log.i(TAG, "[openUrl] Opened URL: $finalUrl")
+            StepResult.Success("Opened URL: $finalUrl")
+        } catch (e: Exception) {
+            Log.e(TAG, "[openUrl] Failed: ${e.message}")
+            StepResult.Failed("Failed to open URL: ${e.message}")
+        }
+    }
+
+    private fun executeCopyToClipboard(args: Map<String, String>, context: Context): StepResult {
+        val text = args["text"]?.trim() ?: return StepResult.Failed("Missing 'text' argument")
+        return try {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val clip = android.content.ClipData.newPlainText("JARVIS", text)
+            clipboard.setPrimaryClip(clip)
+            Log.i(TAG, "[copyToClipboard] Copied ${text.length} chars to clipboard")
+            StepResult.Success("Copied to clipboard: \"${text.take(100)}${if (text.length > 100) "..." else ""}\"")
+        } catch (e: Exception) {
+            Log.e(TAG, "[copyToClipboard] Failed: ${e.message}")
+            StepResult.Failed("Failed to copy to clipboard: ${e.message}")
+        }
+    }
+
+    private fun executeGetBatteryStatus(context: Context): StepResult {
+        return try {
+            val bm = context.getSystemService(Context.BATTERY_SERVICE) as android.os.BatteryManager
+            val level = bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            val isCharging = bm.isCharging
+            val chargeStatus = if (isCharging) "Charging" else "Discharging"
+            val status = "Battery: $level% — $chargeStatus"
+            Log.i(TAG, "[getBatteryStatus] $status")
+            StepResult.Success(status)
+        } catch (e: Exception) {
+            StepResult.Failed("Failed to get battery status: ${e.message}")
+        }
+    }
+
+    private fun executeGetDeviceInfo(context: Context): StepResult {
+        return try {
+            val info = StringBuilder()
+            info.append("Device: ${android.os.Build.MODEL}\n")
+            info.append("Manufacturer: ${android.os.Build.MANUFACTURER}\n")
+            info.append("Android: ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})\n")
+            info.append("Security Patch: ${android.os.Build.VERSION.SECURITY_PATCH}\n")
+
+            // Screen resolution
+            val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+            val display = windowManager.defaultDisplay
+            val metrics = android.util.DisplayMetrics()
+            display.getMetrics(metrics)
+            info.append("Screen: ${metrics.widthPixels}x${metrics.heightPixels} (${metrics.densityDpi}dpi)\n")
+
+            // Storage
+            val statFs = android.os.StatFs(android.os.Environment.getDataDirectory().path)
+            val totalBytes = statFs.totalBytes
+            val availableBytes = statFs.availableBytes
+            info.append("Storage: ${availableBytes / (1024*1024*1024)}GB free / ${totalBytes / (1024*1024*1024)}GB total\n")
+
+            // RAM
+            val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            val memInfo = android.app.ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memInfo)
+            info.append("RAM: ${memInfo.availMem / (1024*1024)}MB free / ${memInfo.totalMem / (1024*1024)}MB total")
+
+            val result = info.toString()
+            Log.i(TAG, "[getDeviceInfo] Collected device info")
+            StepResult.Success(result)
+        } catch (e: Exception) {
+            StepResult.Failed("Failed to get device info: ${e.message}")
+        }
+    }
+
+    private fun executeToggleWifi(args: Map<String, String>, context: Context): StepResult {
+        val enable = args["enable"]?.toBoolean() ?: return StepResult.Failed("Missing 'enable' argument")
+        return try {
+            // Try Shizuku first
+            val shizukuResult = com.jarvis.assistant.shizuku.ShizukuManager.executeCommand("svc wifi ${if (enable) "enable" else "disable"}")
+            if (shizukuResult) {
+                Log.i(TAG, "[toggleWifi] WiFi ${if (enable) "enabled" else "disabled"} via Shizuku")
+                StepResult.Success("WiFi ${if (enable) "enabled" else "disabled"} via Shizuku")
+            } else {
+                // Try accessibility service to open WiFi settings
+                val svc = accessibilityService?.get()
+                if (svc != null) {
+                    val intent = Intent(android.provider.Settings.ACTION_WIFI_SETTINGS).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                    kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(1000) }
+                    svc.autoClick(if (enable) "Wi-Fi" else "Off")
+                    StepResult.Success("Opened WiFi settings — please toggle manually if needed")
+                } else {
+                    StepResult.Failed("Cannot toggle WiFi — enable Shizuku or Accessibility Service")
+                }
+            }
+        } catch (e: Exception) {
+            StepResult.Failed("Failed to toggle WiFi: ${e.message}")
+        }
+    }
+
+    private fun executeToggleBluetooth(args: Map<String, String>, context: Context): StepResult {
+        val enable = args["enable"]?.toBoolean() ?: return StepResult.Failed("Missing 'enable' argument")
+        return try {
+            val shizukuResult = com.jarvis.assistant.shizuku.ShizukuManager.executeCommand("svc bluetooth ${if (enable) "enable" else "disable"}")
+            if (shizukuResult) {
+                StepResult.Success("Bluetooth ${if (enable) "enabled" else "disabled"} via Shizuku")
+            } else {
+                val intent = Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                StepResult.Success("Opened Bluetooth settings — please toggle manually if needed")
+            }
+        } catch (e: Exception) {
+            StepResult.Failed("Failed to toggle Bluetooth: ${e.message}")
+        }
+    }
+
+    private fun executeSetBrightness(args: Map<String, String>, context: Context): StepResult {
+        val level = args["level"]?.toIntOrNull() ?: return StepResult.Failed("Missing or invalid 'level' argument (0-255)")
+        if (level < 0 || level > 255) return StepResult.Failed("Brightness must be 0-255, got $level")
+        return try {
+            // Try writing to system settings
+            android.provider.Settings.System.putInt(
+                context.contentResolver,
+                android.provider.Settings.System.SCREEN_BRIGHTNESS,
+                level
+            )
+            Log.i(TAG, "[setBrightness] Set brightness to $level")
+            StepResult.Success("Screen brightness set to $level (of 255)")
+        } catch (e: Exception) {
+            StepResult.Failed("Failed to set brightness: ${e.message}. May need WRITE_SETTINGS permission.")
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phone / SMS / Screenshot / Volume
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * generate_image — Generate an image using Groq API.
-     * Calls the v1beta/models/imagen-3.0-generate-002:predict endpoint.
+     * make_phone_call — Initiate a phone call.
+     * Uses ACTION_CALL if the app has CALL_PHONE permission, otherwise
+     * falls back to ACTION_DIAL which opens the dialer.
      */
-    private suspend fun executeGenerateImage(args: Map<String, String>): StepResult {
-        val prompt = args["prompt"]?.trim() ?: return StepResult.Failed("Missing 'prompt' argument")
-        val style = args["style"]?.trim() ?: ""
+    private fun executeMakePhoneCall(args: Map<String, String>, context: Context): StepResult {
+        val phoneNumber = args["phone_number"]?.trim() ?: args["number"]?.trim()
+            ?: return StepResult.Failed("Missing 'phone_number' argument")
 
-        return withContext(Dispatchers.IO) {
-            try {
-                // Get API key from JarviewModel
-                val apiKey = com.jarvis.assistant.channels.JarviewModel.groqApiKey
-                if (apiKey.isBlank()) {
-                    return@withContext StepResult.Failed("Groq API key not set — cannot generate image")
-                }
-
-                val fullPrompt = if (style.isNotBlank()) "$prompt, $style style" else prompt
-
-                val requestBody = org.json.JSONObject().apply {
-                    put("instances", org.json.JSONArray().put(
-                        org.json.JSONObject().put("prompt", fullPrompt)
-                    ))
-                    put("parameters", org.json.JSONObject().apply {
-                        put("sampleCount", 1)
-                    })
-                }.toString()
-
-                val url = java.net.URL("https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${apiKey.trim()}")
-                val connection = url.openConnection() as java.net.HttpURLConnection
-                connection.requestMethod = "POST"
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.doOutput = true
-                connection.connectTimeout = 30_000
-                connection.readTimeout = 120_000
-
-                connection.outputStream.use { os ->
-                    os.write(requestBody.toByteArray(Charsets.UTF_8))
-                }
-
-                val responseCode = connection.responseCode
-                if (responseCode != 200) {
-                    val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                    connection.disconnect()
-                    Log.e(TAG, "[generateImage] HTTP $responseCode: ${errorBody.take(300)}")
-                    return@withContext StepResult.Failed("Image generation failed: HTTP $responseCode — ${errorBody.take(200)}")
-                }
-
-                val responseBody = connection.inputStream.bufferedReader().readText()
-                connection.disconnect()
-
-                // Parse the response to extract base64 image
-                val root = com.google.gson.JsonParser.parseString(responseBody).asJsonObject
-                val predictions = root.getAsJsonArray("predictions")
-                val firstPrediction = predictions?.firstOrNull()?.asJsonObject
-                val bytesBase64 = firstPrediction?.get("bytesBase64Encoded")?.asString
-
-                if (!bytesBase64.isNullOrBlank()) {
-                    // Save image to a file and return the path
-                    val imageBytes = android.util.Base64.decode(bytesBase64, android.util.Base64.NO_WRAP)
-                    val imagesDir = java.io.File("/sdcard/Pictures/Jarvis")
-                    if (!imagesDir.exists()) imagesDir.mkdirs()
-                    val imageFile = java.io.File(imagesDir, "jarvis_img_${System.currentTimeMillis()}.png")
-                    java.io.FileOutputStream(imageFile).use { it.write(imageBytes) }
-                    Log.i(TAG, "[generateImage] Image saved to ${imageFile.absolutePath}")
-                    StepResult.Success("Image generated and saved to ${imageFile.absolutePath}. Prompt: \"$fullPrompt\"")
-                } else {
-                    StepResult.Success("Image generation request sent for: \"$fullPrompt\". Check the Groq API response for the generated image.")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "[generateImage] Failed: ${e.message}")
-                StepResult.Failed("Image generation failed: ${e.message}")
+        return try {
+            // Try ACTION_CALL first (requires CALL_PHONE permission)
+            val callIntent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$phoneNumber")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            context.startActivity(callIntent)
+            Log.i(TAG, "[makePhoneCall] Calling $phoneNumber via ACTION_CALL")
+            StepResult.Success("Calling $phoneNumber")
+        } catch (e: SecurityException) {
+            // No CALL_PHONE permission — fall back to ACTION_DIAL (opens dialer)
+            try {
+                val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phoneNumber")).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(dialIntent)
+                Log.i(TAG, "[makePhoneCall] Opened dialer for $phoneNumber (no CALL_PHONE permission)")
+                StepResult.Success("Opened dialer for $phoneNumber (CALL_PHONE permission not granted)")
+            } catch (e2: Exception) {
+                Log.e(TAG, "[makePhoneCall] Failed to open dialer: ${e2.message}")
+                StepResult.Failed("Failed to call $phoneNumber: ${e2.message}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[makePhoneCall] Failed: ${e.message}")
+            StepResult.Failed("Failed to call $phoneNumber: ${e.message}")
         }
     }
 
     /**
-     * generate_video — Placeholder for future Veo API integration.
-     * Video generation is not yet available through the public Groq API.
+     * send_sms — Open SMS app with pre-filled number and message.
+     * Uses ACTION_SENDTO with smsto: URI scheme.
      */
-    private fun executeGenerateVideo(args: Map<String, String>): StepResult {
-        val prompt = args["prompt"]?.trim() ?: return StepResult.Failed("Missing 'prompt' argument")
-        Log.i(TAG, "[generateVideo] Video generation requested for: $prompt — not yet available")
-        return StepResult.Failed("Video generation is a future feature. The Veo API is not yet publicly available. Your prompt was: \"$prompt\"")
+    private fun executeSendSms(args: Map<String, String>, context: Context): StepResult {
+        val phoneNumber = args["phone_number"]?.trim() ?: args["number"]?.trim()
+            ?: return StepResult.Failed("Missing 'phone_number' argument")
+        val message = args["message"]?.trim() ?: ""
+
+        return try {
+            val uri = Uri.parse("smsto:$phoneNumber")
+            val intent = Intent(Intent.ACTION_SENDTO, uri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (message.isNotBlank()) {
+                    putExtra("sms_body", message)
+                }
+            }
+            context.startActivity(intent)
+            Log.i(TAG, "[sendSms] Opened SMS for $phoneNumber${if (message.isNotBlank()) " with message" else ""}")
+            StepResult.Success("Opened SMS to $phoneNumber${if (message.isNotBlank()) " with pre-filled message" else ""}")
+        } catch (e: Exception) {
+            Log.e(TAG, "[sendSms] Failed: ${e.message}")
+            StepResult.Failed("Failed to send SMS to $phoneNumber: ${e.message}")
+        }
+    }
+
+    /**
+     * take_screenshot — Take a screenshot using the accessibility service.
+     * Falls back to Shizuku screencap command if accessibility is unavailable.
+     */
+    private fun executeTakeScreenshot(): StepResult {
+        // Try accessibility service first
+        val svc = accessibilityService?.get()
+        if (svc != null) {
+            val result = svc.takeScreenshot()
+            if (result) {
+                Log.i(TAG, "[takeScreenshot] Screenshot taken via Accessibility Service")
+                return StepResult.Success("Screenshot taken via Accessibility Service")
+            }
+        }
+
+        // Fallback: Shizuku screencap command
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            Log.i(TAG, "[takeScreenshot] Accessibility failed, trying Shizuku fallback")
+            val screenshotsDir = java.io.File("/sdcard/Pictures/Jarvis/Screenshots")
+            if (!screenshotsDir.exists()) screenshotsDir.mkdirs()
+            val screenshotFile = java.io.File(screenshotsDir, "screenshot_${System.currentTimeMillis()}.png")
+            val result = ShizukuManager.executeShellCommand("screencap -p ${screenshotFile.absolutePath}")
+            return if (result.isSuccess) {
+                Log.i(TAG, "[takeScreenshot] Screenshot saved to ${screenshotFile.absolutePath}")
+                StepResult.Success("Screenshot saved to ${screenshotFile.absolutePath}")
+            } else {
+                StepResult.Failed("Shizuku screenshot failed: ${result.stderr}")
+            }
+        }
+
+        return StepResult.Failed("Cannot take screenshot — enable Accessibility Service or Shizuku")
+    }
+
+    /**
+     * set_volume — Set the media volume level.
+     * Uses AudioManager to adjust the media stream volume.
+     */
+    private fun executeSetVolume(args: Map<String, String>, context: Context): StepResult {
+        val level = args["level"]?.toIntOrNull() ?: return StepResult.Failed("Missing or invalid 'level' argument")
+        val streamType = args["stream"]?.lowercase()?.trim() ?: "media"
+
+        return try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+
+            val stream = when (streamType) {
+                "media", "music" -> android.media.AudioManager.STREAM_MUSIC
+                "ring", "ringer", "ringtone" -> android.media.AudioManager.STREAM_RING
+                "alarm" -> android.media.AudioManager.STREAM_ALARM
+                "notification", "notifications" -> android.media.AudioManager.STREAM_NOTIFICATION
+                "system" -> android.media.AudioManager.STREAM_SYSTEM
+                "voice_call", "call" -> android.media.AudioManager.STREAM_VOICE_CALL
+                else -> android.media.AudioManager.STREAM_MUSIC
+            }
+
+            val maxVolume = audioManager.getStreamMaxVolume(stream)
+            val clampedLevel = level.coerceIn(0, maxVolume)
+            audioManager.setStreamVolume(stream, clampedLevel, 0)
+
+            Log.i(TAG, "[setVolume] Set $streamType volume to $clampedLevel (max: $maxVolume)")
+            StepResult.Success("Set $streamType volume to $clampedLevel (max: $maxVolume)")
+        } catch (e: SecurityException) {
+            Log.e(TAG, "[setVolume] Permission denied: ${e.message}")
+            StepResult.Failed("Failed to set volume: Permission denied. May need WRITE_SETTINGS or Do Not Disturb access.")
+        } catch (e: Exception) {
+            Log.e(TAG, "[setVolume] Failed: ${e.message}")
+            StepResult.Failed("Failed to set volume: ${e.message}")
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════

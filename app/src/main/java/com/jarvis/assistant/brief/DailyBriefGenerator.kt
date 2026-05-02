@@ -37,7 +37,7 @@ import java.util.*
  *   - Battery status
  *   - Pending tasks from yesterday's conversations (via Memory system)
  *
- * The brief is generated using the Gemini API to make it conversational
+ * The brief is generated using the Groq API to make it conversational
  * and natural, rather than a raw data dump.
  */
 object DailyBriefGenerator {
@@ -53,7 +53,7 @@ object DailyBriefGenerator {
      * Generate the daily brief as a conversational string.
      *
      * @param context Android context
-     * @param apiKey Gemini API key for natural language generation
+     * @param apiKey Groq API key for natural language generation
      * @return Conversational brief string
      */
     suspend fun generateBrief(context: Context, apiKey: String): String {
@@ -81,7 +81,7 @@ object DailyBriefGenerator {
 
                 Log.d(TAG, "[generateBrief] Raw data: $rawData")
 
-                // Use Gemini to make it conversational
+                // Use Groq to make it conversational
                 if (apiKey.isNotBlank()) {
                     val conversationalBrief = generateConversationalBrief(rawData, apiKey)
                     if (conversationalBrief.isNotBlank()) {
@@ -346,9 +346,9 @@ object DailyBriefGenerator {
         }
     }
 
-    // ─── Conversational Generation via Gemini ──────────────────────────
+    // ─── Conversational Generation via Groq ──────────────────────────
 
-    private fun generateConversationalBrief(rawData: String, apiKey: String): String {
+    private suspend fun generateConversationalBrief(rawData: String, apiKey: String): String {
         return try {
             val prompt = """You are JARVIS, Tony Stark's AI assistant. Generate a concise, conversational morning brief based on this data. Use Hinglish (Hindi+English mix) naturally. Address the user as "Sir". Keep it under 3 sentences. Be witty but informative.
 
@@ -357,45 +357,43 @@ $rawData
 
 Generate the brief:"""
 
+            // Build OpenAI-compatible request body for Groq API
+            val messagesArray = JSONArray().put(
+                JSONObject().apply {
+                    put("role", "system")
+                    put("content", "You are JARVIS, a witty AI butler. Generate concise morning briefs in Hinglish.")
+                }
+            ).put(
+                JSONObject().apply {
+                    put("role", "user")
+                    put("content", prompt)
+                }
+            )
+
             val requestBody = JSONObject().apply {
-                put("contents", JSONArray().put(
-                    JSONObject().apply {
-                        put("parts", JSONArray().put(
-                            JSONObject().put("text", prompt)
-                        ))
-                    }
-                ))
-                put("generationConfig", JSONObject().apply {
-                    put("temperature", 0.7)
-                    put("maxOutputTokens", 200)
-                })
+                put("model", "llama-3.1-8b-instant") // GroqApiClient may override with fallback
+                put("messages", messagesArray)
+                put("temperature", 0.7)
+                put("max_tokens", 200)
             }.toString()
 
-            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey.trim()}")
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.setRequestProperty("Content-Type", "application/json")
-            connection.doOutput = true
-            connection.connectTimeout = 10_000
-            connection.readTimeout = 15_000
-
-            connection.outputStream.use { it.write(requestBody.toByteArray(Charsets.UTF_8)) }
-
-            val code = connection.responseCode
-            if (code == 200) {
-                val responseBody = connection.inputStream.bufferedReader().readText()
-                connection.disconnect()
-
-                val root = JSONObject(responseBody)
-                val candidates = root.optJSONArray("candidates")
-                val firstCandidate = candidates?.optJSONObject(0)
-                val content = firstCandidate?.optJSONObject("content")
-                val parts = content?.optJSONArray("parts")
-                val firstPart = parts?.optJSONObject(0)
-                firstPart?.optString("text", "") ?: ""
-            } else {
-                connection.disconnect()
-                ""
+            val result = com.jarvis.assistant.network.GroqApiClient.chatCompletion(requestBody, apiKey)
+            when (result) {
+                is com.jarvis.assistant.network.GroqApiClient.ApiResult.Success -> {
+                    val root = JSONObject(result.responseBody)
+                    val choices = root.optJSONArray("choices")
+                    val firstChoice = choices?.optJSONObject(0)
+                    val message = firstChoice?.optJSONObject("message")
+                    message?.optString("content", "") ?: ""
+                }
+                is com.jarvis.assistant.network.GroqApiClient.ApiResult.HttpError -> {
+                    Log.e(TAG, "[generateConversationalBrief] HTTP error: ${result.code} ${result.message}")
+                    ""
+                }
+                is com.jarvis.assistant.network.GroqApiClient.ApiResult.NetworkError -> {
+                    Log.e(TAG, "[generateConversationalBrief] Network error: ${result.message}")
+                    ""
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "[generateConversationalBrief] Error: ${e.message}")
@@ -480,7 +478,7 @@ Generate the brief:"""
                 val context = applicationContext
                 val apiKey = try {
                     val prefs = context.getSharedPreferences("jarvis_settings_apikey_cache", Context.MODE_PRIVATE)
-                    prefs.getString("gemini_api_key", "") ?: ""
+                    prefs.getString("groq_api_key", "") ?: ""
                 } catch (_: Exception) { "" }
 
                 val brief = generateBrief(context, apiKey)

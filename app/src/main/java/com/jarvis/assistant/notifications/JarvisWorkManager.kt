@@ -265,7 +265,7 @@ object JarvisWorkManager {
                 // Get API key from shared prefs cache
                 val apiKey = try {
                     val prefs = context.getSharedPreferences("jarvis_settings_apikey_cache", Context.MODE_PRIVATE)
-                    prefs.getString("gemini_api_key", "") ?: ""
+                    prefs.getString("groq_api_key", "") ?: ""
                 } catch (_: Exception) { "" }
 
                 val brief = com.jarvis.assistant.brief.DailyBriefGenerator.generateBrief(context, apiKey)

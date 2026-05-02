@@ -35,10 +35,10 @@ import kotlin.coroutines.resumeWithException
  * VisionManager — Camera + AI Vision for JARVIS.
  *
  * Enables JARVIS to "see" through the device camera and analyze
- * what it sees using Gemini's multimodal (vision) API.
+ * what it sees using Groq's vision API (Llama 3.2 90B Vision).
  *
  * "Dekh kya hai" / "What is this?" → Captures a photo and sends
- * it to Gemini Vision for analysis and description.
+ * it to Groq Vision for analysis and description.
  *
  * ═══════════════════════════════════════════════════════════════════════
  * USAGE:
@@ -51,7 +51,7 @@ import kotlin.coroutines.resumeWithException
  *   1. Opens the back camera using Camera2 API
  *   2. Captures a single frame as JPEG
  *   3. Converts to base64
- *   4. Sends to Gemini multimodal API (gemini-2.5-flash supports image input)
+ *   4. Sends to Groq Vision API (llama-3.2-90b-vision-preview, OpenAI-compatible)
  *   5. Returns the AI's description/analysis
  * ═══════════════════════════════════════════════════════════════════════
  */
@@ -59,9 +59,9 @@ class VisionManager {
 
     companion object {
         private const val TAG = "VisionManager"
-        private const val GEMINI_MODEL = "gemini-2.5-flash"
-        private const val GEMINI_VISION_URL =
-            "https://generativelanguage.googleapis.com/v1beta/models/$GEMINI_MODEL:generateContent"
+        private const val GROQ_MODEL = "llama-3.2-90b-vision-preview"
+        private const val GROQ_VISION_URL =
+            com.jarvis.assistant.network.GroqApiClient.BASE_URL
         private const val JPEG_QUALITY = 80
         private const val MAX_IMAGE_DIMENSION = 1024  // Resize for API limits
         private const val CAPTURE_TIMEOUT_MS = 10_000L
@@ -74,11 +74,11 @@ class VisionManager {
     private var backgroundThread: HandlerThread? = null
 
     /**
-     * Capture a photo from the back camera and analyze it with Gemini Vision.
+     * Capture a photo from the back camera and analyze it with Groq Vision.
      *
      * @param context Android context
      * @param prompt The question/prompt about the image (e.g., "What is this?")
-     * @param apiKey Gemini API key
+     * @param apiKey Groq API key
      * @return AI's analysis of the captured image
      */
     suspend fun captureAndAnalyze(
@@ -103,8 +103,8 @@ class VisionManager {
                 // Step 3: Convert to base64
                 val base64Image = Base64.encodeToString(resizedBytes, Base64.NO_WRAP)
 
-                // Step 4: Send to Gemini Vision API
-                val response = sendToGeminiVision(base64Image, prompt, apiKey)
+                // Step 4: Send to Groq Vision API
+                val response = sendToGroqVision(base64Image, prompt, apiKey)
 
                 Log.i(TAG, "[captureAndAnalyze] Vision analysis complete: ${response.take(100)}")
                 response
@@ -339,45 +339,46 @@ class VisionManager {
     }
 
     /**
-     * Send an image + prompt to Gemini's multimodal Vision API.
+     * Send an image + prompt to Groq's Vision API (OpenAI-compatible format).
      */
-    private fun sendToGeminiVision(
+    private fun sendToGroqVision(
         base64Image: String,
         prompt: String,
         apiKey: String
     ): String {
         try {
-            val url = java.net.URL("$GEMINI_VISION_URL?key=${apiKey.trim()}")
+            val url = java.net.URL(GROQ_VISION_URL)
             val connection = url.openConnection() as java.net.HttpURLConnection
             connection.requestMethod = "POST"
             connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("Authorization", "Bearer ${apiKey.trim()}")
             connection.doOutput = true
             connection.connectTimeout = 15_000
             connection.readTimeout = 60_000
 
-            // Build multimodal request: text + image
+            // Build OpenAI-compatible vision request: text + image_url
             val requestBody = JSONObject().apply {
-                put("contents", JSONArray().put(
+                put("model", GROQ_MODEL)
+                put("messages", JSONArray().put(
                     JSONObject().apply {
-                        put("parts", JSONArray().apply {
+                        put("role", "user")
+                        put("content", JSONArray().apply {
                             // Text prompt
                             put(JSONObject().apply {
+                                put("type", "text")
                                 put("text", "You are JARVIS, Tony Stark's AI assistant. You are looking through the device camera. $prompt. Describe what you see concisely and with British elegance. Address the user as Sir. If you see text, read it. If you see objects, identify them. If you see people, describe what they're doing (don't identify faces for privacy).")
                             })
-                            // Image data
+                            // Image data as base64 data URI
                             put(JSONObject().apply {
-                                put("inlineData", JSONObject().apply {
-                                    put("mimeType", "image/jpeg")
-                                    put("data", base64Image)
+                                put("type", "image_url")
+                                put("image_url", JSONObject().apply {
+                                    put("url", "data:image/jpeg;base64,$base64Image")
                                 })
                             })
                         })
                     }
                 ))
-                put("generationConfig", JSONObject().apply {
-                    put("temperature", 0.4)
-                    put("maxOutputTokens", 512)
-                })
+                put("max_tokens", 1024)
             }.toString()
 
             connection.outputStream.use { it.write(requestBody.toByteArray(Charsets.UTF_8)) }
@@ -385,7 +386,7 @@ class VisionManager {
             val responseCode = connection.responseCode
             if (responseCode != 200) {
                 val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                Log.e(TAG, "[sendToGeminiVision] HTTP $responseCode: ${errorBody.take(300)}")
+                Log.e(TAG, "[sendToGroqVision] HTTP $responseCode: ${errorBody.take(300)}")
                 connection.disconnect()
                 return "Sir, I couldn't analyze the image. The vision API returned an error (HTTP $responseCode)."
             }
@@ -393,17 +394,16 @@ class VisionManager {
             val responseBody = connection.inputStream.bufferedReader().readText()
             connection.disconnect()
 
-            // Parse Gemini response
-            val root = com.google.gson.JsonParser.parseString(responseBody).asJsonObject
-            val candidates = root.getAsJsonArray("candidates")
-            val firstCandidate = candidates?.firstOrNull()?.asJsonObject
-            val content = firstCandidate?.getAsJsonObject("content")
-            val parts = content?.getAsJsonArray("parts")
-            val text = parts?.firstOrNull()?.asJsonObject?.get("text")?.asString ?: ""
+            // Parse OpenAI-compatible response: choices[0].message.content
+            val root = JSONObject(responseBody)
+            val choices = root.optJSONArray("choices")
+            val firstChoice = choices?.optJSONObject(0)
+            val message = firstChoice?.optJSONObject("message")
+            val text = message?.optString("content", "") ?: ""
 
             return if (text.isNotBlank()) text else "Sir, I captured the image but couldn't analyze it properly."
         } catch (e: Exception) {
-            Log.e(TAG, "[sendToGeminiVision] Error: ${e.message}")
+            Log.e(TAG, "[sendToGroqVision] Error: ${e.message}")
             return "Sir, I had trouble connecting to the vision service: ${e.message?.take(100)}"
         }
     }

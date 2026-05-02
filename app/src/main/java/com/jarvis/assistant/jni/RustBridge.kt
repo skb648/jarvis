@@ -112,7 +112,7 @@ object RustBridge {
 
     // ─── Safe Suspend Wrappers ──────────────────────────────────────
     // ALL wrappers use Dispatchers.IO to NEVER block the main thread.
-    // JNI calls involve network I/O (Gemini API, ElevenLabs TTS)
+    // JNI calls involve network I/O (Groq API, ElevenLabs TTS)
     // and can take seconds — they MUST run off the main thread.
 
     suspend fun initialize(geminiKey: String, elevenLabsKey: String): Boolean {
@@ -131,7 +131,7 @@ object RustBridge {
 
     /**
      * Process a user query — runs on [Dispatchers.IO].
-     * This makes network calls to Gemini API — must NEVER be on main thread.
+     * This makes network calls to Groq API — must NEVER be on main thread.
      */
     suspend fun processQuery(query: String, context: String = "", historyJson: String = "[]", systemPrompt: String = ""): String {
         return withContext(Dispatchers.IO) {

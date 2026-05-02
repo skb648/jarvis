@@ -20,13 +20,13 @@ import com.jarvis.assistant.permissions.PermissionManager
  *
  * It checks the device's current state and produces a structured report
  * of all capabilities and permissions. This report is injected into the
- * Gemini System Prompt on EVERY request as a hidden "System Status Block",
+ * Groq System Prompt on EVERY request as a hidden "System Status Block",
  * so JARVIS always knows:
  *   - Is the AccessibilityService enabled? (Can it click/scroll/read the screen?)
  *   - Is SYSTEM_ALERT_WINDOW granted? (Can it draw overlays?)
  *   - Is the microphone permission granted? (Can it hear the user?)
  *   - What's the battery level? (Should it conserve resources?)
- *   - What's the network status? (Can it reach Gemini API?)
+ *   - What's the network status? (Can it reach Groq API?)
  *   - Is battery optimization bypassed? (Will Android kill it?)
  *
  * ═══════════════════════════════════════════════════════════════════════
@@ -34,7 +34,7 @@ import com.jarvis.assistant.permissions.PermissionManager
  *
  * Without this, JARVIS might try to click a button when Accessibility
  * is disabled, or try to record audio when the mic permission is revoked.
- * By injecting the current state into the system prompt, Gemini can:
+ * By injecting the current state into the system prompt, Groq can:
  *   - Refuse actions that require disabled permissions
  *   - Suggest the user enable Accessibility when needed
  *   - Adapt its behavior to low battery / offline situations
@@ -47,7 +47,7 @@ object SystemDiagnosticManager {
 
     /**
      * Generate a complete system status report.
-     * This is injected into the Gemini System Prompt on every request.
+     * This is injected into the Groq System Prompt on every request.
      *
      * @param context Application context
      * @return A formatted string with all system state information
@@ -89,7 +89,7 @@ object SystemDiagnosticManager {
             appendLine()
             appendLine("DEVICE STATE:")
             appendLine("  Battery: ${report.batteryPercent}% ${if (report.isCharging) "(Charging)" else "(On Battery)"}")
-            appendLine("  Network: ${report.networkType} ${if (report.isOnline) "Connected" else "OFFLINE — Gemini API unreachable"}")
+            appendLine("  Network: ${report.networkType} ${if (report.isOnline) "Connected" else "OFFLINE — Groq API unreachable"}")
             appendLine("  Memory: ${report.availableMemoryMB}MB available of ${report.totalMemoryMB}MB")
             appendLine("  Low Memory: ${if (report.isLowMemory) "YES — may cause issues" else "No"}")
             appendLine()
@@ -102,7 +102,7 @@ object SystemDiagnosticManager {
             if (!report.isAccessibilityEnabled) appendLine("  - Enable Accessibility Service for screen control")
             if (!report.isBatteryOptBypassed) appendLine("  - Disable Battery Optimization to prevent OS killing JARVIS")
             if (!report.hasOverlayPermission) appendLine("  - Grant Overlay permission for floating assistant")
-            if (!report.isOnline) appendLine("  - Check network connection — Gemini API requires internet")
+            if (!report.isOnline) appendLine("  - Check network connection — Groq API requires internet")
             if (report.batteryPercent < 15 && !report.isCharging) appendLine("  - Low battery — some features may be limited")
         }
     }

@@ -8,8 +8,8 @@ import androidx.room.Index
  * MessageEntity — Room Database entity for persistent chat history.
  *
  * Every user message and AI response is stored as a row in this table.
- * On app restart, the last 20 messages are loaded into the Gemini
- * contents array so JARVIS never forgets the conversation context.
+ * On app restart, the last 20 messages are loaded into the Groq
+ * messages array so JARVIS never forgets the conversation context.
  *
  * ═══════════════════════════════════════════════════════════════════════
  * DESIGN DECISIONS:
@@ -18,8 +18,8 @@ import androidx.room.Index
  *     creates a new session ID. This allows the chat history drawer to
  *     display past sessions and the user to switch between them.
  *
- *   - role: Either "user" or "model", matching the Gemini API convention.
- *     This is directly mapped to the Gemini contents array role field.
+ *   - role: Either "user" or "model" (legacy from Gemini). Mapped to "assistant"
+ *     when sent to the Groq messages array for API compatibility.
  *
  *   - emotion: The detected emotion tag for the message (for UI coloring).
  *
@@ -41,7 +41,7 @@ data class MessageEntity(
 
     val sessionId: Long,
 
-    /** "user" or "model" — maps directly to Gemini API role */
+    /** "user" or "model" — mapped to "assistant" when sent to Groq API */
     val role: String,
 
     /** The message text content */

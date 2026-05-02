@@ -58,7 +58,7 @@ fun DeviceDiagnosticsScreen(
     cpuCores: Int = 8,
     cpuClockSpeed: String = "--",
     isRustReady: Boolean = false,
-    isGeminiConnected: Boolean = false,
+    isGroqConnected: Boolean = false,
     isAudioReady: Boolean = false,
     isWakeWordActive: Boolean = false,
     isServiceRunning: Boolean = false,
@@ -176,7 +176,7 @@ fun DeviceDiagnosticsScreen(
             GlassmorphicCardSimple {
                 JarvisSystemCard(
                     isRustReady = isRustReady,
-                    isGeminiConnected = isGeminiConnected,
+                    isGroqConnected = isGroqConnected,
                     isAudioReady = isAudioReady,
                     isWakeWordActive = isWakeWordActive,
                     isServiceRunning = isServiceRunning,
@@ -576,7 +576,7 @@ private fun CpuCard(
 @Composable
 private fun JarvisSystemCard(
     isRustReady: Boolean,
-    isGeminiConnected: Boolean,
+    isGroqConnected: Boolean,
     isAudioReady: Boolean,
     isWakeWordActive: Boolean,
     isServiceRunning: Boolean,
@@ -596,8 +596,8 @@ private fun JarvisSystemCard(
             offlineText = "Offline"
         )
         SystemStatusRow(
-            label = "Gemini API",
-            isOnline = isGeminiConnected,
+            label = "Groq API",
+            isOnline = isGroqConnected,
             onlineText = "Connected",
             offlineText = "Disconnected"
         )

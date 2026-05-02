@@ -56,11 +56,11 @@ class JarvisApp : Application() {
      * (user will configure them in Settings later).
      */
     private suspend fun initializeRustCore() {
-        val geminiKey = settingsRepository.getGeminiApiKey()
+        val groqKey = settingsRepository.getGroqApiKey()
         val elevenLabsKey = settingsRepository.getElevenLabsApiKey()
 
-        if (geminiKey.isNotEmpty() && RustBridge.isNativeReady()) {
-            val success = RustBridge.initialize(geminiKey, elevenLabsKey)
+        if (groqKey.isNotEmpty() && RustBridge.isNativeReady()) {
+            val success = RustBridge.initialize(groqKey, elevenLabsKey)
             if (success) {
                 Log.i(TAG, "Rust core initialized with persisted API keys")
             } else {

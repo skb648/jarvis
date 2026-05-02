@@ -9,7 +9,7 @@ import androidx.room.RoomDatabase
  * JarvisDatabase — Room Database for JARVIS's persistent brain.
  *
  * Stores all chat messages and sessions so that:
- *   1. JARVIS never forgets past context (loads last 20 into Gemini)
+ *   1. JARVIS never forgets past context (loads last 20 into Groq)
  *   2. The chat history drawer can display past sessions
  *   3. The user can switch between sessions and resume conversations
  *

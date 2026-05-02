@@ -30,11 +30,11 @@ import java.util.concurrent.ScheduledExecutorService
  *
  *  Feature B (Deep Text Injection): Find the currently focused EditText
  *      (like in Replit or Chrome) and use ACTION_SET_TEXT to instantly
- *      inject Gemini-generated code or text directly into that field.
+ *      inject AI-generated code or text directly into that field.
  *      Falls back to finding ANY editable field on screen.
  *
  *  Feature C (Screen Awareness): Read the current screen's nodes so
- *      Gemini can "know" what buttons are visible. Returns structured
+ *      AI can "know" what buttons are visible. Returns structured
  *      data about all interactive elements on screen.
  *
  *  Feature D (Background Interaction): Uses FLAG_RETRIEVE_INTERACTIVE_WINDOWS
@@ -45,7 +45,7 @@ import java.util.concurrent.ScheduledExecutorService
  *
  *  Feature F (Omniscient Eye): dumpScreenNodeTree() dumps the ENTIRE
  *      node tree as structured JSON — text, contentDescription, viewId,
- *      bounds, className, and interaction flags. Gemini can parse this
+ *      bounds, className, and interaction flags. AI can parse this
  *      to see the screen with perfect fidelity.
  *
  *  Feature G (Scroll Control): scrollNodeByText() finds a scrollable
@@ -53,7 +53,7 @@ import java.util.concurrent.ScheduledExecutorService
  *
  *  Feature H (AI-Optimized Dump): dumpScreenForAI() returns a concise
  *      text summary combining interactive elements + screen text,
- *      optimized for Gemini context window efficiency.
+ *      optimized for AI context window efficiency.
  * ═══════════════════════════════════════════════════════════════════════
  */
 class JarvisAccessibilityService : AccessibilityService() {
@@ -376,7 +376,7 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     /**
      * Find the currently focused EditText (like in Replit or Chrome) and use
-     * ACTION_SET_TEXT to instantly inject Gemini-generated code or text directly
+     * ACTION_SET_TEXT to instantly inject AI-generated code or text directly
      * into that field.
      *
      * This is the core "Deep Text Injection" feature that allows JARVIS to
@@ -543,7 +543,7 @@ class JarvisAccessibilityService : AccessibilityService() {
      * on the current screen. Returns a list of maps, each describing an
      * interactive node (clickable, editable, scrollable, etc.)
      *
-     * This is the "eyes" of the AI — Gemini uses this to understand what
+     * This is the "eyes" of the AI — AI uses this to understand what
      * buttons, fields, and controls are currently visible.
      */
     fun extractScreenNodes(): List<Map<String, Any?>> {
@@ -558,7 +558,7 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     /**
      * Extract only INTERACTIVE nodes (clickable, editable, scrollable, checkable)
-     * for a more concise screen description that Gemini can process efficiently.
+     * for a more concise screen description that AI can process efficiently.
      */
     fun extractInteractiveNodes(): List<Map<String, Any?>> {
         val rootNode = rootInActiveWindow ?: return emptyList()
@@ -609,7 +609,7 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     /**
      * Extract all visible text on the current screen as a single string.
-     * Useful for giving Gemini context about what the user is looking at.
+     * Useful for giving AI context about what the user is looking at.
      */
     fun extractScreenText(): String {
         val rootNode = rootInActiveWindow ?: return ""
@@ -620,7 +620,7 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Get a concise screen description optimized for Gemini context.
+     * Get a concise screen description optimized for AI context.
      * Returns only the most relevant interactive elements with their labels.
      */
     fun getScreenContextForAI(): String {
@@ -681,7 +681,7 @@ class JarvisAccessibilityService : AccessibilityService() {
      * and extracts ALL visible text, content descriptions, view IDs, bounds,
      * class names, and interaction flags into a structured JSON string.
      *
-     * This gives Gemini a complete, machine-parseable view of everything
+     * This gives AI a complete, machine-parseable view of everything
      * on screen — every button label, every text field, every scrollable
      * container, with precise bounds for gesture targeting.
      *
@@ -848,7 +848,7 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Feature H: AI-OPTIMIZED DUMP — Concise screen summary for Gemini
+    // Feature H: AI-OPTIMIZED DUMP — Concise screen summary for AI
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
@@ -863,7 +863,7 @@ class JarvisAccessibilityService : AccessibilityService() {
      *   3. Full screen text section (all visible text content)
      *
      * This is the ideal method to call when feeding screen context into
-     * Gemini — it provides both the structural information needed for
+     * AI — it provides both the structural information needed for
      * action planning AND the text content needed for understanding.
      *
      * @return A concise, AI-parseable text description of the current screen

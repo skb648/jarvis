@@ -7,7 +7,7 @@ import androidx.room.*
  *
  * Provides all CRUD operations needed for JARVIS's persistent memory:
  *   - Insert messages and sessions
- *   - Load the last N messages for Gemini context (never forget)
+ *   - Load the last N messages for Groq context (never forget)
  *   - List sessions for the chat history drawer
  *   - Delete old messages to keep the DB lean
  *   - Clear all history
@@ -27,7 +27,7 @@ interface MessageDao {
 
     /**
      * Get the last N messages in a session, ordered by timestamp ascending.
-     * This is what gets fed into the Gemini contents array for context.
+     * This is what gets fed into the Groq messages array for context.
      *
      * @param sessionId The session to query
      * @param limit Maximum number of messages to return (default 20)
