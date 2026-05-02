@@ -212,6 +212,16 @@
             </intent-filter>
         </service>
 
+        <!-- ─── Overlay Cursor Service (Foreground, Special Use) ──── -->
+        <service
+            android:name=".services.OverlayCursorService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="AI_cursor_overlay_for_screen_interaction" />
+        </service>
+
         <!-- ─── Shizuku Provider ──────────────────────────────────── -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

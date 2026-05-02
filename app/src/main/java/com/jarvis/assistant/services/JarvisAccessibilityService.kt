@@ -16,8 +16,12 @@ import com.jarvis.assistant.automation.TaskExecutorBridge
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.WeakReference
+import java.util.concurrent.Callable
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * JarvisAccessibilityService — The "Hands" of the AI.
@@ -73,6 +77,10 @@ class JarvisAccessibilityService : AccessibilityService() {
         Thread(r, "jarvis-a11y-actions").apply { isDaemon = true }
     }
 
+    // Screen dimensions for gesture calculations
+    private var screenWidth: Int = 1080
+    private var screenHeight: Int = 1920
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         ensureNoTouchExploration()
@@ -86,6 +94,12 @@ class JarvisAccessibilityService : AccessibilityService() {
 
         // Register this service with the TaskExecutorBridge so task chains can call us
         TaskExecutorBridge.accessibilityService = WeakReference(this)
+
+        // Cache screen dimensions for gesture calculations
+        val displayMetrics = resources.displayMetrics
+        screenWidth = displayMetrics.widthPixels
+        screenHeight = displayMetrics.heightPixels
+        Log.i(TAG, "Screen dimensions: ${screenWidth}x${screenHeight}")
 
         Log.i(TAG, "JARVIS Accessibility Service connected — autonomous agent mode active")
     }
@@ -239,6 +253,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 if (node.isEnabled && node.isVisibleToUser) {
                     // First try to focus the node
                     node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                    Thread.sleep(100) // Small delay for focus to take effect
                     if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                         Log.i(TAG, "[autoClick] Directly clicked node with text '$text'")
                         JarviewModel.sendEventToUi("auto_click", mapOf(
@@ -257,6 +272,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 val clickable = findClickableAncestor(node)
                 if (clickable != null) {
                     clickable.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                    Thread.sleep(100) // Small delay for focus to take effect
                     val result = clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     Log.i(TAG, "[autoClick] Clicked ancestor element with text '$text' — success=$result")
                     JarviewModel.sendEventToUi("auto_click", mapOf(
@@ -323,13 +339,51 @@ class JarvisAccessibilityService : AccessibilityService() {
                 moveTo(x.toFloat(), y.toFloat())
             }
             val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0L, 100L))
+                .addStroke(GestureDescription.StrokeDescription(path, 0L, 150L))
                 .build()
-            dispatchGesture(gesture, null, null)
+            dispatchGestureWithVerification(gesture)
         } catch (e: Exception) {
             Log.w(TAG, "[forceClickAtPosition] Failed: ${e.message}")
             false
         }
+    }
+
+    /**
+     * Dispatch a gesture with verification — uses CountDownLatch to wait for
+     * the gesture callback (onCompleted/onCancelled) instead of fire-and-forget.
+     * Handles main-thread dispatch internally.
+     *
+     * @return true if the gesture was dispatched AND completed successfully
+     */
+    private fun dispatchGestureWithVerification(gesture: GestureDescription): Boolean {
+        val latch = CountDownLatch(1)
+        val result = AtomicBoolean(false)
+
+        val dispatchRunnable = Runnable {
+            try {
+                dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        result.set(true)
+                        latch.countDown()
+                    }
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        result.set(false)
+                        latch.countDown()
+                    }
+                }, null)
+            } catch (e: Exception) {
+                Log.e(TAG, "[dispatchGestureWithVerification] dispatchGesture failed: ${e.message}")
+                latch.countDown()
+            }
+        }
+
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            dispatchRunnable.run()
+        } else {
+            Handler(Looper.getMainLooper()).post(dispatchRunnable)
+        }
+
+        return latch.await(2, TimeUnit.SECONDS) && result.get()
     }
 
     /**
@@ -367,6 +421,93 @@ class JarvisAccessibilityService : AccessibilityService() {
         } finally {
             // MEMORY LEAK FIX: Recycle all nodes after use
             nodes.forEach { it.recycle() }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Feature A2: COORDINATE-BASED CLICKS — Most reliable click method
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Click at exact screen coordinates using dispatchGesture.
+     * This is the most reliable click method — it always works via gesture
+     * simulation regardless of node accessibility properties.
+     *
+     * Runs on the background action executor thread with a 3-second timeout.
+     *
+     * @param x X coordinate on screen
+     * @param y Y coordinate on screen
+     * @return true if the gesture was dispatched and completed successfully
+     */
+    fun clickAtCoordinates(x: Int, y: Int): Boolean {
+        return try {
+            actionExecutor.submit(Callable {
+                val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0L, 150L))
+                    .build()
+                dispatchGestureWithVerification(gesture)
+            }).get(3, TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            Log.w(TAG, "[clickAtCoordinates] Failed at ($x, $y): ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Smart click: find a node by text, get its bounds, then use dispatchGesture
+     * at the center coordinates. More reliable than ACTION_CLICK because it
+     * simulates a real touch event that all apps must respond to.
+     *
+     * Falls back to clickAtCoordinates if the node is found but gesture fails,
+     * and to autoClick as a last resort.
+     *
+     * @param text The text to search for (case-insensitive)
+     * @return true if the click succeeded
+     */
+    fun autoClickWithCoordinates(text: String): Boolean {
+        val rootNode = rootInActiveWindow ?: run {
+            Log.w(TAG, "[autoClickWithCoordinates] No active window")
+            return false
+        }
+        val results = mutableListOf<AccessibilityNodeInfo>()
+        findNodesByTextRecursive(rootNode, text.lowercase(), results, 0)
+
+        if (results.isEmpty()) {
+            Log.w(TAG, "[autoClickWithCoordinates] No nodes found with text '$text'")
+            rootNode.recycle()
+            return false
+        }
+
+        try {
+            // Find the first visible node and gesture-click at its center
+            for (node in results) {
+                try { node.refresh() } catch (_: Exception) {}
+                if (node.isEnabled && node.isVisibleToUser) {
+                    val bounds = Rect()
+                    node.getBoundsInScreen(bounds)
+                    if (!bounds.isEmpty) {
+                        val centerX = (bounds.left + bounds.right) / 2
+                        val centerY = (bounds.top + bounds.bottom) / 2
+                        Log.i(TAG, "[autoClickWithCoordinates] Gesture-clicking at ($centerX, $centerY) for '$text'")
+                        if (clickAtCoordinates(centerX, centerY)) {
+                            JarviewModel.sendEventToUi("auto_click", mapOf(
+                                "text" to text, "success" to true,
+                                "method" to "coordinate_gesture_click",
+                                "timestamp" to System.currentTimeMillis()
+                            ))
+                            return true
+                        }
+                    }
+                }
+            }
+
+            // Fallback to regular autoClick (which tries ACTION_CLICK etc.)
+            Log.i(TAG, "[autoClickWithCoordinates] Gesture click failed, falling back to autoClick")
+            return autoClick(text)
+        } finally {
+            results.forEach { it.recycle() }
+            rootNode.recycle()
         }
     }
 
@@ -956,7 +1097,12 @@ class JarvisAccessibilityService : AccessibilityService() {
         if (depth > MAX_TRAVERSAL_DEPTH) return
         val nodeText = (node.text?.toString() ?: "").lowercase()
         val contentDesc = (node.contentDescription?.toString() ?: "").lowercase()
-        if (nodeText.contains(query) || contentDesc.contains(query)) {
+        // Fuzzy/partial matching: contains, reverse-contains, and starts-with
+        val textMatches = nodeText.isNotEmpty() &&
+            (nodeText.contains(query) || query.contains(nodeText) || nodeText.startsWith(query))
+        val descMatches = contentDesc.isNotEmpty() &&
+            (contentDesc.contains(query) || query.contains(contentDesc) || contentDesc.startsWith(query))
+        if (textMatches || descMatches) {
             results.add(node)
         }
         for (i in 0 until node.childCount) {
@@ -1045,18 +1191,18 @@ class JarvisAccessibilityService : AccessibilityService() {
     // Gesture Actions
     // ═══════════════════════════════════════════════════════════════════════
 
-    fun performTap(x: Int, y: Int, duration: Long = 100): Boolean {
+    fun performTap(x: Int, y: Int, duration: Long = 150): Boolean {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val stroke = GestureDescription.StrokeDescription(path, 0, duration)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return dispatchGestureOnMainThread(gesture)
+        return dispatchGestureWithVerification(gesture)
     }
 
     fun performLongPress(x: Int, y: Int, duration: Long = 1000): Boolean {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val stroke = GestureDescription.StrokeDescription(path, 0, duration)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return dispatchGestureOnMainThread(gesture)
+        return dispatchGestureWithVerification(gesture)
     }
 
     fun performSwipe(
@@ -1070,20 +1216,20 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
         val stroke = GestureDescription.StrokeDescription(path, 0, duration)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return dispatchGestureOnMainThread(gesture)
+        return dispatchGestureWithVerification(gesture)
     }
 
     fun performScroll(direction: String, distance: Int = 500, duration: Long = 500): Boolean {
-        val centerX = JarviewModel.screenWidth / 2
+        val centerX = screenWidth / 2
         val startY: Int
         val endY: Int
         when (direction) {
             "up" -> {
-                startY = JarviewModel.screenHeight * 2 / 3
+                startY = screenHeight * 2 / 3
                 endY = startY - distance
             }
             "down" -> {
-                startY = JarviewModel.screenHeight / 3
+                startY = screenHeight / 3
                 endY = startY + distance
             }
             else -> return false
@@ -1124,26 +1270,12 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * BUG FIX (BUG-3): dispatchGesture() MUST be called on the main thread.
-     * When invoked from a background coroutine (e.g., via CommandRouter or GestureController),
-     * this throws IllegalStateException. We ensure it always runs on the main thread.
+     * Dispatch a gesture on the main thread with verified callback.
+     * Delegates to dispatchGestureWithVerification which handles both
+     * main-thread dispatch and gesture completion verification.
      */
     private fun dispatchGestureOnMainThread(gesture: GestureDescription): Boolean {
-        return if (Looper.myLooper() == Looper.getMainLooper()) {
-            dispatchGesture(gesture, null, null)
-        } else {
-            val result = java.util.concurrent.LinkedBlockingQueue<Boolean>(1)
-            Handler(Looper.getMainLooper()).post {
-                try {
-                    val dispatched = dispatchGesture(gesture, null, null)
-                    result.offer(dispatched)
-                } catch (e: Exception) {
-                    Log.e(TAG, "dispatchGesture on main thread failed: ${e.message}")
-                    result.offer(false)
-                }
-            }
-            result.poll(3, java.util.concurrent.TimeUnit.SECONDS) ?: false
-        }
+        return dispatchGestureWithVerification(gesture)
     }
 
     // ═══════════════════════════════════════════════════════════════════════

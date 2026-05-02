@@ -6,6 +6,7 @@ import com.jarvis.assistant.services.JarvisAccessibilityService
 import com.jarvis.assistant.services.JarvisForegroundService
 import com.jarvis.assistant.services.JarvisSensoryService
 import com.jarvis.assistant.services.JarvisSpeechService
+import com.jarvis.assistant.services.OverlayCursorService
 import com.jarvis.assistant.keepalive.JarvisKeepAliveService
 import java.lang.ref.WeakReference
 
@@ -40,6 +41,7 @@ object JarviewModel {
     @Volatile var speechService: WeakReference<JarvisSpeechService>? = null
     @Volatile var sensoryService: WeakReference<JarvisSensoryService>? = null
     @Volatile var keepAliveService: WeakReference<JarvisKeepAliveService>? = null
+    @Volatile var overlayCursorService: WeakReference<OverlayCursorService>? = null
 
     // ─── Permission States ────────────────────────────────────────
     @Volatile var hasOverlayPermission: Boolean = false
@@ -121,6 +123,13 @@ object JarviewModel {
     @Volatile var overlayX: Int = 0
     @Volatile var overlayY: Int = 0
 
+    // ─── Cursor Overlay State ────────────────────────────────────
+    @Volatile var cursorX: Int = 0
+    @Volatile var cursorY: Int = 0
+    @Volatile var cursorVisible: Boolean = false
+    @Volatile var cursorServiceRunning: Boolean = false
+    @Volatile var computerUseActive: Boolean = false
+
     // ─── API Key (shared for TaskExecutorBridge image generation) ──
     @Volatile var groqApiKey: String = ""
 
@@ -186,6 +195,11 @@ object JarviewModel {
         "homeAssistantUrl" to homeAssistantUrl,
         "deviceList" to deviceList,
         "overlayVisible" to overlayVisible,
+        "cursorX" to cursorX,
+        "cursorY" to cursorY,
+        "cursorVisible" to cursorVisible,
+        "cursorServiceRunning" to cursorServiceRunning,
+        "computerUseActive" to computerUseActive,
         "activeRoutines" to activeRoutines,
         "lastRoutineTriggered" to lastRoutineTriggered,
         "widgetBrainState" to widgetBrainState,
@@ -251,6 +265,11 @@ object JarviewModel {
         overlayVisible = false
         overlayX = 0
         overlayY = 0
+        cursorX = 0
+        cursorY = 0
+        cursorVisible = false
+        cursorServiceRunning = false
+        computerUseActive = false
         activeRoutines = 0
         lastRoutineTriggered = ""
         widgetBrainState = "idle"

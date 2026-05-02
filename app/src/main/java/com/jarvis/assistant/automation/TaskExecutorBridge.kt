@@ -6,6 +6,8 @@ import android.media.AudioManager
 import android.net.Uri
 import android.util.Log
 import com.jarvis.assistant.actions.AppRegistry
+import com.jarvis.assistant.monitor.SelfDiagnosticManager
+import com.jarvis.assistant.search.WebSearchEngine
 import com.jarvis.assistant.services.JarvisAccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -295,39 +297,61 @@ object TaskExecutorBridge {
         }
     }
 
-    private fun executeClickButton(args: Map<String, String>): StepResult {
+    private suspend fun executeClickButton(args: Map<String, String>): StepResult {
         val label = args["label"]?.trim() ?: return StepResult.Failed("Missing 'label' argument")
 
         // Try accessibility service first
         val svc = accessibilityService?.get()
         if (svc != null) {
             val clicked = svc.autoClick(label)
-            if (clicked) return StepResult.Success("Clicked button '$label'")
+            if (clicked) {
+                delay(500)
+                return StepResult.Success("Clicked button '$label'")
+            }
         }
 
-        // Fallback: Shizuku shell command for tapping
+        // Better Shizuku fallback: use uiautomator to find and click by text
         if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
             Log.i(TAG, "[click_button] Accessibility failed, trying Shizuku fallback for '$label'")
-            // Use input keyevent as a generic tap substitute
-            val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENTER")
-            return if (result.isSuccess) {
-                StepResult.Success("Attempted click via Shizuku for '$label'")
-            } else {
-                StepResult.Failed("Shizuku fallback failed for '$label': ${result.stderr}")
+            // Try to find the element's coordinates via uiautomator dump
+            val dumpResult = ShizukuManager.executeShellCommand("uiautomator dump /dev/tty 2>/dev/null")
+            if (dumpResult.isSuccess && dumpResult.stdout.isNotBlank()) {
+                // Parse bounds from XML - find the element with matching text
+                val boundsRegex = """text="[^"]*$label[^"]*"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)]""".toRegex(RegexOption.IGNORE_CASE)
+                val match = boundsRegex.find(dumpResult.stdout)
+                if (match != null) {
+                    val left = match.groupValues[1].toIntOrNull() ?: 0
+                    val top = match.groupValues[2].toIntOrNull() ?: 0
+                    val right = match.groupValues[3].toIntOrNull() ?: 0
+                    val bottom = match.groupValues[4].toIntOrNull() ?: 0
+                    val centerX = (left + right) / 2
+                    val centerY = (top + bottom) / 2
+                    val tapResult = ShizukuManager.executeShellCommand("input tap $centerX $centerY")
+                    if (tapResult.isSuccess) {
+                        delay(500)
+                        return StepResult.Success("Clicked '$label' at ($centerX, $centerY) via Shizuku")
+                    }
+                }
             }
+            // Final fallback: just try tap
+            val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENTER")
+            return if (result.isSuccess) StepResult.Success("Attempted press via Shizuku for '$label'") else StepResult.Failed("All click methods failed for '$label'")
         }
 
         return StepResult.Failed("Could not click '$label' — enable Accessibility Service or Shizuku")
     }
 
-    private fun executeInjectText(args: Map<String, String>): StepResult {
+    private suspend fun executeInjectText(args: Map<String, String>): StepResult {
         val content = args["content"]?.trim() ?: return StepResult.Failed("Missing 'content' argument")
 
         // Try accessibility service first
         val svc = accessibilityService?.get()
         if (svc != null) {
             val injected = svc.injectTextToFocusedField(content)
-            if (injected) return StepResult.Success("Injected ${content.length} characters into focused field")
+            if (injected) {
+                delay(300)
+                return StepResult.Success("Injected ${content.length} characters into focused field")
+            }
         }
 
         // Fallback: Shizuku shell command for text injection
@@ -341,6 +365,7 @@ object TaskExecutorBridge {
                 .replace("'", "\\'").replace("`", "\\`")
             val result = ShizukuManager.executeShellCommand("input text \"$encodedContent\"")
             return if (result.isSuccess) {
+                delay(300)
                 StepResult.Success("Injected text via Shizuku: ${content.length} chars")
             } else {
                 StepResult.Failed("Shizuku text injection failed: ${result.stderr}")
@@ -350,7 +375,7 @@ object TaskExecutorBridge {
         return StepResult.Failed("Could not inject text — enable Accessibility Service or Shizuku")
     }
 
-    private fun executeScroll(args: Map<String, String>): StepResult {
+    private suspend fun executeScroll(args: Map<String, String>): StepResult {
         val direction = args["direction"]?.lowercase()?.trim() ?: "down"
         if (direction !in listOf("up", "down")) {
             return StepResult.Failed("Invalid scroll direction: $direction (use 'up' or 'down')")
@@ -360,7 +385,10 @@ object TaskExecutorBridge {
         val svc = accessibilityService?.get()
         if (svc != null) {
             val scrolled = svc.performScroll(direction)
-            if (scrolled) return StepResult.Success("Scrolled $direction")
+            if (scrolled) {
+                delay(400)
+                return StepResult.Success("Scrolled $direction")
+            }
         }
 
         // Fallback: Shizuku shell command for swipe-based scrolling
@@ -374,6 +402,7 @@ object TaskExecutorBridge {
             if (swipeCmd != null) {
                 val result = ShizukuManager.executeShellCommand(swipeCmd)
                 return if (result.isSuccess) {
+                    delay(400)
                     StepResult.Success("Scrolled $direction via Shizuku")
                 } else {
                     StepResult.Failed("Shizuku scroll $direction failed: ${result.stderr}")
@@ -479,7 +508,7 @@ object TaskExecutorBridge {
      * click_ui_element — Click a UI element by text label or view ID.
      * Enhanced version of click_button that also supports view IDs.
      */
-    private fun executeClickUiElement(args: Map<String, String>): StepResult {
+    private suspend fun executeClickUiElement(args: Map<String, String>): StepResult {
         val textOrId = args["text_or_id"]?.trim() ?: return StepResult.Failed("Missing 'text_or_id' argument")
 
         // Try accessibility service first
@@ -487,22 +516,45 @@ object TaskExecutorBridge {
         if (svc != null) {
             // Try clicking by text first, then by ID
             val clickedByText = svc.autoClick(textOrId)
-            if (clickedByText) return StepResult.Success("Clicked UI element with text '$textOrId'")
+            if (clickedByText) {
+                delay(500)
+                return StepResult.Success("Clicked UI element with text '$textOrId'")
+            }
 
             // If text click failed, try by view ID
             val clickedById = svc.clickNodeById(textOrId)
-            if (clickedById) return StepResult.Success("Clicked UI element with ID '$textOrId'")
+            if (clickedById) {
+                delay(500)
+                return StepResult.Success("Clicked UI element with ID '$textOrId'")
+            }
         }
 
-        // Fallback: Shizuku shell command
+        // Better Shizuku fallback: use uiautomator to find and click by text
         if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
             Log.i(TAG, "[click_ui_element] Accessibility failed, trying Shizuku fallback for '$textOrId'")
-            val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENTER")
-            return if (result.isSuccess) {
-                StepResult.Success("Attempted click via Shizuku for '$textOrId'")
-            } else {
-                StepResult.Failed("Shizuku fallback failed for '$textOrId': ${result.stderr}")
+            // Try to find the element's coordinates via uiautomator dump
+            val dumpResult = ShizukuManager.executeShellCommand("uiautomator dump /dev/tty 2>/dev/null")
+            if (dumpResult.isSuccess && dumpResult.stdout.isNotBlank()) {
+                // Parse bounds from XML - find the element with matching text
+                val boundsRegex = """text="[^"]*$textOrId[^"]*"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)]""".toRegex(RegexOption.IGNORE_CASE)
+                val match = boundsRegex.find(dumpResult.stdout)
+                if (match != null) {
+                    val left = match.groupValues[1].toIntOrNull() ?: 0
+                    val top = match.groupValues[2].toIntOrNull() ?: 0
+                    val right = match.groupValues[3].toIntOrNull() ?: 0
+                    val bottom = match.groupValues[4].toIntOrNull() ?: 0
+                    val centerX = (left + right) / 2
+                    val centerY = (top + bottom) / 2
+                    val tapResult = ShizukuManager.executeShellCommand("input tap $centerX $centerY")
+                    if (tapResult.isSuccess) {
+                        delay(500)
+                        return StepResult.Success("Clicked '$textOrId' at ($centerX, $centerY) via Shizuku")
+                    }
+                }
             }
+            // Final fallback: just try tap
+            val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENTER")
+            return if (result.isSuccess) StepResult.Success("Attempted press via Shizuku for '$textOrId'") else StepResult.Failed("All click methods failed for '$textOrId'")
         }
 
         return StepResult.Failed("Could not find or click UI element '$textOrId' — enable Accessibility Service or Shizuku. Try dump_screen to see available elements.")
@@ -668,7 +720,7 @@ object TaskExecutorBridge {
      */
     private fun executeDiagnoseSystem(args: Map<String, String>): StepResult {
         val issueType = args["issue_type"]?.trim() ?: "general"
-        val report = com.jarvis.assistant.monitor.SelfDiagnosticManager.diagnoseIssue(issueType)
+        val report = SelfDiagnosticManager.diagnoseIssue(issueType)
         return StepResult.Success(report)
     }
 
@@ -680,7 +732,7 @@ object TaskExecutorBridge {
         val query = args["query"]?.trim() ?: return StepResult.Failed("Missing 'query' argument")
         return try {
             val result = withContext(Dispatchers.IO) {
-                com.jarvis.assistant.search.WebSearchEngine().search(query)
+                WebSearchEngine().search(query)
             }
             StepResult.Success(result)
         } catch (e: Exception) {

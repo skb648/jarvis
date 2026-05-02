@@ -119,18 +119,23 @@ android {
     }
 
     // CMake external native build — compiles the JNI stub bridge
-    // Only configure if NDK is available; skip gracefully otherwise
+    // Only configure if NDK is available AND CMakeLists.txt exists; skip gracefully otherwise
     val ndkHome = System.getenv("ANDROID_NDK_HOME")
         ?: System.getenv("NDK_HOME")
-    if (ndkHome != null && File(ndkHome).exists()) {
+    val cmakeListsFile = file("src/main/cpp/CMakeLists.txt")
+    if (ndkHome != null && File(ndkHome).exists() && cmakeListsFile.exists()) {
         externalNativeBuild {
             cmake {
-                path = file("src/main/cpp/CMakeLists.txt")
+                path = cmakeListsFile
                 version = "3.22.1"
             }
         }
     } else {
-        logger.lifecycle("⚠️ NDK not found — skipping CMake external native build. JNI stub will not be compiled.")
+        if (ndkHome == null || !File(ndkHome).exists()) {
+            logger.lifecycle("⚠️ NDK not found — skipping CMake external native build. JNI stub will not be compiled.")
+        } else {
+            logger.lifecycle("⚠️ CMakeLists.txt not found at ${cmakeListsFile.absolutePath} — skipping CMake external native build.")
+        }
     }
 
     packaging {
@@ -158,22 +163,18 @@ android {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Rust NDK Build Integration — MANUAL ONLY
+// Rust NDK Build Integration — DISABLED
 //
-// The Rust build tasks are available as MANUAL tasks only.
-// They are NOT automatically triggered during ./gradlew assembleDebug/Release.
+// The Rust/Cargo build tasks have been commented out because cargo-ndk
+// is NOT available in CI environments and was causing build failures.
+// The CMake stub (jni_bridge_stub.c) provides fallback JNI implementations.
 //
-// This is because cargo-ndk is NOT available in CI environments (GitHub Actions),
-// and the auto-dependency caused build failures.
-//
-// To build Rust .so files locally, run manually:
+// To re-enable Rust builds, uncomment the block below and run:
 //   ./gradlew buildRustDebug
 //   ./gradlew buildRustRelease
-//
-// When Rust .so is not available, CMake builds the stub library
-// (jni_bridge_stub.c) which provides safe no-op JNI implementations.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/* — Rust build tasks DISABLED to fix CI builds —
 val rustDir = file("${project.projectDir}/../rust")
 val jniLibsDir = file("${project.projectDir}/src/main/jniLibs")
 
@@ -285,23 +286,7 @@ tasks.register("buildRustRelease") {
     group = "rust"
     dependsOn(releaseTasks)
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// CRITICAL FIX: Auto-wire Rust build as a pre-build dependency
-//
-// This ensures that ./gradlew assembleRelease and ./gradlew assembleDebug
-// ALWAYS attempt to build the Rust .so files before CMake runs.
-//
-// IMPORTANT: Debug builds use debug Rust .so (~83MB+63MB with symbols),
-// Release builds use release Rust .so (~2.6MB+1.8MB stripped).
-// We must NOT let release Rust overwrite debug .so — that was causing
-// the debug APK to be only 23MB instead of 66MB.
-// ═══════════════════════════════════════════════════════════════════════
-
-// NOTE: Rust build tasks are MANUAL ONLY. Do NOT auto-wire them as
-// pre-build dependencies. CI environments (GitHub Actions) do not have
-// cargo-ndk, and auto-wiring causes the build to fail.
-// The CMake stub (jni_bridge_stub.c) provides fallback JNI implementations.
+— End of disabled Rust build tasks */
 
 dependencies {
     val composeBom = platform(libs.compose.bom)

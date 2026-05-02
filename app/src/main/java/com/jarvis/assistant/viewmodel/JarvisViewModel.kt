@@ -23,8 +23,11 @@ import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.jarvis.assistant.actions.ActionHandler
 import com.jarvis.assistant.audio.AudioEngine
+import com.jarvis.assistant.automation.AutonomousAgentEngine
 import com.jarvis.assistant.automation.GroqFunctionCaller
 import com.jarvis.assistant.automation.TaskExecutorBridge
+import com.jarvis.assistant.services.OverlayCursorService
+import android.os.Build
 import com.jarvis.assistant.brief.DailyBriefGenerator
 import com.jarvis.assistant.channels.JarviewModel
 import com.jarvis.assistant.data.SettingsRepository
@@ -626,6 +629,16 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         _computerUseActive.value = true
         _computerAiStatus.value = "SEEING"
         addComputerAction("AI Computer Use activated — analyzing screen")
+        // Start cursor overlay service
+        applicationContext?.let { ctx ->
+            val intent = Intent(ctx, OverlayCursorService::class.java)
+            intent.action = "SHOW"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(intent)
+            } else {
+                ctx.startService(intent)
+            }
+        }
     }
 
     /** Deactivate AI Computer Use mode */
@@ -633,20 +646,183 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         _computerUseActive.value = false
         _computerAiStatus.value = "IDLE"
         addComputerAction("AI Computer Use deactivated")
+        // Stop cursor overlay service
+        applicationContext?.let { ctx ->
+            val intent = Intent(ctx, OverlayCursorService::class.java)
+            ctx.stopService(intent)
+        }
     }
 
-    /** Move AI cursor to normalized position (0..1, 0..1) */
-    fun moveCursor(x: Float, y: Float) {
+    /** Move AI cursor to pixel position */
+    fun moveCursor(x: Int, y: Int) {
+        _cursorX.value = x.toFloat()
+        _cursorY.value = y.toFloat()
+        JarviewModel.cursorX = x
+        JarviewModel.cursorY = y
+        // Move the real cursor overlay
+        JarviewModel.overlayCursorService?.get()?.moveCursorTo(x, y)
+    }
+
+    /** Move AI cursor to normalized position (0..1, 0..1) — kept for backward compatibility */
+    fun moveCursorNormalized(x: Float, y: Float) {
         _cursorX.value = x.coerceIn(0f, 1f)
         _cursorY.value = y.coerceIn(0f, 1f)
     }
 
-    /** Process a Computer Use command */
+    /** Process a Computer Use command — uses autonomous agent for multi-step device actions */
     fun processComputerCommand(command: String, context: Context) {
         addComputerAction("Command: $command")
         _computerAiStatus.value = "SEEING"
-        // Route through processQuery so the AI can use dispatch_gesture, click_ui_element, etc.
-        processQuery(command, context)
+        // Activate computer use mode if not already active
+        if (!_computerUseActive.value) {
+            activateComputerUse()
+        }
+        // Use autonomous agent for computer use commands
+        runAutonomousTask(command, context)
+    }
+
+    /**
+     * Run an autonomous task using the AutonomousAgentEngine.
+     *
+     * This is the primary entry point for autonomous device control.
+     * The agent runs the full See-Think-Act-Observe loop and updates
+     * brainState and computerAiStatus as it progresses.
+     *
+     * @param goal    The user's goal/task description
+     * @param context Android context for service interactions
+     */
+    fun runAutonomousTask(goal: String, context: Context? = null) {
+        val ctx = context ?: applicationContext ?: run {
+            Log.e(TAG, "[runAutonomousTask] No context available — cannot run autonomous task")
+            addAssistantMessage("Unable to execute task — no context available, Sir.", "stressed")
+            return
+        }
+
+        if (_groqApiKey.value.isBlank()) {
+            Log.w(TAG, "[runAutonomousTask] No API key — cannot run autonomous task")
+            addAssistantMessage("I need a Groq API key to execute tasks, Sir. Please set it in Settings.", "stressed")
+            _brainState.value = BrainState.IDLE
+            isProcessing.set(false)
+            return
+        }
+
+        if (AutonomousAgentEngine.isTaskRunning()) {
+            Log.w(TAG, "[runAutonomousTask] Another autonomous task is already running")
+            addAssistantMessage("I'm already working on a task, Sir. Please wait.", "calm")
+            return
+        }
+
+        Log.i(TAG, "[runAutonomousTask] Starting autonomous task: $goal")
+        _brainState.value = BrainState.THINKING
+        _isTyping.value = true
+        _computerAiStatus.value = "SEEING"
+        addComputerAction("Starting autonomous task: $goal")
+
+        viewModelScope.launch(Dispatchers.Main) {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    AutonomousAgentEngine.runAutonomousTask(
+                        goal = goal,
+                        apiKey = _groqApiKey.value,
+                        context = ctx,
+                        historyJson = buildHistoryJson(),
+                        onStateChange = { agentState, description ->
+                            // Map agent state to UI brain state
+                            when (agentState) {
+                                AutonomousAgentEngine.AgentState.SEEING -> {
+                                    _brainState.value = BrainState.THINKING
+                                    _computerAiStatus.value = "SEEING"
+                                    addComputerAction("[SEE] $description")
+                                }
+                                AutonomousAgentEngine.AgentState.THINKING -> {
+                                    _brainState.value = BrainState.THINKING
+                                    _computerAiStatus.value = "THINKING"
+                                    addComputerAction("[THINK] $description")
+                                }
+                                AutonomousAgentEngine.AgentState.ACTING -> {
+                                    _brainState.value = BrainState.THINKING
+                                    _computerAiStatus.value = "ACTING"
+                                    addComputerAction("[ACT] $description")
+                                }
+                                AutonomousAgentEngine.AgentState.OBSERVING -> {
+                                    _brainState.value = BrainState.THINKING
+                                    _computerAiStatus.value = "OBSERVING"
+                                    addComputerAction("[OBSERVE] $description")
+                                }
+                                AutonomousAgentEngine.AgentState.COMPLETED -> {
+                                    addComputerAction("[DONE] $description")
+                                }
+                                AutonomousAgentEngine.AgentState.FAILED -> {
+                                    addComputerAction("[FAILED] $description")
+                                }
+                                AutonomousAgentEngine.AgentState.IDLE -> { /* no-op */ }
+                            }
+                        },
+                        onAction = { toolName, args, stepResult ->
+                            val argsStr = args.entries.joinToString(", ") { "${it.key}=${it.value}" }
+                            val resultStr = when (stepResult) {
+                                is TaskExecutorBridge.StepResult.Success -> stepResult.message
+                                is TaskExecutorBridge.StepResult.Failed -> "FAILED: ${stepResult.message}"
+                            }
+                            addComputerAction("  ↳ $toolName($argsStr) → $resultStr")
+                        }
+                    )
+                }
+
+                // Handle the result
+                when (result) {
+                    is AutonomousAgentEngine.AgentResult.Success -> {
+                        val msg = "Task complete, Sir. ${result.stepsCompleted} step(s) executed successfully."
+                        _emotion.value = "confident"
+                        _lastResponse.value = msg
+                        _isTyping.value = false
+                        addAssistantMessage(msg, "confident")
+                        _brainState.value = BrainState.SPEAKING
+                        _audioAmplitude.value = 0.5f
+                        _computerAiStatus.value = "IDLE"
+                        trySynthesizeAndPlay(msg, ctx)
+                    }
+                    is AutonomousAgentEngine.AgentResult.Partial -> {
+                        val msg = "Partially done, Sir. ${result.stepsCompleted} step(s) completed. Last issue: ${result.lastError}"
+                        _emotion.value = "stressed"
+                        _lastResponse.value = msg
+                        _isTyping.value = false
+                        addAssistantMessage(msg, "stressed")
+                        _brainState.value = BrainState.SPEAKING
+                        _audioAmplitude.value = 0.5f
+                        _computerAiStatus.value = "IDLE"
+                        trySynthesizeAndPlay(msg, ctx)
+                    }
+                    is AutonomousAgentEngine.AgentResult.Failed -> {
+                        val msg = "I couldn't complete that task, Sir. Reason: ${result.reason}"
+                        _emotion.value = "stressed"
+                        _lastResponse.value = msg
+                        _isTyping.value = false
+                        addAssistantMessage(msg, "stressed")
+                        _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+                        _computerAiStatus.value = "IDLE"
+                        _audioAmplitude.value = 0f
+                        isProcessing.set(false)
+                        if (_isVoiceMode.value) {
+                            restartListeningAfterTts()
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+                _computerAiStatus.value = "IDLE"
+                isProcessing.set(false)
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "[runAutonomousTask] Failed", e)
+                _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.ERROR
+                _isTyping.value = false
+                _audioAmplitude.value = 0f
+                _computerAiStatus.value = "IDLE"
+                isProcessing.set(false)
+                addAssistantMessage("Autonomous task error: ${e.message?.take(200) ?: "Unknown"}", "stressed")
+            }
+        }
     }
 
     /** Add an action to the Computer Use log */
@@ -1901,13 +2077,105 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             }
 
             // ═══════════════════════════════════════════════════════════════════
-            // v17: GROQ FUNCTION CALLING (replaces Gemini Function Calling)
-            // Groq uses OpenAI-compatible tool calling format.
-            // llama-3.1-8b-instant is fastest, mixtral-8x7b has 32K context.
+            // v18: AUTONOMOUS AGENT ENGINE (replaces GroqFunctionCaller)
+            // Full See-Think-Act-Observe loop with multi-round autonomous execution.
+            // Falls back to GroqFunctionCaller if agent fails, then to Groq Direct.
             // ═══════════════════════════════════════════════════════════════════
             if (_groqApiKey.value.isNotBlank()) {
                 try {
-                    Log.d(AUDIO_TAG, "[handleAIQuery] Trying Groq Function Calling for autonomous task planning")
+                    Log.d(AUDIO_TAG, "[handleAIQuery] Launching AutonomousAgentEngine for: \"$query\"")
+                    val agentResult = withContext(Dispatchers.IO) {
+                        AutonomousAgentEngine.runAutonomousTask(
+                            goal = query,
+                            apiKey = _groqApiKey.value,
+                            context = context,
+                            historyJson = enhancedHistoryJson,
+                            onStateChange = { agentState, description ->
+                                // Map agent state to UI brain state and computer AI status
+                                when (agentState) {
+                                    AutonomousAgentEngine.AgentState.SEEING -> {
+                                        _brainState.value = BrainState.THINKING
+                                        _computerAiStatus.value = "SEEING"
+                                        addComputerAction(description)
+                                    }
+                                    AutonomousAgentEngine.AgentState.THINKING -> {
+                                        _brainState.value = BrainState.THINKING
+                                        _computerAiStatus.value = "THINKING"
+                                        addComputerAction(description)
+                                    }
+                                    AutonomousAgentEngine.AgentState.ACTING -> {
+                                        _brainState.value = BrainState.THINKING
+                                        _computerAiStatus.value = "ACTING"
+                                        addComputerAction(description)
+                                    }
+                                    AutonomousAgentEngine.AgentState.OBSERVING -> {
+                                        _brainState.value = BrainState.THINKING
+                                        _computerAiStatus.value = "OBSERVING"
+                                        addComputerAction(description)
+                                    }
+                                    AutonomousAgentEngine.AgentState.COMPLETED -> {
+                                        addComputerAction("Task completed: $description")
+                                    }
+                                    AutonomousAgentEngine.AgentState.FAILED -> {
+                                        addComputerAction("Task failed: $description")
+                                    }
+                                    AutonomousAgentEngine.AgentState.IDLE -> { /* no-op */ }
+                                }
+                            },
+                            onAction = { toolName, args, stepResult ->
+                                // Log each action to the computer use log
+                                val argsStr = args.entries.joinToString(", ") { "${it.key}=${it.value}" }
+                                val resultStr = when (stepResult) {
+                                    is TaskExecutorBridge.StepResult.Success -> stepResult.message
+                                    is TaskExecutorBridge.StepResult.Failed -> "FAILED: ${stepResult.message}"
+                                }
+                                addComputerAction("$toolName($argsStr) → $resultStr")
+                            }
+                        )
+                    }
+
+                    // Handle the autonomous agent result
+                    when (agentResult) {
+                        is AutonomousAgentEngine.AgentResult.Success -> {
+                            val msg = "Task complete, Sir. ${agentResult.stepsCompleted} step(s) executed."
+                            _emotion.value       = "confident"
+                            _lastResponse.value  = msg
+                            _isTyping.value      = false
+                            addAssistantMessage(msg, "confident")
+                            _brainState.value     = BrainState.SPEAKING
+                            _audioAmplitude.value = 0.5f
+                            _computerAiStatus.value = "IDLE"
+                            trySynthesizeAndPlay(msg, context)
+                            return
+                        }
+                        is AutonomousAgentEngine.AgentResult.Partial -> {
+                            val msg = "Partially done, Sir. ${agentResult.stepsCompleted} step(s) completed. Issue: ${agentResult.lastError}"
+                            _emotion.value       = "stressed"
+                            _lastResponse.value  = msg
+                            _isTyping.value      = false
+                            addAssistantMessage(msg, "stressed")
+                            _brainState.value     = BrainState.SPEAKING
+                            _audioAmplitude.value = 0.5f
+                            _computerAiStatus.value = "IDLE"
+                            trySynthesizeAndPlay(msg, context)
+                            return
+                        }
+                        is AutonomousAgentEngine.AgentResult.Failed -> {
+                            // Autonomous agent failed — fall through to GroqFunctionCaller fallback
+                            Log.w(AUDIO_TAG, "[handleAIQuery] AutonomousAgentEngine failed: ${agentResult.reason} — falling back to GroqFunctionCaller")
+                            addComputerAction("Autonomous agent failed: ${agentResult.reason}")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(AUDIO_TAG, "[handleAIQuery] AutonomousAgentEngine exception: ${e.message} — falling back to GroqFunctionCaller")
+                }
+
+                // ═══════════════════════════════════════════════════════════════════
+                // FALLBACK 1: GroqFunctionCaller (single-round tool calling)
+                // Used when the autonomous agent fails or is unavailable.
+                // ═══════════════════════════════════════════════════════════════════
+                try {
+                    Log.d(AUDIO_TAG, "[handleAIQuery] Trying GroqFunctionCaller as fallback")
                     val toolResult = withContext(Dispatchers.IO) {
                         GroqFunctionCaller.processWithTools(
                             query = query,
@@ -1919,7 +2187,6 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
 
                     when (toolResult) {
                         is GroqFunctionCaller.ProcessResult.ToolExecuted -> {
-                            // Groq returned a function call and we executed it
                             val stepMsg = when (toolResult.stepResult) {
                                 is TaskExecutorBridge.StepResult.Success -> toolResult.stepResult.message
                                 is TaskExecutorBridge.StepResult.Failed -> "Action failed: ${toolResult.stepResult.message}"
@@ -1937,7 +2204,6 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                             return
                         }
                         is GroqFunctionCaller.ProcessResult.TextOnly -> {
-                            // Groq returned a text response — use it directly
                             val rawResponse = toolResult.response
                             val emotionTag = parseEmotionTag(rawResponse)
                             var cleanResponse = stripEmotionTag(rawResponse)
@@ -1963,7 +2229,6 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                             return
                         }
                         is GroqFunctionCaller.ProcessResult.MultiStep -> {
-                            // Multiple tool calls were executed
                             val summary = toolResult.steps.zip(toolResult.results).joinToString(". ") { (step, result) ->
                                 when (result) {
                                     is TaskExecutorBridge.StepResult.Success -> result.message
@@ -1982,18 +2247,18 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                             return
                         }
                         is GroqFunctionCaller.ProcessResult.Error -> {
-                            // Function calling failed — fall through to normal pipeline
-                            Log.w(AUDIO_TAG, "[handleAIQuery] Groq Function Calling failed: ${toolResult.message} — falling back to direct pipeline")
+                            // Function calling failed — fall through to Groq Direct fallback
+                            Log.w(AUDIO_TAG, "[handleAIQuery] GroqFunctionCaller failed: ${toolResult.message} — falling back to direct pipeline")
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(AUDIO_TAG, "[handleAIQuery] Groq Function Calling exception: ${e.message} — falling back to direct pipeline")
+                    Log.w(AUDIO_TAG, "[handleAIQuery] GroqFunctionCaller exception: ${e.message} — falling back to direct pipeline")
                 }
             }
 
             // ═══════════════════════════════════════════════════════════════════
-            // FALLBACK: Groq Direct (no tool calling — simple chat)
-            // When GroqFunctionCaller fails, use simple chat completion.
+            // FALLBACK 2: Groq Direct (no tool calling — simple chat)
+            // When both AutonomousAgentEngine and GroqFunctionCaller fail.
             // ═══════════════════════════════════════════════════════════════════
             var rawResponse = ""
 

@@ -28,14 +28,19 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.jarvis.assistant.automation.AutonomousAgentEngine
+import com.jarvis.assistant.channels.JarviewModel
 import com.jarvis.assistant.ui.components.GlassmorphicCard
 import com.jarvis.assistant.ui.theme.*
+import kotlinx.coroutines.delay
 
 // ─── AI Status Constants ────────────────────────────────────────────────────
 
 private const val STATUS_IDLE = "IDLE"
 private const val STATUS_SEEING = "SEEING"
+private const val STATUS_THINKING = "THINKING"
 private const val STATUS_ACTING = "ACTING"
+private const val STATUS_OBSERVING = "OBSERVING"
 private const val STATUS_DONE = "DONE"
 
 // ─── ComputerUseScreen ──────────────────────────────────────────────────────
@@ -53,8 +58,10 @@ private const val STATUS_DONE = "DONE"
  *  - Command input bar for natural-language instructions
  *  - "Take Control" / "Stop" buttons
  *  - Action log showing AI's performed actions
- *  - AI status: IDLE, SEEING, ACTING, DONE
- *  - Animated cursor with smooth movement
+ *  - AI status: IDLE, SEEING, THINKING, ACTING, OBSERVING, DONE
+ *  - Animated cursor with smooth movement, connected to OverlayCursorService
+ *  - Agent state display from AutonomousAgentEngine
+ *  - Action log merged from both external source and AutonomousAgentEngine
  *  - Glassmorphic panels and JARVIS sci-fi theme
  */
 @Composable
@@ -72,14 +79,45 @@ fun ComputerUseScreen(
     // ── Internal command text state ─────────────────────────────────────────
     var commandText by remember { mutableStateOf("") }
 
+    // ── Real cursor position from overlay service ──────────────────────────
+    var realCursorX by remember { mutableStateOf(JarviewModel.cursorX) }
+    var realCursorY by remember { mutableStateOf(JarviewModel.cursorY) }
+
+    // Update from JarviewModel events
+    LaunchedEffect(Unit) {
+        JarviewModel.eventSink = { event, data ->
+            if (event == "cursor_moved") {
+                realCursorX = (data["x"] as? Int) ?: realCursorX
+                realCursorY = (data["y"] as? Int) ?: realCursorY
+            }
+        }
+    }
+
+    // ── Observe AutonomousAgentEngine state ─────────────────────────────────
+    var agentState by remember {
+        mutableStateOf(AutonomousAgentEngine.AgentState.IDLE)
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            agentState = AutonomousAgentEngine.getState()
+            delay(200)
+        }
+    }
+
+    // ── Normalize real cursor position to 0-1 for Canvas ───────────────────
+    val effectiveCursorX = if (JarviewModel.screenWidth > 0 && JarviewModel.computerUseActive)
+        realCursorX.toFloat() / JarviewModel.screenWidth.toFloat() else cursorX
+    val effectiveCursorY = if (JarviewModel.screenHeight > 0 && JarviewModel.computerUseActive)
+        realCursorY.toFloat() / JarviewModel.screenHeight.toFloat() else cursorY
+
     // ── Animated cursor position (smooth interpolation) ─────────────────────
     val animatedCursorX by animateFloatAsState(
-        targetValue = cursorX,
+        targetValue = effectiveCursorX,
         animationSpec = tween(durationMillis = 600, easing = EaseInOutCubic),
         label = "cursor-x"
     )
     val animatedCursorY by animateFloatAsState(
-        targetValue = cursorY,
+        targetValue = effectiveCursorY,
         animationSpec = tween(durationMillis = 600, easing = EaseInOutCubic),
         label = "cursor-y"
     )
@@ -110,8 +148,10 @@ fun ComputerUseScreen(
     // ── Status color mapping ────────────────────────────────────────────────
     val statusColor = when (aiStatus) {
         STATUS_IDLE -> TextTertiary
-        STATUS_SEEING -> JarvisPurple
+        STATUS_SEEING -> InfoBlue
+        STATUS_THINKING -> JarvisPurple
         STATUS_ACTING -> JarvisCyan
+        STATUS_OBSERVING -> WarningAmber
         STATUS_DONE -> JarvisGreen
         else -> TextTertiary
     }
@@ -119,9 +159,22 @@ fun ComputerUseScreen(
     val statusIcon = when (aiStatus) {
         STATUS_IDLE -> Icons.Filled.HourglassEmpty
         STATUS_SEEING -> Icons.Filled.Visibility
+        STATUS_THINKING -> Icons.Filled.Psychology
         STATUS_ACTING -> Icons.Filled.TouchApp
+        STATUS_OBSERVING -> Icons.Filled.RemoveRedEye
         STATUS_DONE -> Icons.Filled.CheckCircle
         else -> Icons.Filled.HourglassEmpty
+    }
+
+    // ── Agent state display color ────────────────────────────────────────────
+    val agentStateColor = when (agentState) {
+        AutonomousAgentEngine.AgentState.SEEING -> InfoBlue
+        AutonomousAgentEngine.AgentState.THINKING -> JarvisPurple
+        AutonomousAgentEngine.AgentState.ACTING -> JarvisCyan
+        AutonomousAgentEngine.AgentState.OBSERVING -> WarningAmber
+        AutonomousAgentEngine.AgentState.COMPLETED -> JarvisGreen
+        AutonomousAgentEngine.AgentState.FAILED -> JarvisRedPink
+        AutonomousAgentEngine.AgentState.IDLE -> TextTertiary
     }
 
     Column(
@@ -163,12 +216,20 @@ fun ComputerUseScreen(
         StatusIndicatorsRow(
             isAiActive = isAiActive,
             aiStatus = aiStatus,
-            statusColor = statusColor
+            statusColor = statusColor,
+            agentState = agentState,
+            agentStateColor = agentStateColor
         )
 
         // ═══ ACTION LOG ═══════════════════════════════════════════════════
-        if (actionLog.isNotEmpty()) {
-            ActionLogPanel(actionLog = actionLog)
+        val agentActionLog = remember(agentState) {
+            AutonomousAgentEngine.actionLog.takeLast(10).map {
+                "[R${it.round}] ${it.toolName}: ${it.result.take(60)}"
+            }
+        }
+        val combinedLog = (actionLog + agentActionLog).takeLast(10)
+        if (combinedLog.isNotEmpty()) {
+            ActionLogPanel(actionLog = combinedLog)
         }
 
         // ═══ BOTTOM BAR: Control buttons + Command input ═════════════════
@@ -182,8 +243,18 @@ fun ComputerUseScreen(
                     commandText = ""
                 }
             },
-            onTakeControl = onTakeControl,
-            onStop = onStop
+            onTakeControl = {
+                onTakeControl()
+                // Also start the real cursor overlay
+                val svc = JarviewModel.overlayCursorService?.get()
+                svc?.setAiControlMode(true)
+                svc?.showCursor()
+            },
+            onStop = {
+                onStop()
+                val svc = JarviewModel.overlayCursorService?.get()
+                svc?.setAiControlMode(false)
+            }
         )
     }
 }
@@ -542,7 +613,9 @@ private fun ScreenMirrorCanvas(
 private fun StatusIndicatorsRow(
     isAiActive: Boolean,
     aiStatus: String,
-    statusColor: Color
+    statusColor: Color,
+    agentState: AutonomousAgentEngine.AgentState,
+    agentStateColor: Color
 ) {
     Row(
         modifier = Modifier
@@ -573,6 +646,24 @@ private fun StatusIndicatorsRow(
             color = if (isAiActive) JarvisPurple else TextTertiary,
             isActive = isAiActive
         )
+
+        // Agent State indicator
+        if (isAiActive && agentState != AutonomousAgentEngine.AgentState.IDLE) {
+            StatusChip(
+                icon = when (agentState) {
+                    AutonomousAgentEngine.AgentState.SEEING -> Icons.Filled.Visibility
+                    AutonomousAgentEngine.AgentState.THINKING -> Icons.Filled.Psychology
+                    AutonomousAgentEngine.AgentState.ACTING -> Icons.Filled.TouchApp
+                    AutonomousAgentEngine.AgentState.OBSERVING -> Icons.Filled.RemoveRedEye
+                    AutonomousAgentEngine.AgentState.COMPLETED -> Icons.Filled.CheckCircle
+                    AutonomousAgentEngine.AgentState.FAILED -> Icons.Filled.Error
+                    AutonomousAgentEngine.AgentState.IDLE -> Icons.Filled.HourglassEmpty
+                },
+                label = agentState.name,
+                color = agentStateColor,
+                isActive = true
+            )
+        }
     }
 }
 
@@ -653,10 +744,10 @@ private fun ActionLogPanel(actionLog: List<String>) {
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 80.dp),
+                    .heightIn(max = 120.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                items(actionLog.takeLast(6)) { logEntry ->
+                items(actionLog.takeLast(10)) { logEntry ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
