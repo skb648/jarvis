@@ -880,6 +880,7 @@ private fun DeviceCard(
 // ─── Text field colors for SmartHome screen ──────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
+@Composable
 private fun tfColorsSmartHome() = OutlinedTextFieldDefaults.colors(
     focusedBorderColor = JarvisCyan,
     unfocusedBorderColor = GlassBorder,

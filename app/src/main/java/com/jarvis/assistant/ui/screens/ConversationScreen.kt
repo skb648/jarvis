@@ -217,68 +217,33 @@ fun ConversationScreen(
                     contentPadding = PaddingValues(vertical = 12.dp)
                 ) {
                     items(items = messages, key = { it.id }) { message ->
-                        // ── Animated message entry ─────────────────────────
-                        AnimatedVisibility(
-                            visible = true,
-                            enter = fadeIn(
-                                animationSpec = tween(durationMillis = 350, easing = EaseOut)
-                            ) + slideInVertically(
-                                animationSpec = tween(durationMillis = 350, easing = EaseOutCubic),
-                                initialOffsetY = { it / 3 }
-                            )
-                        ) {
-                            MessageBubble(message = message)
-                        }
+                        MessageBubble(message = message)
                     }
 
                     // Typing indicator
                     if (isTyping) {
                         item {
-                            AnimatedVisibility(
-                                visible = true,
-                                enter = fadeIn(tween(300)) + slideInVertically(
-                                    tween(300),
-                                    initialOffsetY = { it / 4 }
-                                )
-                            ) {
-                                TypingIndicator()
-                            }
+                            TypingIndicator()
                         }
                     }
                 }
 
                 // ── Scroll-to-Bottom FAB ───────────────────────────────────
-                AnimatedVisibility(
-                    visible = showScrollToBottom,
-                    enter = fadeIn(tween(200)),
-                    exit = androidx.compose.animation.fadeOut(tween(200)),
+                Box(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(end = 16.dp, bottom = 8.dp)
                 ) {
-                    GlassmorphicCardSimple(
-                        backgroundColor = DeepNavy.copy(alpha = 0.85f),
-                        borderColor = JarvisCyan.copy(alpha = 0.4f),
-                        cornerRadius = 18.dp
-                    ) {
-                        IconButton(
-                            onClick = {
-                                scope.launch {
-                                    if (messages.isNotEmpty()) {
-                                        listState.animateScrollToItem(messages.size)
-                                    }
+                    ScrollToBottomFAB(
+                        visible = showScrollToBottom,
+                        onClick = {
+                            scope.launch {
+                                if (messages.isNotEmpty()) {
+                                    listState.animateScrollToItem(messages.size)
                                 }
-                            },
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.KeyboardArrowDown,
-                                contentDescription = "Scroll to bottom",
-                                tint = JarvisCyan,
-                                modifier = Modifier.size(20.dp)
-                            )
+                            }
                         }
-                    }
+                    )
                 }
             }
 
@@ -524,6 +489,40 @@ private fun PulsingRedDot(modifier: Modifier = Modifier) {
                 color = JarvisRedPink.copy(alpha = pulseAlpha),
                 radius = size.minDimension / 2f
             )
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCROLL-TO-BOTTOM FAB — Extracted to avoid ColumnScope AnimatedVisibility
+// ═══════════════════════════════════════════════════════════════════════════════
+
+@Composable
+private fun ScrollToBottomFAB(
+    visible: Boolean,
+    onClick: () -> Unit
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(200)),
+        exit = androidx.compose.animation.fadeOut(tween(200))
+    ) {
+        GlassmorphicCardSimple(
+            backgroundColor = DeepNavy.copy(alpha = 0.85f),
+            borderColor = JarvisCyan.copy(alpha = 0.4f),
+            cornerRadius = 18.dp
+        ) {
+            IconButton(
+                onClick = onClick,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.KeyboardArrowDown,
+                    contentDescription = "Scroll to bottom",
+                    tint = JarvisCyan,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
         }
     }
 }
@@ -1131,9 +1130,9 @@ private fun AnimatedEqualizerBars(modifier: Modifier = Modifier) {
                     animation = keyframes {
                         durationMillis = 800
                         0.2f at 0
-                        0.9f at (100 + index * 80L)
-                        0.3f at (300 + index * 60L)
-                        0.7f at (500 + index * 70L)
+                        0.9f at (100 + index * 80)
+                        0.3f at (300 + index * 60)
+                        0.7f at (500 + index * 70)
                         0.2f at 800
                     },
                     repeatMode = RepeatMode.Restart
@@ -1299,8 +1298,8 @@ private fun TypingIndicator() {
                         animation = keyframes {
                             durationMillis = 600
                             0f at 0
-                            -6f at 150 + index * 100L
-                            0f at 300 + index * 100L
+                            -6f at (150 + index * 100)
+                            0f at (300 + index * 100)
                             0f at 600
                         },
                         repeatMode = RepeatMode.Restart

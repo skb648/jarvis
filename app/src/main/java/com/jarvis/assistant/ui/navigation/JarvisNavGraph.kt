@@ -299,9 +299,7 @@ fun JarvisNavGraph(
                     currentSessionId = currentSessionId,
                     onLoadSession = onLoadSession,
                     onNewChat = onNewChat,
-                    onClearHistory = onClearHistory,
-                    // Export chat
-                    onExportChat = onExportChat
+                    onClearHistory = onClearHistory
                 )
             }
             composable("smarthome") {
@@ -316,16 +314,11 @@ fun JarvisNavGraph(
                 )
             }
             composable("notes") {
-                QuickNotesScreen(
-                    notes = notes,
-                    onAddNote = onAddNote,
-                    onDeleteNote = onDeleteNote
-                )
+                QuickNotesScreen()
             }
             composable("snake") {
                 SnakeGameScreen(
-                    onVoiceDirection = { /* Voice direction handled by ViewModel */ },
-                    voiceDirection = voiceDirection
+                    onVoiceDirection = null
                 )
             }
             composable("diagnostics") {
@@ -333,7 +326,7 @@ fun JarvisNavGraph(
                     batteryLevel = diagnosticsBatteryLevel,
                     isCharging = diagnosticsIsCharging,
                     isRustReady = diagnosticsIsRustReady,
-                    cpuUsage = diagnosticsCpuUsage,
+                    cpuUsagePercent = diagnosticsCpuUsage,
                     onRefresh = onRefreshDiagnostics
                 )
             }
