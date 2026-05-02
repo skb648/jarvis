@@ -319,7 +319,19 @@ fun JarvisNavGraph(
                     onToggleDevice = onToggleDevice,
                     onRefresh = onRefreshDevices,
                     onQuickAction = onSmartHomeQuickAction,
-                    onGoToSettings = handleGoToSettings
+                    onGoToSettings = handleGoToSettings,
+                    // Wire MQTT config state so SmartHome screen can configure MQTT
+                    mqttBrokerUrl = mqttBrokerUrl,
+                    mqttUsername = mqttUsername,
+                    mqttPassword = mqttPassword,
+                    onMqttBrokerChange = onMqttBrokerChange,
+                    onMqttUsernameChange = onMqttUsernameChange,
+                    onMqttPasswordChange = onMqttPasswordChange,
+                    // Wire Home Assistant config state
+                    homeAssistantUrl = homeAssistantUrl,
+                    homeAssistantToken = homeAssistantToken,
+                    onHomeAssistantUrlChange = onHomeAssistantUrlChange,
+                    onHomeAssistantTokenChange = onHomeAssistantTokenChange
                 )
             }
             composable("notes") {
