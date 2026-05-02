@@ -1,7 +1,6 @@
 package com.jarvis.assistant.ui.navigation
 
-import androidx.compose.animation.AnimatedContentTransitionScope
-import androidx.compose.animation.core.tween
+
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
@@ -17,7 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
-import androidx.navigation.compose.AnimatedNavHost
+import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
@@ -45,8 +44,7 @@ private val tabs = listOf(
     BottomNavTab("settings",    "Settings",   Icons.Filled.Settings)
 )
 
-/** Shared slide animation spec for all route transitions. */
-private const val ANIM_DURATION = 350
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -254,18 +252,12 @@ fun JarvisNavGraph(
             }
         }
     ) { innerPadding ->
-        AnimatedNavHost(
+        NavHost(
             navController = navController,
             startDestination = "home",
             modifier = Modifier.padding(innerPadding)
         ) {
-            composable(
-                "home",
-                enterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                exitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                popEnterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) },
-                popExitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) }
-            ) {
+            composable("home") {
                 HomeScreen(
                     brainState = brainState,
                     audioAmplitude = audioAmplitude,
@@ -275,19 +267,11 @@ fun JarvisNavGraph(
                     isRustReady = isRustReady,
                     engineStatusText = engineStatusText,
                     locationContext = locationContext,
-                    showMusicPlayer = showMusicPlayer,
-                    isMusicPlaying = isMusicPlaying,
-                    onToggleMusicPlayer = onToggleMusicPlayer,
-                    onToggleMusicPlayback = onToggleMusicPlayback
+                    batteryLevel = diagnosticsBatteryLevel,
+                    isCharging = diagnosticsIsCharging
                 )
             }
-            composable(
-                "assistant",
-                enterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                exitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                popEnterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) },
-                popExitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) }
-            ) {
+            composable("assistant") {
                 AssistantScreen(
                     brainState = brainState,
                     audioAmplitude = audioAmplitude,
@@ -301,13 +285,7 @@ fun JarvisNavGraph(
                     wakeFlash = wakeFlash
                 )
             }
-            composable(
-                "chat",
-                enterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                exitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                popEnterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) },
-                popExitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) }
-            ) {
+            composable("chat") {
                 ConversationScreen(
                     messages = messages,
                     isTyping = isTyping,
@@ -326,13 +304,7 @@ fun JarvisNavGraph(
                     onExportChat = onExportChat
                 )
             }
-            composable(
-                "smarthome",
-                enterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                exitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                popEnterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) },
-                popExitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) }
-            ) {
+            composable("smarthome") {
                 SmartHomeScreen(
                     devices = devices,
                     isConnected = isMqttConnected,
@@ -343,38 +315,20 @@ fun JarvisNavGraph(
                     onGoToSettings = handleGoToSettings
                 )
             }
-            composable(
-                "notes",
-                enterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                exitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                popEnterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) },
-                popExitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) }
-            ) {
+            composable("notes") {
                 QuickNotesScreen(
                     notes = notes,
                     onAddNote = onAddNote,
                     onDeleteNote = onDeleteNote
                 )
             }
-            composable(
-                "snake",
-                enterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                exitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                popEnterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) },
-                popExitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) }
-            ) {
+            composable("snake") {
                 SnakeGameScreen(
                     onVoiceDirection = { /* Voice direction handled by ViewModel */ },
                     voiceDirection = voiceDirection
                 )
             }
-            composable(
-                "diagnostics",
-                enterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                exitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                popEnterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) },
-                popExitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) }
-            ) {
+            composable("diagnostics") {
                 DeviceDiagnosticsScreen(
                     batteryLevel = diagnosticsBatteryLevel,
                     isCharging = diagnosticsIsCharging,
@@ -383,13 +337,7 @@ fun JarvisNavGraph(
                     onRefresh = onRefreshDiagnostics
                 )
             }
-            composable(
-                "settings",
-                enterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                exitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Left, animationSpec = tween(ANIM_DURATION)) },
-                popEnterTransition = { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) },
-                popExitTransition = { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, animationSpec = tween(ANIM_DURATION)) }
-            ) {
+            composable("settings") {
                 SettingsScreen(
                     geminiApiKey = geminiApiKey,
                     elevenLabsApiKey = elevenLabsApiKey,
