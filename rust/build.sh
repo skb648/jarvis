@@ -258,6 +258,21 @@ build_abi() {
     local abi_output_dir="$JNILIBS_DIR/$abi"
     mkdir -p "$abi_output_dir"
 
+    # CRITICAL: Add NDK toolchain to PATH for ring/openssl cross-compilation.
+    # The `ring` crate needs a C compiler for the target architecture.
+    # cargo-ndk sets these up automatically, but we also need the NDK
+    # toolchain binaries in PATH for the build script.
+    local ndk_toolchain_dir=""
+    if [ -n "${NDK_HOME:-}" ] && [ -d "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" ]; then
+        ndk_toolchain_dir="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        export PATH="$ndk_toolchain_dir:$PATH"
+        log_info "NDK toolchain added to PATH: $ndk_toolchain_dir"
+    elif [ -n "${ANDROID_NDK_HOME:-}" ] && [ -d "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" ]; then
+        ndk_toolchain_dir="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        export PATH="$ndk_toolchain_dir:$PATH"
+        log_info "NDK toolchain added to PATH: $ndk_toolchain_dir"
+    fi
+
     # Build with cargo-ndk
     # CRITICAL FIX: Run cargo-ndk FROM the rust/ directory so that
     # `cargo metadata` (which cargo-ndk runs internally) can find Cargo.toml.
