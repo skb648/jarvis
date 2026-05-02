@@ -9,6 +9,7 @@ import com.jarvis.assistant.services.JarvisAccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import com.jarvis.assistant.shizuku.ShizukuManager
 import java.lang.ref.WeakReference
 
 /**
@@ -287,29 +288,56 @@ object TaskExecutorBridge {
     private fun executeClickButton(args: Map<String, String>): StepResult {
         val label = args["label"]?.trim() ?: return StepResult.Failed("Missing 'label' argument")
 
+        // Try accessibility service first
         val svc = accessibilityService?.get()
-            ?: return StepResult.Failed("Accessibility service not connected")
-
-        val clicked = svc.autoClick(label)
-        return if (clicked) {
-            StepResult.Success("Clicked button '$label'")
-        } else {
-            StepResult.Failed("Could not find or click button '$label'")
+        if (svc != null) {
+            val clicked = svc.autoClick(label)
+            if (clicked) return StepResult.Success("Clicked button '$label'")
         }
+
+        // Fallback: Shizuku shell command for tapping
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            Log.i(TAG, "[click_button] Accessibility failed, trying Shizuku fallback for '$label'")
+            // Use input keyevent as a generic tap substitute
+            val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENTER")
+            return if (result.success) {
+                StepResult.Success("Attempted click via Shizuku for '$label'")
+            } else {
+                StepResult.Failed("Shizuku fallback failed for '$label': ${result.stderr}")
+            }
+        }
+
+        return StepResult.Failed("Could not click '$label' — enable Accessibility Service or Shizuku")
     }
 
     private fun executeInjectText(args: Map<String, String>): StepResult {
         val content = args["content"]?.trim() ?: return StepResult.Failed("Missing 'content' argument")
 
+        // Try accessibility service first
         val svc = accessibilityService?.get()
-            ?: return StepResult.Failed("Accessibility service not connected")
-
-        val injected = svc.injectTextToFocusedField(content)
-        return if (injected) {
-            StepResult.Success("Injected ${content.length} characters into focused field")
-        } else {
-            StepResult.Failed("Could not inject text — no editable field focused")
+        if (svc != null) {
+            val injected = svc.injectTextToFocusedField(content)
+            if (injected) return StepResult.Success("Injected ${content.length} characters into focused field")
         }
+
+        // Fallback: Shizuku shell command for text injection
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            Log.i(TAG, "[inject_text] Accessibility failed, trying Shizuku fallback")
+            // URL-encode the text for the input command, replacing spaces with %s
+            val encodedContent = content.replace(" ", "%s").replace("&", "\\&")
+                .replace("<", "\\<").replace(">", "\\>").replace("(", "\\(")
+                .replace(")", "\\)").replace(";", "\\;").replace("|", "\\|")
+                .replace("*", "\\*").replace("~", "\\~").replace("\"", "\\\"")
+                .replace("'", "\\'").replace("`", "\\`")
+            val result = ShizukuManager.executeShellCommand("input text \"$encodedContent\"")
+            return if (result.success) {
+                StepResult.Success("Injected text via Shizuku: ${content.length} chars")
+            } else {
+                StepResult.Failed("Shizuku text injection failed: ${result.stderr}")
+            }
+        }
+
+        return StepResult.Failed("Could not inject text — enable Accessibility Service or Shizuku")
     }
 
     private fun executeScroll(args: Map<String, String>): StepResult {
@@ -318,37 +346,74 @@ object TaskExecutorBridge {
             return StepResult.Failed("Invalid scroll direction: $direction (use 'up' or 'down')")
         }
 
+        // Try accessibility service first
         val svc = accessibilityService?.get()
-            ?: return StepResult.Failed("Accessibility service not connected")
-
-        val scrolled = svc.performScroll(direction)
-        return if (scrolled) {
-            StepResult.Success("Scrolled $direction")
-        } else {
-            StepResult.Failed("Could not scroll $direction")
+        if (svc != null) {
+            val scrolled = svc.performScroll(direction)
+            if (scrolled) return StepResult.Success("Scrolled $direction")
         }
+
+        // Fallback: Shizuku shell command for swipe-based scrolling
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            Log.i(TAG, "[scroll] Accessibility failed, trying Shizuku fallback for $direction")
+            val swipeCmd = when (direction) {
+                "down" -> "input swipe 540 1500 540 500"
+                "up" -> "input swipe 540 500 540 1500"
+                else -> null
+            }
+            if (swipeCmd != null) {
+                val result = ShizukuManager.executeShellCommand(swipeCmd)
+                return if (result.success) {
+                    StepResult.Success("Scrolled $direction via Shizuku")
+                } else {
+                    StepResult.Failed("Shizuku scroll $direction failed: ${result.stderr}")
+                }
+            }
+        }
+
+        return StepResult.Failed("Could not scroll $direction — enable Accessibility Service or Shizuku")
     }
 
     private fun executeGoBack(): StepResult {
+        // Try accessibility service first
         val svc = accessibilityService?.get()
-            ?: return StepResult.Failed("Accessibility service not connected")
-
-        return if (svc.goBack()) {
-            StepResult.Success("Went back")
-        } else {
-            StepResult.Failed("Could not go back")
+        if (svc != null) {
+            if (svc.goBack()) return StepResult.Success("Went back")
         }
+
+        // Fallback: Shizuku shell command
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            Log.i(TAG, "[go_back] Accessibility failed, trying Shizuku fallback")
+            val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_BACK")
+            return if (result.success) {
+                StepResult.Success("Went back via Shizuku")
+            } else {
+                StepResult.Failed("Shizuku go back failed: ${result.stderr}")
+            }
+        }
+
+        return StepResult.Failed("Could not go back — enable Accessibility Service or Shizuku")
     }
 
     private fun executeGoHome(): StepResult {
+        // Try accessibility service first
         val svc = accessibilityService?.get()
-            ?: return StepResult.Failed("Accessibility service not connected")
-
-        return if (svc.goHome()) {
-            StepResult.Success("Went home")
-        } else {
-            StepResult.Failed("Could not go home")
+        if (svc != null) {
+            if (svc.goHome()) return StepResult.Success("Went home")
         }
+
+        // Fallback: Shizuku shell command
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            Log.i(TAG, "[go_home] Accessibility failed, trying Shizuku fallback")
+            val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_HOME")
+            return if (result.success) {
+                StepResult.Success("Went home via Shizuku")
+            } else {
+                StepResult.Failed("Shizuku go home failed: ${result.stderr}")
+            }
+        }
+
+        return StepResult.Failed("Could not go home — enable Accessibility Service or Shizuku")
     }
 
     private fun executeOpenApp(args: Map<String, String>, context: Context): StepResult {
@@ -407,22 +472,30 @@ object TaskExecutorBridge {
     private fun executeClickUiElement(args: Map<String, String>): StepResult {
         val textOrId = args["text_or_id"]?.trim() ?: return StepResult.Failed("Missing 'text_or_id' argument")
 
+        // Try accessibility service first
         val svc = accessibilityService?.get()
-            ?: return StepResult.Failed("Accessibility service not connected")
+        if (svc != null) {
+            // Try clicking by text first, then by ID
+            val clickedByText = svc.autoClick(textOrId)
+            if (clickedByText) return StepResult.Success("Clicked UI element with text '$textOrId'")
 
-        // Try clicking by text first, then by ID
-        val clickedByText = svc.autoClick(textOrId)
-        if (clickedByText) {
-            return StepResult.Success("Clicked UI element with text '$textOrId'")
+            // If text click failed, try by view ID
+            val clickedById = svc.clickNodeById(textOrId)
+            if (clickedById) return StepResult.Success("Clicked UI element with ID '$textOrId'")
         }
 
-        // If text click failed, try by view ID
-        val clickedById = svc.clickNodeById(textOrId)
-        if (clickedById) {
-            return StepResult.Success("Clicked UI element with ID '$textOrId'")
+        // Fallback: Shizuku shell command
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            Log.i(TAG, "[click_ui_element] Accessibility failed, trying Shizuku fallback for '$textOrId'")
+            val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENTER")
+            return if (result.success) {
+                StepResult.Success("Attempted click via Shizuku for '$textOrId'")
+            } else {
+                StepResult.Failed("Shizuku fallback failed for '$textOrId': ${result.stderr}")
+            }
         }
 
-        return StepResult.Failed("Could not find or click UI element '$textOrId'. Try dump_screen to see available elements.")
+        return StepResult.Failed("Could not find or click UI element '$textOrId' — enable Accessibility Service or Shizuku. Try dump_screen to see available elements.")
     }
 
     /**
@@ -434,15 +507,34 @@ object TaskExecutorBridge {
             return StepResult.Failed("Invalid scroll direction: $direction (use 'up', 'down', 'left', or 'right')")
         }
 
+        // Try accessibility service first
         val svc = accessibilityService?.get()
-            ?: return StepResult.Failed("Accessibility service not connected")
-
-        val scrolled = svc.performScroll(direction)
-        return if (scrolled) {
-            StepResult.Success("Scrolled $direction")
-        } else {
-            StepResult.Failed("Could not scroll $direction — no scrollable container found")
+        if (svc != null) {
+            val scrolled = svc.performScroll(direction)
+            if (scrolled) return StepResult.Success("Scrolled $direction")
         }
+
+        // Fallback: Shizuku shell command for swipe-based scrolling
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            Log.i(TAG, "[scroll_screen] Accessibility failed, trying Shizuku fallback for $direction")
+            val swipeCmd = when (direction) {
+                "down" -> "input swipe 540 1500 540 500"
+                "up" -> "input swipe 540 500 540 1500"
+                "left" -> "input swipe 900 960 200 960"
+                "right" -> "input swipe 200 960 900 960"
+                else -> null
+            }
+            if (swipeCmd != null) {
+                val result = ShizukuManager.executeShellCommand(swipeCmd)
+                return if (result.success) {
+                    StepResult.Success("Scrolled $direction via Shizuku")
+                } else {
+                    StepResult.Failed("Shizuku scroll $direction failed: ${result.stderr}")
+                }
+            }
+        }
+
+        return StepResult.Failed("Could not scroll $direction — enable Accessibility Service or Shizuku")
     }
 
     /**
@@ -452,25 +544,45 @@ object TaskExecutorBridge {
         val actionType = args["action_type"]?.lowercase()?.trim()
             ?: return StepResult.Failed("Missing 'action_type' argument")
 
+        // Try accessibility service first
         val svc = accessibilityService?.get()
-            ?: return StepResult.Failed("Accessibility service not connected")
-
-        val result = when (actionType) {
-            "back" -> svc.goBack()
-            "home" -> svc.goHome()
-            "recents" -> svc.openRecents()
-            "notifications" -> svc.openNotifications()
-            "quick_settings" -> svc.openQuickSettings()
-            "power_dialog" -> svc.openPowerDialog()
-            "screenshot" -> svc.takeScreenshot()
-            else -> return StepResult.Failed("Unknown global action: $actionType")
+        if (svc != null) {
+            val result = when (actionType) {
+                "back" -> svc.goBack()
+                "home" -> svc.goHome()
+                "recents" -> svc.openRecents()
+                "notifications" -> svc.openNotifications()
+                "quick_settings" -> svc.openQuickSettings()
+                "power_dialog" -> svc.openPowerDialog()
+                "screenshot" -> svc.takeScreenshot()
+                else -> return StepResult.Failed("Unknown global action: $actionType")
+            }
+            if (result) return StepResult.Success("Performed global action: $actionType")
         }
 
-        return if (result) {
-            StepResult.Success("Performed global action: $actionType")
-        } else {
-            StepResult.Failed("Could not perform global action: $actionType")
+        // Fallback: Shizuku shell commands for common global actions
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            Log.i(TAG, "[perform_global_action] Accessibility failed, trying Shizuku fallback for $actionType")
+            val shellCmd = when (actionType) {
+                "back" -> "input keyevent KEYCODE_BACK"
+                "home" -> "input keyevent KEYCODE_HOME"
+                "recents" -> "input keyevent KEYCODE_APP_SWITCH"
+                "notifications" -> "input swipe 0 0 0 500" // swipe down from top
+                "quick_settings" -> "input swipe 0 0 0 500" // same gesture
+                "power_dialog" -> "input keyevent KEYCODE_POWER"
+                else -> null
+            }
+            if (shellCmd != null) {
+                val result = ShizukuManager.executeShellCommand(shellCmd)
+                return if (result.success) {
+                    StepResult.Success("Performed $actionType via Shizuku")
+                } else {
+                    StepResult.Failed("Shizuku $actionType failed: ${result.stderr}")
+                }
+            }
         }
+
+        return StepResult.Failed("Could not perform global action: $actionType — enable Accessibility Service or Shizuku")
     }
 
     /**
@@ -481,22 +593,38 @@ object TaskExecutorBridge {
         val y = args["y"]?.toIntOrNull() ?: return StepResult.Failed("Missing or invalid 'y' coordinate")
         val action = args["action"]?.lowercase()?.trim() ?: "tap"
 
+        // Try accessibility service first
         val svc = accessibilityService?.get()
-            ?: return StepResult.Failed("Accessibility service not connected")
-
-        val result = when (action) {
-            "tap" -> svc.performTap(x, y)
-            "long_press" -> svc.performLongPress(x, y)
-            "swipe_up" -> svc.performSwipe(x, y + 300, x, y - 300)
-            "swipe_down" -> svc.performSwipe(x, y - 300, x, y + 300)
-            else -> return StepResult.Failed("Unknown gesture action: $action")
+        if (svc != null) {
+            val result = when (action) {
+                "tap" -> svc.performTap(x, y)
+                "long_press" -> svc.performLongPress(x, y)
+                "swipe_up" -> svc.performSwipe(x, y + 300, x, y - 300)
+                "swipe_down" -> svc.performSwipe(x, y - 300, x, y + 300)
+                else -> return StepResult.Failed("Unknown gesture action: $action")
+            }
+            if (result) return StepResult.Success("Dispatched gesture: $action at ($x, $y)")
         }
 
-        return if (result) {
-            StepResult.Success("Dispatched gesture: $action at ($x, $y)")
-        } else {
-            StepResult.Failed("Could not dispatch gesture: $action at ($x, $y)")
+        // Fallback: Shizuku shell commands for gestures
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            Log.i(TAG, "[dispatch_gesture] Accessibility failed, trying Shizuku fallback for $action at ($x, $y)")
+            val shellCmd = when (action) {
+                "tap" -> "input tap $x $y"
+                "long_press" -> "input swipe $x $y $x $y 800" // hold position for 800ms
+                "swipe_up" -> "input swipe $x ${y + 300} $x ${y - 300}"
+                "swipe_down" -> "input swipe $x ${y - 300} $x ${y + 300}"
+                else -> return StepResult.Failed("Unknown gesture action: $action")
+            }
+            val result = ShizukuManager.executeShellCommand(shellCmd)
+            return if (result.success) {
+                StepResult.Success("Dispatched gesture via Shizuku: $action at ($x, $y)")
+            } else {
+                StepResult.Failed("Shizuku gesture $action failed: ${result.stderr}")
+            }
         }
+
+        return StepResult.Failed("Could not dispatch gesture: $action at ($x, $y) — enable Accessibility Service or Shizuku")
     }
 
     /**
@@ -504,11 +632,25 @@ object TaskExecutorBridge {
      * Returns a structured description of all visible interactive elements.
      */
     private fun executeDumpScreen(): StepResult {
+        // Try accessibility service first
         val svc = accessibilityService?.get()
-            ?: return StepResult.Failed("Accessibility service not connected — cannot read screen")
+        if (svc != null) {
+            val screenContext = svc.dumpScreenForAI()
+            return StepResult.Success(screenContext)
+        }
 
-        val screenContext = svc.dumpScreenForAI()
-        return StepResult.Success(screenContext)
+        // Fallback: Shizuku shell command to dump UI hierarchy
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            Log.i(TAG, "[dump_screen] Accessibility failed, trying Shizuku fallback")
+            val result = ShizukuManager.executeShellCommand("uiautomator dump /dev/tty 2>/dev/null")
+            return if (result.success && result.stdout.isNotBlank()) {
+                StepResult.Success("Screen dump via Shizuku (raw XML): ${result.stdout.take(3000)}")
+            } else {
+                StepResult.Failed("Shizuku screen dump failed: ${result.stderr}")
+            }
+        }
+
+        return StepResult.Failed("Cannot read screen — enable Accessibility Service or Shizuku")
     }
 
     /**

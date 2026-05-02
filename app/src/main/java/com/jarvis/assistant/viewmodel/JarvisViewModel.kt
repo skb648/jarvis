@@ -9,6 +9,9 @@ import android.media.AudioRecord
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.media.ToneGenerator
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.util.Base64
 import android.util.Log
@@ -43,6 +46,8 @@ import com.jarvis.assistant.ui.orb.BrainState
 import com.jarvis.assistant.ui.screens.ChatMessage
 import com.jarvis.assistant.ui.screens.DeviceType
 import com.jarvis.assistant.ui.screens.SmartDevice
+import com.jarvis.assistant.ui.screens.QuickNote
+import com.jarvis.assistant.ui.screens.NoteColorTag
 import com.jarvis.assistant.vision.VisionManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -283,6 +288,37 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     private var ttsInitialized = false
 
     // ═══════════════════════════════════════════════════════════════════════
+    // SPEECH RECOGNIZER — Fast STT for reduced transcription latency
+    //
+    // Android's built-in SpeechRecognizer provides real-time partial
+    // results while the user is still speaking, dramatically reducing
+    // the perceived delay between speech and on-screen text.
+    //
+    // Flow:
+    //   1. startListening() → starts BOTH AudioEngine AND SpeechRecognizer
+    //   2. SpeechRecognizer fires onPartialResults() → updates UI in real-time
+    //   3. VAD detects silence → handleCommandReady()
+    //   4. If SpeechRecognizer has a final result → use it (instant, ~0ms)
+    //   5. If not → fall back to transcribeViaGeminiFallback() (1-3s)
+    // ═══════════════════════════════════════════════════════════════════════
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var recognizerIntent: Intent? = null
+
+    @Volatile
+    private var speechRecognizerResult: String = ""
+
+    @Volatile
+    private var speechRecognizerPartialResult: String = ""
+
+    @Volatile
+    private var speechRecognizerReady: Boolean = false
+
+    @Volatile
+    private var speechRecognizerError: Boolean = false
+
+    private val speechRecognizerLock = Any()
+
+    // ═══════════════════════════════════════════════════════════════════════
     // FIX #4: ToneGenerator for Iron Man Earcons
     // Uses Android native ToneGenerator instead of MP3 files.
     // TONE_PROP_BEEP on wake word detection.
@@ -320,6 +356,161 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             Log.d(AUDIO_TAG, "[playAckBeep] TONE_PROP_ACK played")
         } catch (e: Exception) {
             Log.w(AUDIO_TAG, "[playAckBeep] Failed: ${e.message}")
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SPEECH RECOGNIZER — Initialization and RecognitionListener
+    //
+    // Creates the SpeechRecognizer instance and sets up the intent with
+    // EXTRA_PARTIAL_RESULTS so we get real-time transcription updates.
+    // The RecognitionListener relays partial results to _currentTranscription
+    // and stores final results for handleCommandReady() to pick up.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @SuppressLint("MissingPermission")
+    private fun initSpeechRecognizer(context: Context) {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            Log.w(AUDIO_TAG, "[initSpeechRecognizer] SpeechRecognizer NOT available on this device")
+            return
+        }
+        try {
+            // Destroy previous instance if any
+            try { speechRecognizer?.destroy() } catch (_: Exception) {}
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
+            speechRecognizer?.setRecognitionListener(jarvisRecognitionListener)
+
+            recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                // Request shorter results for faster turnaround
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L)
+            }
+
+            Log.i(AUDIO_TAG, "[initSpeechRecognizer] SpeechRecognizer initialized successfully")
+        } catch (e: Exception) {
+            Log.e(AUDIO_TAG, "[initSpeechRecognizer] Failed to create SpeechRecognizer: ${e.message}")
+            speechRecognizer = null
+        }
+    }
+
+    /** Start SpeechRecognizer listening — called alongside AudioEngine in startListening() */
+    private fun startSpeechRecognizerListening() {
+        synchronized(speechRecognizerLock) {
+            speechRecognizerResult = ""
+            speechRecognizerPartialResult = ""
+            speechRecognizerReady = false
+            speechRecognizerError = false
+        }
+        try {
+            val intent = recognizerIntent
+            if (speechRecognizer != null && intent != null) {
+                speechRecognizer?.startListening(intent)
+                Log.d(AUDIO_TAG, "[startSpeechRecognizerListening] SpeechRecognizer.startListening() called")
+            } else {
+                Log.w(AUDIO_TAG, "[startSpeechRecognizerListening] SpeechRecognizer or intent is null — skipping")
+            }
+        } catch (e: Exception) {
+            Log.e(AUDIO_TAG, "[startSpeechRecognizerListening] Failed: ${e.message}")
+        }
+    }
+
+    /** Stop SpeechRecognizer listening — called in stopListening() and handleCommandReady() */
+    private fun stopSpeechRecognizerListening() {
+        try {
+            speechRecognizer?.stopListening()
+            Log.d(AUDIO_TAG, "[stopSpeechRecognizerListening] SpeechRecognizer.stopListening() called")
+        } catch (e: Exception) {
+            Log.w(AUDIO_TAG, "[stopSpeechRecognizerListening] Failed: ${e.message}")
+        }
+    }
+
+    /** The RecognitionListener that receives callbacks from Android's SpeechRecognizer */
+    private val jarvisRecognitionListener = object : RecognitionListener {
+
+        override fun onReadyForSpeech(params: android.os.Bundle?) {
+            Log.d(AUDIO_TAG, "[SpeechRecognizer] onReadyForSpeech")
+        }
+
+        override fun onBeginningOfSpeech() {
+            Log.d(AUDIO_TAG, "[SpeechRecognizer] onBeginningOfSpeech")
+        }
+
+        override fun onRmsChanged(rmsdB: Float) {
+            // No-op — amplitude is already tracked via AudioEngine
+        }
+
+        override fun onBufferReceived(buffer: ByteArray?) {
+            // No-op
+        }
+
+        override fun onEndOfSpeech() {
+            Log.d(AUDIO_TAG, "[SpeechRecognizer] onEndOfSpeech")
+        }
+
+        override fun onError(error: Int) {
+            val errorMsg = when (error) {
+                SpeechRecognizer.ERROR_NO_MATCH -> "ERROR_NO_MATCH"
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT"
+                SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK"
+                SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT"
+                SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"
+                SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT"
+                SpeechRecognizer.ERROR_SERVER -> "ERROR_SERVER"
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ERROR_RECOGNIZER_BUSY"
+                else -> "ERROR_$error"
+            }
+            Log.w(AUDIO_TAG, "[SpeechRecognizer] onError: $errorMsg ($error)")
+
+            // Mark as error but don't crash — Gemini fallback will handle it
+            synchronized(speechRecognizerLock) {
+                speechRecognizerError = true
+            }
+
+            // For transient errors like NO_MATCH or TIMEOUT, just log and let Gemini handle it
+            // For serious errors (network, permissions), same — Gemini is the safety net
+            if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                Log.d(AUDIO_TAG, "[SpeechRecognizer] Transient error — Gemini fallback will handle transcription")
+            }
+        }
+
+        override fun onResults(results: android.os.Bundle?) {
+            val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            val bestResult = matches?.firstOrNull() ?: ""
+            Log.i(AUDIO_TAG, "[SpeechRecognizer] onResults: \"$bestResult\"")
+
+            synchronized(speechRecognizerLock) {
+                speechRecognizerResult = bestResult
+                speechRecognizerReady = true
+            }
+
+            // If we're still in LISTENING state, update the UI with the final result
+            if (_brainState.value == BrainState.LISTENING && bestResult.isNotBlank()) {
+                _currentTranscription.value = bestResult
+            }
+        }
+
+        override fun onPartialResults(partialResults: android.os.Bundle?) {
+            val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            val partialText = matches?.firstOrNull() ?: ""
+            if (partialText.isNotBlank()) {
+                Log.d(AUDIO_TAG, "[SpeechRecognizer] onPartialResults: \"$partialText\"")
+                synchronized(speechRecognizerLock) {
+                    speechRecognizerPartialResult = partialText
+                }
+                // Update the UI transcription in real-time while the user is still speaking
+                if (_brainState.value == BrainState.LISTENING) {
+                    _currentTranscription.value = partialText
+                }
+            }
+        }
+
+        override fun onEvent(eventType: Int, params: android.os.Bundle?) {
+            // No-op — reserved for future use
         }
     }
 
@@ -368,6 +559,95 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     // ─── Feature: Location Context ─────────────────────────────────────────
     private val _locationContext = MutableStateFlow("")
     val locationContext: StateFlow<String> = _locationContext.asStateFlow()
+
+    // ─── Feature: Device Diagnostics ──────────────────────────────────────────
+    private val _deviceBatteryLevel = MutableStateFlow(0)
+    val deviceBatteryLevel: StateFlow<Int> = _deviceBatteryLevel.asStateFlow()
+
+    private val _deviceIsCharging = MutableStateFlow(false)
+    val deviceIsCharging: StateFlow<Boolean> = _deviceIsCharging.asStateFlow()
+
+    private val _deviceCpuUsage = MutableStateFlow(0f)
+    val deviceCpuUsage: StateFlow<Float> = _deviceCpuUsage.asStateFlow()
+
+    // ─── Wake Flash Effect ─────────────────────────────────────────────────
+    // When a wake word is detected, this flag triggers a visual flash
+    // effect on the Assistant screen (orb burst + overlay).
+    // Auto-resets after 1200ms.
+    private val _wakeFlash = MutableStateFlow(false)
+    val wakeFlash: StateFlow<Boolean> = _wakeFlash.asStateFlow()
+
+    /** Trigger wake flash effect — called from enterListeningState when source is WAKE_WORD */
+    fun triggerWakeFlash() {
+        _wakeFlash.value = true
+        viewModelScope.launch {
+            delay(1200)
+            _wakeFlash.value = false
+        }
+    }
+
+    // ─── Voice Direction for Snake Game ────────────────────────────────────
+    // Updated by voice commands processed through CommandRouter
+    private val _voiceDirection = MutableStateFlow("")
+    val voiceDirection: StateFlow<String> = _voiceDirection.asStateFlow()
+
+    /** Update voice direction for snake game control */
+    fun setVoiceDirection(direction: String) {
+        _voiceDirection.value = direction
+        // Auto-clear after 500ms so the snake doesn't keep moving in that direction
+        viewModelScope.launch {
+            delay(500)
+            if (_voiceDirection.value == direction) {
+                _voiceDirection.value = ""
+            }
+        }
+    }
+
+    // ─── Quick Notes State ────────────────────────────────────────────────
+    private val _notes = MutableStateFlow<List<QuickNote>>(emptyList())
+    val notes: StateFlow<List<QuickNote>> = _notes.asStateFlow()
+
+    /** Add a new quick note */
+    fun addNote(title: String, content: String) {
+        val note = QuickNote(
+            id = System.currentTimeMillis(),
+            title = title,
+            content = content,
+            timestamp = System.currentTimeMillis(),
+            colorTag = NoteColorTag.entries.random()
+        )
+        _notes.value = listOf(note) + _notes.value
+        Log.i(TAG, "[addNote] Note added: \"$title\"")
+    }
+
+    /** Delete a note by ID */
+    fun deleteNote(id: Long) {
+        _notes.value = _notes.value.filter { it.id != id }
+        Log.i(TAG, "[deleteNote] Note deleted: id=$id")
+    }
+
+    // ─── Music Player State (UI-only) ────────────────────────────────────
+    private val _isMusicPlaying = MutableStateFlow(false)
+    val isMusicPlaying: StateFlow<Boolean> = _isMusicPlaying.asStateFlow()
+
+    private val _showMusicPlayer = MutableStateFlow(false)
+    val showMusicPlayer: StateFlow<Boolean> = _showMusicPlayer.asStateFlow()
+
+    /** Toggle music player visibility */
+    fun toggleMusicPlayer() {
+        _showMusicPlayer.value = !_showMusicPlayer.value
+    }
+
+    /** Toggle play/pause for music */
+    fun toggleMusicPlayback() {
+        _isMusicPlaying.value = !_isMusicPlaying.value
+    }
+
+    /** Show music player (voice-activated) */
+    fun showMusic() {
+        _showMusicPlayer.value = true
+        _isMusicPlaying.value = true
+    }
 
     // ─── Overlay Manager ─────────────────────────────────────────────────
 
@@ -770,11 +1050,26 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     // ═══════════════════════════════════════════════════════════════════════
 
     private fun enterListeningState(source: String) {
-        Log.i(AUDIO_TAG, "[enterListeningState] source=$source — playing BEEP and setting LISTENING")
+        Log.i(AUDIO_TAG, "[enterListeningState] source=$source — playing BEEP")
         playWakeWordBeep()  // TONE_PROP_BEEP
-        _brainState.value = BrainState.LISTENING
-        _isListening.value = true
         _currentTranscription.value = ""
+
+        if (source.startsWith("WAKE_WORD")) {
+            // Show WAKE state first with flash animation, then transition to LISTENING
+            triggerWakeFlash()
+            _brainState.value = BrainState.WAKE
+            _isListening.value = true
+            viewModelScope.launch(Dispatchers.Main) {
+                delay(600) // Let the WAKE animation play
+                _brainState.value = BrainState.LISTENING
+                startSpeechRecognizerListening()
+            }
+        } else {
+            // Manual mic button — go straight to LISTENING
+            _brainState.value = BrainState.LISTENING
+            _isListening.value = true
+            startSpeechRecognizerListening()
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -793,6 +1088,8 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         stopWakeWordMonitor()
 
         // S4: Removed delay(300) — AudioRecord starts IMMEDIATELY for lower latency
+        // Note: SpeechRecognizer is already started via enterListeningState()
+
         viewModelScope.launch(Dispatchers.Main) {
             startAudioEngine(context)
             var waitCount = 0
@@ -818,6 +1115,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
 
         audioEngine?.stopCommandRecording()
         stopAudioEngine()
+        stopSpeechRecognizerListening()
 
         _isListening.value       = false
         _brainState.value        = BrainState.IDLE
@@ -936,6 +1234,9 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         // ═══════════════════════════════════════════════════════════════════
         playAckBeep()
 
+        // Stop SpeechRecognizer — we're transitioning to processing
+        stopSpeechRecognizerListening()
+
         viewModelScope.launch(Dispatchers.Main) {
             _brainState.value = BrainState.THINKING
 
@@ -943,71 +1244,123 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             audioEngine?.stopCommandRecording()
             _isListening.value = false
 
-            val audioEmotion = if (RustBridge.isNativeReady()) {
-                try {
-                    withContext(Dispatchers.IO) {
-                        Log.d(AUDIO_TAG, "[handleCommandReady] calling RustBridge.analyzeAudio at ${sampleRate}Hz")
-                        RustBridge.analyzeAudio(pcmBytes, sampleRate)
+            // ═══════════════════════════════════════════════════════════════════
+            // FAST STT: Check SpeechRecognizer result IMMEDIATELY
+            //
+            // Moved BEFORE emotion/mood analysis — these add 200-500ms each
+            // and are NOT critical for the user experience. The user wants
+            // their transcription FAST; emotion can be analyzed in background.
+            // ═══════════════════════════════════════════════════════════════════
+            val transcription: String
+            val srFinalResult: String
+            val srReady: Boolean
+            val srError: Boolean
+            synchronized(speechRecognizerLock) {
+                srFinalResult = speechRecognizerResult
+                srReady = speechRecognizerReady
+                srError = speechRecognizerError
+            }
+
+            if (srReady && srFinalResult.isNotBlank()) {
+                // SpeechRecognizer got a result — use it (instant, no API call needed)
+                transcription = srFinalResult
+                Log.i(AUDIO_TAG, "[handleCommandReady] Using SpeechRecognizer result: \"$transcription\" (saved ~1-3s vs Gemini)")
+            } else if (!srError && speechRecognizerPartialResult.isNotBlank()) {
+                // SpeechRecognizer hasn't errored but has partial results —
+                // give it a brief window (300ms) to deliver final results
+                Log.d(AUDIO_TAG, "[handleCommandReady] SpeechRecognizer has partial but no final yet — waiting 300ms")
+                delay(300)
+                val srResultAfterWait: String
+                val srReadyAfterWait: Boolean
+                synchronized(speechRecognizerLock) {
+                    srResultAfterWait = speechRecognizerResult
+                    srReadyAfterWait = speechRecognizerReady
+                }
+                if (srReadyAfterWait && srResultAfterWait.isNotBlank()) {
+                    transcription = srResultAfterWait
+                    Log.i(AUDIO_TAG, "[handleCommandReady] SpeechRecognizer final arrived after wait: \"$transcription\"")
+                } else {
+                    // Still no final result — use partial if meaningful, else Gemini fallback
+                    val partial = speechRecognizerPartialResult
+                    if (partial.isNotBlank()) {
+                        transcription = partial
+                        Log.i(AUDIO_TAG, "[handleCommandReady] Using SpeechRecognizer partial result: \"$transcription\"")
+                    } else {
+                        Log.d(AUDIO_TAG, "[handleCommandReady] SpeechRecognizer no result — falling back to Gemini at ${sampleRate}Hz")
+                        transcription = transcribeViaGeminiFallback(pcmBytes, sampleRate)
                     }
-                } catch (e: Exception) {
-                    Log.w(AUDIO_TAG, "[handleCommandReady] Audio emotion analysis failed: ${e.message}")
-                    null
                 }
             } else {
-                // Skip audio emotion analysis when Rust native is not available —
-                // it adds ~200ms latency and always returns "neutral" without Rust
-                Log.d(AUDIO_TAG, "[handleCommandReady] Skipping audio emotion analysis — Rust native not ready")
-                null
+                // SpeechRecognizer errored or has no results — fall back to Gemini
+                Log.d(AUDIO_TAG, "[handleCommandReady] SpeechRecognizer unavailable (ready=$srReady, error=$srError) — falling back to Gemini at ${sampleRate}Hz")
+                transcription = transcribeViaGeminiFallback(pcmBytes, sampleRate)
             }
 
-            if (!audioEmotion.isNullOrBlank()) {
+            // ── Run emotion/mood analysis in BACKGROUND — don't block transcription ──
+            // These add 200-500ms each and are not critical for UX.
+            // They update state flows that the UI can pick up asynchronously.
+            viewModelScope.launch(Dispatchers.IO) {
                 try {
-                    val emotionRegex = Regex(""""emotion"\s*:\s*"(\w+)"""")
-                    val match = emotionRegex.find(audioEmotion)
-                    if (match != null) {
-                        val detected = match.groupValues[1].lowercase()
-                        if (detected in listOf("angry", "calm", "happy", "sad", "fearful",
-                                "surprised", "neutral", "urgent", "stressed")) {
-                            _emotion.value = detected
-                            Log.d(AUDIO_TAG, "[handleCommandReady] Emotion from audio analysis: $detected")
+                    val audioEmotion = if (RustBridge.isNativeReady()) {
+                        try {
+                            Log.d(AUDIO_TAG, "[handleCommandReady-bg] calling RustBridge.analyzeAudio at ${sampleRate}Hz")
+                            RustBridge.analyzeAudio(pcmBytes, sampleRate)
+                        } catch (e: Exception) {
+                            Log.w(AUDIO_TAG, "[handleCommandReady-bg] Audio emotion analysis failed: ${e.message}")
+                            null
+                        }
+                    } else {
+                        Log.d(AUDIO_TAG, "[handleCommandReady-bg] Skipping audio emotion analysis — Rust native not ready")
+                        null
+                    }
+
+                    if (!audioEmotion.isNullOrBlank()) {
+                        try {
+                            val emotionRegex = Regex(""""emotion"\s*:\s*"(\w+)"""")
+                            val match = emotionRegex.find(audioEmotion)
+                            if (match != null) {
+                                val detected = match.groupValues[1].lowercase()
+                                if (detected in listOf("angry", "calm", "happy", "sad", "fearful",
+                                        "surprised", "neutral", "urgent", "stressed")) {
+                                    _emotion.value = detected
+                                    Log.d(AUDIO_TAG, "[handleCommandReady-bg] Emotion from audio analysis: $detected")
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.w(AUDIO_TAG, "[handleCommandReady-bg] Failed to parse emotion: ${e.message}")
                         }
                     }
-                } catch (e: Exception) {
-                    Log.w(AUDIO_TAG, "[handleCommandReady] Failed to parse emotion: ${e.message}")
-                }
-            }
 
-            // Feature: Mood Detection from voice tone
-            // Skip when Rust native is not available — it adds latency and doesn't work without Rust
-            if (RustBridge.isNativeReady()) {
-                try {
-                    val moodResult = MoodDetector.detectMoodFromAudio(pcmBytes, sampleRate)
-                    _detectedMood.value = moodResult
-                    Log.d(AUDIO_TAG, "[handleCommandReady] Mood detected: ${moodResult.mood} (confidence=${moodResult.confidence})")
+                    // Mood Detection from voice tone
+                    if (RustBridge.isNativeReady()) {
+                        try {
+                            val moodResult = MoodDetector.detectMoodFromAudio(pcmBytes, sampleRate)
+                            _detectedMood.value = moodResult
+                            Log.d(AUDIO_TAG, "[handleCommandReady-bg] Mood detected: ${moodResult.mood} (confidence=${moodResult.confidence})")
 
-                    // Auto-suggest actions for stressed/sad moods
-                    if (moodResult.mood == "stressed" || moodResult.mood == "sad") {
-                        if (moodResult.confidence > 0.3f) {
-                            val actionMsg = when (moodResult.suggestedAction) {
-                                "play_calm_music" -> "Sir, aap ${moodResult.mood} lag rahe ho. Shall I play some calming music?"
-                                "play_uplifting_music" -> "Sir, lagta hai mood thoda off hai. Kuch achha gaana sunau?"
-                                "suggest_break" -> "Sir, aap stressed lag rahe ho. Chaliye thoda break lete hain."
-                                else -> null
+                            if (moodResult.mood == "stressed" || moodResult.mood == "sad") {
+                                if (moodResult.confidence > 0.3f) {
+                                    val actionMsg = when (moodResult.suggestedAction) {
+                                        "play_calm_music" -> "Sir, aap ${moodResult.mood} lag rahe ho. Shall I play some calming music?"
+                                        "play_uplifting_music" -> "Sir, lagta hai mood thoda off hai. Kuch achha gaana sunau?"
+                                        "suggest_break" -> "Sir, aap stressed lag rahe ho. Chaliye thoda break lete hain."
+                                        else -> null
+                                    }
+                                    if (actionMsg != null) {
+                                        Log.i(AUDIO_TAG, "[handleCommandReady-bg] Mood action suggestion: $actionMsg")
+                                    }
+                                }
                             }
-                            if (actionMsg != null) {
-                                Log.i(AUDIO_TAG, "[handleCommandReady] Mood action suggestion: $actionMsg")
-                            }
+                        } catch (e: Exception) {
+                            Log.w(AUDIO_TAG, "[handleCommandReady-bg] Mood detection failed: ${e.message}")
                         }
+                    } else {
+                        Log.d(AUDIO_TAG, "[handleCommandReady-bg] Skipping mood detection — Rust native not ready")
                     }
                 } catch (e: Exception) {
-                    Log.w(AUDIO_TAG, "[handleCommandReady] Mood detection failed: ${e.message}")
+                    Log.w(AUDIO_TAG, "[handleCommandReady-bg] Background emotion/mood analysis failed: ${e.message}")
                 }
-            } else {
-                Log.d(AUDIO_TAG, "[handleCommandReady] Skipping mood detection — Rust native not ready")
             }
-
-            Log.d(AUDIO_TAG, "[handleCommandReady] Starting Gemini multimodal transcription at ${sampleRate}Hz")
-            val transcription = transcribeViaGeminiFallback(pcmBytes, sampleRate)
 
             // Inject transcription into Chat UI as User message for immediate visual feedback
             if (transcription.isNotBlank()) {
@@ -1250,6 +1603,10 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         if (textToSpeech == null) {
             initNativeTts(context.applicationContext)
         }
+        // Initialize SpeechRecognizer for fast STT
+        if (speechRecognizer == null) {
+            initSpeechRecognizer(context.applicationContext)
+        }
         // Register incoming call callback
         NotificationReaderService.onIncomingCall = { callerName, callerNumber ->
             handleIncomingCallAnnouncement(callerName, callerNumber)
@@ -1458,6 +1815,51 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                         val aiQuery = routeResult.prompt
                         _emotion.value = "confident"
                         handleAIQuery(aiQuery, context, memoryContext = "")
+                    }
+                    // Game direction command — control snake game via voice
+                    is CommandRouter.RouteResult.GameDirectionCommand -> {
+                        setVoiceDirection(routeResult.direction)
+                        _emotion.value = "playful"
+                        _lastResponse.value = "Moving ${routeResult.direction.lowercase()}"
+                        _isTyping.value = false
+                        addAssistantMessage("Moving ${routeResult.direction.lowercase()}", "playful")
+                        _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+                        isProcessing.set(false)
+                    }
+                    // Quick Note command — create a note via voice
+                    is CommandRouter.RouteResult.QuickNoteCommand -> {
+                        addNote("Voice Note", routeResult.text)
+                        _emotion.value = "happy"
+                        _lastResponse.value = "Noted, Sir. I've saved: ${routeResult.text}"
+                        _isTyping.value = false
+                        addAssistantMessage("Noted: ${routeResult.text}", "happy")
+                        _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+                        isProcessing.set(false)
+                    }
+                    // Music command — UI-only music player
+                    is CommandRouter.RouteResult.MusicCommand -> {
+                        when (routeResult.action) {
+                            "play" -> {
+                                showMusic()
+                                val musicMsg = "Playing JARVIS Ambient, Sir."
+                                _emotion.value = "happy"
+                                _lastResponse.value = musicMsg
+                                _isTyping.value = false
+                                addAssistantMessage(musicMsg, "happy")
+                                _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+                                isProcessing.set(false)
+                            }
+                            "pause" -> {
+                                _isMusicPlaying.value = false
+                                val pauseMsg = "Music paused, Sir."
+                                _emotion.value = "calm"
+                                _lastResponse.value = pauseMsg
+                                _isTyping.value = false
+                                addAssistantMessage(pauseMsg, "calm")
+                                _brainState.value = if (_isVoiceMode.value) BrainState.LISTENING else BrainState.IDLE
+                                isProcessing.set(false)
+                            }
+                        }
                     }
                 }
             } catch (e: CancellationException) {
@@ -2590,6 +2992,140 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         _audioAmplitude.value = amplitude.coerceIn(0f, 1f)
     }
 
+    /**
+     * Refresh device diagnostics — battery level, charging status, CPU usage.
+     * Reads from Android BatteryManager and ActivityManager.
+     */
+    @SuppressLint("MissingPermission")
+    fun refreshDiagnostics(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // Battery info
+                val batteryIntent = context.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+                if (batteryIntent != null) {
+                    val level = batteryIntent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, 0)
+                    val scale = batteryIntent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100)
+                    val status = batteryIntent.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
+                    val isCharging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING ||
+                            status == android.os.BatteryManager.BATTERY_STATUS_FULL
+                    _deviceBatteryLevel.value = if (scale > 0) (level * 100 / scale) else 0
+                    _deviceIsCharging.value = isCharging
+                    Log.d(TAG, "[refreshDiagnostics] Battery: ${_deviceBatteryLevel.value}%, charging=$isCharging")
+                }
+
+                // CPU usage — read from /proc/stat (simplified estimation)
+                try {
+                    val cpuUsage = readCpuUsage()
+                    _deviceCpuUsage.value = cpuUsage
+                    Log.d(TAG, "[refreshDiagnostics] CPU usage: $cpuUsage%")
+                } catch (e: Exception) {
+                    Log.w(TAG, "[refreshDiagnostics] CPU read failed: ${e.message}")
+                    _deviceCpuUsage.value = 0f
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[refreshDiagnostics] Failed: ${e.message}")
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // EXPORT CHAT — Saves the current chat session as a text file
+    //
+    // Writes all messages to the app's external files directory and
+    // shows a toast confirming the file was saved.
+    // ═══════════════════════════════════════════════════════════════════════
+    fun exportChat(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val currentMessages = _messages.value
+                if (currentMessages.isEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        toast(context, "No messages to export")
+                    }
+                    return@launch
+                }
+
+                val sdf = java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", java.util.Locale.getDefault())
+                val timestamp = sdf.format(java.util.Date())
+                val fileName = "jarvis_chat_$timestamp.txt"
+
+                val dir = context.getExternalFilesDir(null)
+                if (dir == null) {
+                    withContext(Dispatchers.Main) {
+                        toast(context, "External storage not available")
+                    }
+                    return@launch
+                }
+
+                val file = java.io.File(dir, fileName)
+                val sb = StringBuilder()
+                sb.appendLine("═══════════════════════════════════════════")
+                sb.appendLine("  J.A.R.V.I.S — Chat Export")
+                sb.appendLine("  Exported: ${java.text.SimpleDateFormat("MMMM dd, yyyy 'at' HH:mm", java.util.Locale.getDefault()).format(java.util.Date())}")
+                sb.appendLine("  Messages: ${currentMessages.size}")
+                sb.appendLine("═══════════════════════════════════════════")
+                sb.appendLine()
+
+                val msgFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                for (msg in currentMessages) {
+                    val sender = if (msg.isFromUser) "YOU" else "JARVIS"
+                    val time = msgFormat.format(java.util.Date(msg.timestamp))
+                    sb.appendLine("[$time] $sender:")
+                    sb.appendLine("  ${msg.content}")
+                    if (msg.emotion != "neutral" && !msg.isFromUser) {
+                        sb.appendLine("  [Emotion: ${msg.emotion}]")
+                    }
+                    sb.appendLine()
+                }
+
+                sb.appendLine("═══════════════════════════════════════════")
+                sb.appendLine("  End of export")
+                sb.appendLine("═══════════════════════════════════════════")
+
+                file.writeText(sb.toString())
+
+                Log.i(TAG, "[exportChat] Chat exported to: ${file.absolutePath}")
+                withContext(Dispatchers.Main) {
+                    toast(context, "Chat exported to ${file.name}")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[exportChat] Failed: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    toast(context, "Export failed: ${e.message?.take(60)}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Read CPU usage from /proc/stat. Returns a rough percentage.
+     * Calculates usage between two readings 200ms apart.
+     */
+    private fun readCpuUsage(): Float {
+        return try {
+            val stat1 = java.io.File("/proc/stat").readLines().firstOrNull() ?: return 0f
+            Thread.sleep(200)
+            val stat2 = java.io.File("/proc/stat").readLines().firstOrNull() ?: return 0f
+
+            val vals1 = stat1.split("\\s+".toRegex()).drop(1).map { it.toLong() }
+            val vals2 = stat2.split("\\s+".toRegex()).drop(1).map { it.toLong() }
+
+            val idle1 = vals1.getOrElse(3) { 0L }
+            val idle2 = vals2.getOrElse(3) { 0L }
+            val total1 = vals1.sum()
+            val total2 = vals2.sum()
+
+            val idleDiff = idle2 - idle1
+            val totalDiff = total2 - total1
+
+            if (totalDiff > 0) {
+                ((totalDiff - idleDiff).toFloat() / totalDiff.toFloat() * 100f).coerceIn(0f, 100f)
+            } else 0f
+        } catch (e: Exception) {
+            0f
+        }
+    }
+
     fun requestShizukuPermission(activity: android.app.Activity, requestCode: Int = 0) {
         if (ShizukuManager.isReady() && !ShizukuManager.hasPermission()) {
             ShizukuManager.requestPermission(activity, requestCode)
@@ -3243,6 +3779,13 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         stopAudioEngine()
         stopWakeWordMonitor()
 
+        // Destroy SpeechRecognizer
+        try {
+            speechRecognizer?.stopListening()
+            speechRecognizer?.destroy()
+            speechRecognizer = null
+        } catch (_: Exception) {}
+
         overlayManager?.hide()
         overlayManager = null
 
@@ -3268,6 +3811,9 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             toneGenerator?.release()
             toneGenerator = null
         } catch (_: Exception) {}
+
+        // Quick Notes cleanup
+        _notes.value = emptyList()
     }
 
     class Factory(private val repo: SettingsRepository) : ViewModelProvider.Factory {

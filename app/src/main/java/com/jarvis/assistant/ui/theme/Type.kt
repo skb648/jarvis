@@ -115,17 +115,65 @@ val JarvisTypography = Typography(
         letterSpacing = 0.1.sp
     ),
     labelMedium = TextStyle(
-        fontFamily = SansFamily,
+        fontFamily = MonospaceFamily,
         fontWeight = FontWeight.Medium,
         fontSize = 12.sp,
         lineHeight = 16.sp,
         letterSpacing = 0.5.sp
     ),
     labelSmall = TextStyle(
-        fontFamily = SansFamily,
+        fontFamily = MonospaceFamily,
         fontWeight = FontWeight.Medium,
         fontSize = 11.sp,
         lineHeight = 16.sp,
         letterSpacing = 0.5.sp
     )
+)
+
+// ─── Extra Typography Styles ─────────────────────────────────────────
+// Additional text styles for premium/polish beyond Material3 defaults.
+
+/** Monospace label with tight letter spacing — used for status tags, version numbers */
+val LabelMono = TextStyle(
+    fontFamily = MonospaceFamily,
+    fontWeight = FontWeight.Medium,
+    fontSize = 10.sp,
+    lineHeight = 14.sp,
+    letterSpacing = 1.5.sp
+)
+
+/** Monospace display for large metrics (e.g. battery %, CPU %) */
+val MetricDisplay = TextStyle(
+    fontFamily = MonospaceFamily,
+    fontWeight = FontWeight.Bold,
+    fontSize = 40.sp,
+    lineHeight = 48.sp,
+    letterSpacing = (-0.5).sp
+)
+
+/** Section header with wide letter spacing — used for "BATTERY STATUS", "NETWORK", etc. */
+val SectionHeader = TextStyle(
+    fontFamily = MonospaceFamily,
+    fontWeight = FontWeight.SemiBold,
+    fontSize = 11.sp,
+    lineHeight = 16.sp,
+    letterSpacing = 3.sp
+)
+
+/** Caption style for tiny annotations and footnotes */
+val CaptionMono = TextStyle(
+    fontFamily = MonospaceFamily,
+    fontWeight = FontWeight.Normal,
+    fontSize = 9.sp,
+    lineHeight = 12.sp,
+    letterSpacing = 0.5.sp
+)
+
+/** Badge/tag style with bold weight and wide tracking */
+val BadgeStyle = TextStyle(
+    fontFamily = MonospaceFamily,
+    fontWeight = FontWeight.Bold,
+    fontSize = 9.sp,
+    lineHeight = 12.sp,
+    letterSpacing = 2.sp
 )

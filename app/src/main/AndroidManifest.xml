@@ -122,11 +122,14 @@
             </intent-filter>
         </service>
 
-        <!-- ─── Sensory Service (Foreground, Microphone) ──────────── -->
+        <!-- ─── Sensory Service (Foreground, Special Use) ─────────── -->
         <service
             android:name=".services.JarvisSensoryService"
             android:exported="false"
-            android:foregroundServiceType="microphone">
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="sensor_monitoring_for_AI_context" />
             <intent-filter>
                 <action android:name="com.jarvis.assistant.SENSORY_START" />
                 <action android:name="com.jarvis.assistant.SENSORY_STOP" />

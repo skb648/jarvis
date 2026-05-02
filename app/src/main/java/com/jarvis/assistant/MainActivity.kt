@@ -129,6 +129,11 @@ class MainActivity : ComponentActivity() {
         val chatSessions by viewModel.chatSessions.collectAsState()
         val currentSessionId by viewModel.currentSessionIdFlow.collectAsState()
         val userMicLocked by viewModel.userMicLocked.collectAsState()
+        val wakeFlash by viewModel.wakeFlash.collectAsState()
+        val voiceDirection by viewModel.voiceDirection.collectAsState()
+        val notes by viewModel.notes.collectAsState()
+        val showMusicPlayer by viewModel.showMusicPlayer.collectAsState()
+        val isMusicPlaying by viewModel.isMusicPlaying.collectAsState()
 
         JarvisNavGraph(
             brainState = brainState,
@@ -211,7 +216,33 @@ class MainActivity : ComponentActivity() {
             onClearHistory = { viewModel.clearAllHistory() },
             // Mic Lock
             userMicLocked = userMicLocked,
-            onToggleMicLock = { viewModel.setMicLock(!userMicLocked, this@MainActivity) }
+            onToggleMicLock = { viewModel.setMicLock(!userMicLocked, this@MainActivity) },
+            // SmartHome quick action & settings navigation
+            onSmartHomeQuickAction = { scene -> viewModel.sendMessage("Execute scene: $scene", context) },
+            onGoToSettings = { /* Navigation handled by NavGraph */ },
+            // HomeScreen location context
+            locationContext = viewModel.locationContext.value,
+            // Wake flash effect
+            wakeFlash = wakeFlash,
+            // Voice direction for snake game
+            voiceDirection = voiceDirection,
+            // Diagnostics state
+            diagnosticsBatteryLevel = viewModel.deviceBatteryLevel.value,
+            diagnosticsIsCharging = viewModel.deviceIsCharging.value,
+            diagnosticsIsRustReady = isRustReady,
+            diagnosticsCpuUsage = viewModel.deviceCpuUsage.value,
+            onRefreshDiagnostics = { viewModel.refreshDiagnostics(context) },
+            // Quick Notes
+            notes = notes,
+            onAddNote = { title, content -> viewModel.addNote(title, content) },
+            onDeleteNote = { id -> viewModel.deleteNote(id) },
+            // Music Player
+            showMusicPlayer = showMusicPlayer,
+            isMusicPlaying = isMusicPlaying,
+            onToggleMusicPlayer = { viewModel.toggleMusicPlayer() },
+            onToggleMusicPlayback = { viewModel.toggleMusicPlayback() },
+            // Export chat
+            onExportChat = { viewModel.exportChat(context) }
         )
     }
 

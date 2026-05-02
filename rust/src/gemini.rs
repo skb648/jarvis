@@ -6,7 +6,7 @@
 //! so they can be overwritten at ANY time — including after the first
 //! `nativeInitialize` call.
 //!
-//! Model version: hardcoded to `gemini-2.5-flash` (updated v14).
+//! Model fallback: tries gemini-2.5-flash → gemini-2.0-flash → gemini-1.5-flash → gemini-1.5-flash-8b.
 //!
 //! ═══════════════════════════════════════════════════════════════
 //! CRITICAL FIX (v6): JARVIS PERSONA INJECTION
@@ -100,15 +100,23 @@ fn get_elevenlabs_key() -> Result<String> {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// MODEL VERSION — HARDCODED
+// MODEL FALLBACK LIST
 // ═══════════════════════════════════════════════════════════════
 
-/// The Gemini model to use.
-/// CRITICAL FIX (v14): Changed from gemini-1.5-flash to gemini-2.5-flash
-/// because gemini-1.5-flash is deprecated and returns 404 on many
-/// Google Cloud Projects. gemini-2.5-flash is the current recommended
-/// model and supports audio + text + vision.
-const GEMINI_MODEL: &str = "gemini-2.5-flash";
+/// Gemini model fallback list — tried in order.
+///
+/// If the primary model returns 404 (not found/deprecated) or a
+/// non-success status, we fall back to the next model in the list.
+/// This mirrors the Kotlin-side 4-model fallback list and prevents
+/// total failure when a model is deprecated or unavailable.
+///
+/// Order: newest/most capable → oldest/least capable
+const GEMINI_MODELS: [&str; 4] = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+];
 
 // ═══════════════════════════════════════════════════════════════
 // GEMINI API TYPES
@@ -226,29 +234,97 @@ lazy_static! {
 // GEMINI API METHODS
 // ═══════════════════════════════════════════════════════════════
 
-/// Process a text query through the Gemini API.
-/// Reads the current API key from the RwLock on every call so that
-/// a hot-swapped key takes effect immediately.
+/// Send a Gemini API request for a specific model.
 ///
-/// The `system_prompt` parameter is passed from Kotlin to ensure
-/// a single source of truth for the JARVIS persona prompt.
-/// If empty, falls back to FALLBACK_SYSTEM_PROMPT.
-pub async fn process_query(query: &str, context: &str, history_json: &str, system_prompt: &str) -> Result<String> {
-    let api_key = get_gemini_key()?;
-
+/// Handles the HTTP request, response parsing, and rate-limit retry
+/// (429 → wait 3s → retry once). Returns `Ok(text)` on success or
+/// `Err` on failure, allowing the caller to try the next model.
+///
+/// This is the shared core used by both `process_query` and
+/// `process_query_with_image` for model fallback.
+async fn send_gemini_request(model: &str, api_key: &str, request: &GeminiRequest) -> Result<String> {
     // CRITICAL FIX (v8): Use ?key= query param for authentication.
     // The x-goog-api-key header method was causing 403 errors with many API keys.
     // The ?key= URL parameter is the most universally compatible method and works
     // reliably with all Gemini API key types.
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        GEMINI_MODEL, api_key
+        model, api_key
     );
 
-    log::info!(
-        "Gemini API call — model={}, key_len={}, auth=url_param",
-        GEMINI_MODEL, api_key.len()
-    );
+    let response = HTTP_CLIENT
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .context("Gemini API request failed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        log::error!("Gemini API error {} for model {} — response body: {}", status, model, body);
+
+        // If 429 (rate limited), wait and retry ONCE on the same model
+        if status.as_u16() == 429 {
+            log::warn!("Gemini API rate limited (429) on model {} — waiting 3s and retrying once...", model);
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+            let retry_response = HTTP_CLIENT
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&request)
+                .send()
+                .await
+                .context("Gemini API retry request failed")?;
+
+            if retry_response.status().is_success() {
+                return parse_gemini_response(retry_response).await;
+            }
+
+            let retry_status = retry_response.status();
+            let retry_body = retry_response.text().await.unwrap_or_default();
+            anyhow::bail!("Gemini API error {} on model {} (after retry): {}", retry_status, model, retry_body);
+        }
+
+        anyhow::bail!("Gemini API error {} on model {}: {}", status, model, body);
+    }
+
+    parse_gemini_response(response).await
+}
+
+/// Parse a successful Gemini API response and extract the text content.
+async fn parse_gemini_response(response: reqwest::Response) -> Result<String> {
+    let gemini_response: GeminiResponse = response
+        .json()
+        .await
+        .context("Failed to parse Gemini response")?;
+
+    let text = gemini_response
+        .candidates
+        .first()
+        .and_then(|c| c.content.as_ref())
+        .and_then(|c| c.parts.first())
+        .and_then(|p| p.text.clone())
+        .unwrap_or_else(|| "Processing complete, Sir.".to_string());
+
+    Ok(text)
+}
+
+/// Process a text query through the Gemini API with model fallback.
+/// Reads the current API key from the RwLock on every call so that
+/// a hot-swapped key takes effect immediately.
+///
+/// The `system_prompt` parameter is passed from Kotlin to ensure
+/// a single source of truth for the JARVIS persona prompt.
+/// If empty, falls back to FALLBACK_SYSTEM_PROMPT.
+///
+/// Model fallback: tries each model in GEMINI_MODELS in order.
+/// If a model returns 404 or a non-success status, falls through
+/// to the next model. Rate-limit (429) retries once on the same
+/// model before falling back.
+pub async fn process_query(query: &str, context: &str, history_json: &str, system_prompt: &str) -> Result<String> {
+    let api_key = get_gemini_key()?;
 
     // Parse conversation history
     let mut contents = parse_history(history_json);
@@ -295,78 +371,40 @@ pub async fn process_query(query: &str, context: &str, history_json: &str, syste
         ],
     };
 
-    let response = HTTP_CLIENT
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&request)
-        .send()
-        .await
-        .context("Gemini API request failed")?;
+    // Try each model in the fallback list
+    let mut last_error: Option<String> = None;
+    for model in GEMINI_MODELS {
+        log::info!(
+            "Gemini API call — model={}, key_len={}, auth=url_param",
+            model, api_key.len()
+        );
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        log::error!("Gemini API error {} — response body: {}", status, body);
-        
-        // If 429 (rate limited), wait and retry ONCE
-        if status.as_u16() == 429 {
-            log::warn!("Gemini API rate limited (429) — waiting 3s and retrying once...");
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            
-            let retry_response = HTTP_CLIENT
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .json(&request)
-                .send()
-                .await
-                .context("Gemini API retry request failed")?;
-            
-            if retry_response.status().is_success() {
-                let gemini_response: GeminiResponse = retry_response
-                    .json()
-                    .await
-                    .context("Failed to parse Gemini response")?;
-                
-                let text = gemini_response
-                    .candidates
-                    .first()
-                    .and_then(|c| c.content.as_ref())
-                    .and_then(|c| c.parts.first())
-                    .and_then(|p| p.text.clone())
-                    .unwrap_or_else(|| "Processing complete, Sir.".to_string());
-                
-                return Ok(text);
+        match send_gemini_request(model, &api_key, &request).await {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                let err_str = e.to_string();
+                log::warn!("Gemini model {} failed: {} — trying next model", model, err_str);
+                last_error = Some(err_str);
+                // Continue to next model
             }
-            
-            let retry_status = retry_response.status();
-            let retry_body = retry_response.text().await.unwrap_or_default();
-            anyhow::bail!("Gemini API error {} (after retry): {}", retry_status, retry_body);
         }
-        
-        anyhow::bail!("Gemini API error {}: {}", status, body);
     }
 
-    let gemini_response: GeminiResponse = response
-        .json()
-        .await
-        .context("Failed to parse Gemini response")?;
-
-    let text = gemini_response
-        .candidates
-        .first()
-        .and_then(|c| c.content.as_ref())
-        .and_then(|c| c.parts.first())
-        .and_then(|p| p.text.clone())
-        .unwrap_or_else(|| "Processing complete, Sir.".to_string());
-
-    Ok(text)
+    // All models failed
+    anyhow::bail!(
+        "All Gemini models failed. Last error: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    );
 }
 
-/// Process a multimodal query (text + image) through Gemini.
+/// Process a multimodal query (text + image) through Gemini with model fallback.
 /// Uses the same RwLock-based key fetch for hot-swap compatibility.
 ///
 /// The `system_prompt` parameter is passed from Kotlin to ensure
 /// a single source of truth for the JARVIS persona prompt.
+///
+/// Model fallback: tries each model in GEMINI_MODELS in order,
+/// same as process_query.
 pub async fn process_query_with_image(
     query: &str,
     image_base64: &str,
@@ -374,17 +412,6 @@ pub async fn process_query_with_image(
     system_prompt: &str,
 ) -> Result<String> {
     let api_key = get_gemini_key()?;
-
-    // CRITICAL FIX (v8): Use ?key= query param for authentication
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        GEMINI_MODEL, api_key
-    );
-
-    log::info!(
-        "Gemini multimodal API call — model={}, key_len={}, auth=url_param",
-        GEMINI_MODEL, api_key.len()
-    );
 
     let contents = vec![GeminiContent {
         role: "user".to_string(),
@@ -421,31 +448,30 @@ pub async fn process_query_with_image(
         safety_settings: vec![],
     };
 
-    let response = HTTP_CLIENT
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&request)
-        .send()
-        .await?;
+    // Try each model in the fallback list
+    let mut last_error: Option<String> = None;
+    for model in GEMINI_MODELS {
+        log::info!(
+            "Gemini multimodal API call — model={}, key_len={}, auth=url_param",
+            model, api_key.len()
+        );
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        log::error!("Gemini multimodal API error {} — response body: {}", status, body);
-        anyhow::bail!("Gemini multimodal API error {}: {}", status, body);
+        match send_gemini_request(model, &api_key, &request).await {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                let err_str = e.to_string();
+                log::warn!("Gemini multimodal model {} failed: {} — trying next model", model, err_str);
+                last_error = Some(err_str);
+                // Continue to next model
+            }
+        }
     }
 
-    let gemini_response: GeminiResponse = response.json().await?;
-
-    let text = gemini_response
-        .candidates
-        .first()
-        .and_then(|c| c.content.as_ref())
-        .and_then(|c| c.parts.first())
-        .and_then(|p| p.text.clone())
-        .unwrap_or_else(|| "Processing complete, Sir.".to_string());
-
-    Ok(text)
+    // All models failed
+    anyhow::bail!(
+        "All Gemini models failed for multimodal query. Last error: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    );
 }
 
 /// Synthesize speech via ElevenLabs TTS API.

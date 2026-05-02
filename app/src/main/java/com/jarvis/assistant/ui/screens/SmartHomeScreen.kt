@@ -1,6 +1,15 @@
 package com.jarvis.assistant.ui.screens
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.keyframes
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -12,9 +21,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,6 +60,20 @@ enum class DeviceType(val label: String, val icon: ImageVector) {
     UNKNOWN("Device", Icons.Filled.Devices)
 }
 
+// ── Scene Quick Actions ──────────────────────────────────────────────
+private data class SceneAction(
+    val label: String,
+    val icon: ImageVector,
+    val accentColor: Color
+)
+
+private val sceneActions = listOf(
+    SceneAction("All Lights Off", Icons.Filled.Lightbulb, JarvisRedPink),
+    SceneAction("Movie Mode", Icons.Filled.Movie, JarvisPurple),
+    SceneAction("Good Night", Icons.Filled.Nightlight, Color(0xFF4A5599)),
+    SceneAction("Welcome Home", Icons.Filled.Home, JarvisGreen)
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SmartHomeScreen(
@@ -55,6 +82,8 @@ fun SmartHomeScreen(
     connectionLabel: String,
     onToggleDevice: (String, Boolean) -> Unit,
     onRefresh: () -> Unit,
+    onQuickAction: (String) -> Unit = {},
+    onGoToSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedRoom by remember { mutableStateOf("All") }
@@ -65,6 +94,8 @@ fun SmartHomeScreen(
     val filteredDevices = remember(devices, selectedRoom) {
         if (selectedRoom == "All") devices else devices.filter { it.room == selectedRoom }
     }
+    val activeCount = filteredDevices.count { it.isOn }
+    val totalCount = filteredDevices.size
 
     Column(modifier = modifier.fillMaxSize()) {
         // ── Connection Status Bar ───────────────────────────────────
@@ -79,7 +110,21 @@ fun SmartHomeScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    // Pulsing dot when connected
+                    if (isConnected) {
+                        PulsingDot(color = JarvisGreen)
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .padding(1.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
                     Icon(
                         imageVector = if (isConnected) Icons.Filled.CloudDone else Icons.Filled.CloudOff,
                         contentDescription = "Connection",
@@ -87,21 +132,54 @@ fun SmartHomeScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = connectionLabel,
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            color = if (isConnected) JarvisGreen else JarvisRedPink,
-                            fontFamily = FontFamily.Monospace
+                    Column {
+                        Text(
+                            text = connectionLabel,
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                color = if (isConnected) JarvisGreen else JarvisRedPink,
+                                fontFamily = FontFamily.Monospace
+                            )
                         )
-                    )
+                        if (isConnected) {
+                            Text(
+                                text = "Last synced: just now",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = JarvisGreen.copy(alpha = 0.6f),
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 9.sp
+                                )
+                            )
+                        }
+                    }
                 }
-                IconButton(onClick = onRefresh, modifier = Modifier.size(32.dp)) {
-                    Icon(
-                        imageVector = Icons.Filled.Refresh,
-                        contentDescription = "Refresh",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(18.dp)
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (!isConnected) {
+                        IconButton(onClick = onRefresh, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = Icons.Filled.Refresh,
+                                contentDescription = "Refresh",
+                                tint = JarvisRedPink,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(onClick = onRefresh, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = Icons.Filled.Sync,
+                                contentDescription = "Reconnect",
+                                tint = JarvisRedPink.copy(alpha = 0.8f),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    } else {
+                        IconButton(onClick = onRefresh, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = Icons.Filled.Refresh,
+                                contentDescription = "Refresh",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -133,23 +211,320 @@ fun SmartHomeScreen(
             }
         }
 
-        // ── Device Grid (2 columns) ─────────────────────────────────
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(vertical = 12.dp)
-        ) {
-            items(items = filteredDevices, key = { it.id }) { device ->
-                DeviceCard(
-                    device = device,
-                    onToggle = { onToggleDevice(device.id, !device.isOn) }
-                )
+        // ── Device Count Summary ────────────────────────────────────
+        if (devices.isNotEmpty()) {
+            Text(
+                text = "$totalCount devices · $activeCount active",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    color = TextTertiary,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp
+                ),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+        }
+
+        // ── Room Header Card (when specific room selected) ──────────
+        if (selectedRoom != "All" && filteredDevices.isNotEmpty()) {
+            val activeInRoom = filteredDevices.count { it.isOn }
+            val totalInRoom = filteredDevices.size
+            val ratio = if (totalInRoom > 0) activeInRoom.toFloat() / totalInRoom else 0f
+            val barColor = when {
+                ratio >= 0.6f -> JarvisGreen
+                ratio >= 0.3f -> WarningAmber
+                else -> JarvisRedPink
+            }
+
+            GlassmorphicCardSimple(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                cornerRadius = 16.dp
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = selectedRoom,
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            fontSize = 20.sp
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "$totalInRoom devices · $activeInRoom active",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = TextSecondary
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // Active ratio bar
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                    ) {
+                        // Background track
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .then(
+                                    Modifier.drawBehind {
+                                        drawRect(color = SurfaceNavyLight)
+                                    }
+                                )
+                        )
+                        // Filled portion
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(ratio)
+                                .height(4.dp)
+                                .then(
+                                    Modifier.drawBehind {
+                                        drawRect(color = barColor)
+                                    }
+                                )
+                        )
+                    }
+                }
             }
         }
+
+        // ── Scene / Automation Quick Actions ─────────────────────────
+        if (devices.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                sceneActions.forEach { scene ->
+                    OutlinedButton(
+                        onClick = { onQuickAction(scene.label) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, scene.accentColor.copy(alpha = 0.5f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = scene.accentColor.copy(alpha = 0.08f),
+                            contentColor = scene.accentColor
+                        ),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp)
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = scene.icon,
+                                contentDescription = scene.label,
+                                tint = scene.accentColor,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = scene.label,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 8.sp,
+                                    lineHeight = 10.sp
+                                ),
+                                textAlign = TextAlign.Center,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Empty State Illustration ─────────────────────────────────
+        if (devices.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(32.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Home,
+                        contentDescription = "No devices",
+                        tint = TextTertiary.copy(alpha = 0.4f),
+                        modifier = Modifier.size(64.dp)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "No Devices Found",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextSecondary
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Connect to MQTT or Home Assistant\nin Settings to discover devices",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = TextTertiary,
+                            textAlign = TextAlign.Center,
+                            lineHeight = 16.sp
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                    OutlinedButton(
+                        onClick = onGoToSettings,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, JarvisCyan),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = JarvisCyan
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Settings,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Go to Settings",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontFamily = FontFamily.Monospace
+                            )
+                        )
+                    }
+                }
+            }
+        } else {
+            // ── Device Grid (2 columns) ──────────────────────────────
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(vertical = 8.dp)
+            ) {
+                items(items = filteredDevices, key = { it.id }) { device ->
+                    DeviceCard(
+                        device = device,
+                        onToggle = { onToggleDevice(device.id, !device.isOn) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ── Pulsing Dot Composable ───────────────────────────────────────────
+@Composable
+private fun PulsingDot(
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = keyframes {
+                durationMillis = 1200
+                0.4f at 0
+                1f at 400
+                0.4f at 800
+                0.4f at 1200
+            },
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "pulseAlpha"
+    )
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.8f,
+        targetValue = 1.2f,
+        animationSpec = infiniteRepeatable(
+            animation = keyframes {
+                durationMillis = 1200
+                0.8f at 0
+                1.2f at 400
+                0.8f at 800
+                0.8f at 1200
+            },
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "pulseScale"
+    )
+
+    Canvas(modifier = modifier.size(10.dp)) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val radius = (size.minDimension / 2f) * pulseScale * 0.7f
+        // Outer glow
+        drawCircle(
+            color = color.copy(alpha = pulseAlpha * 0.3f),
+            radius = radius * 1.5f,
+            center = center
+        )
+        // Core dot
+        drawCircle(
+            color = color.copy(alpha = pulseAlpha),
+            radius = radius,
+            center = center
+        )
+    }
+}
+
+// ── Icon Glow Ring ────────────────────────────────────────────────────
+@Composable
+private fun IconGlowRing(
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "glow")
+    val glowAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.15f,
+        targetValue = 0.35f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2000),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "glowAlpha"
+    )
+
+    Canvas(modifier = modifier.size(40.dp)) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val radius = size.minDimension / 2f
+        // Outer soft glow
+        drawCircle(
+            color = color.copy(alpha = glowAlpha * 0.4f),
+            radius = radius,
+            center = center
+        )
+        // Inner ring
+        drawCircle(
+            color = color.copy(alpha = glowAlpha),
+            radius = radius * 0.75f,
+            center = center
+        )
+    }
+}
+
+// ── Status Dot ────────────────────────────────────────────────────────
+@Composable
+private fun StatusDot(
+    isOn: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val color = if (isOn) JarvisGreen else TextTertiary.copy(alpha = 0.5f)
+    Canvas(modifier = modifier.size(8.dp)) {
+        drawCircle(
+            color = color,
+            radius = size.minDimension / 2f,
+            center = Offset(size.width / 2f, size.height / 2f)
+        )
     }
 }
 
@@ -172,16 +547,32 @@ private fun DeviceCard(
         DeviceType.UNKNOWN    -> TextSecondary
     }
 
+    // Animated card background color (flash effect on toggle)
+    val animatedBgColor by animateColorAsState(
+        targetValue = if (device.isOn) accentColor.copy(alpha = 0.08f) else GlassBackground,
+        animationSpec = tween(durationMillis = 400),
+        label = "bgColor"
+    )
+
+    // Animated border color
+    val animatedBorderColor by animateColorAsState(
+        targetValue = if (device.isOn) accentColor.copy(alpha = 0.3f) else GlassBorder,
+        animationSpec = tween(durationMillis = 400),
+        label = "borderColor"
+    )
+
+    // Animated elevation
+    val animatedElevation by animateDpAsState(
+        targetValue = if (device.isOn) 2.dp else 0.dp,
+        animationSpec = tween(durationMillis = 300),
+        label = "elevation"
+    )
+
     Card(
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (device.isOn) accentColor.copy(alpha = 0.08f) else GlassBackground
-        ),
-        border = BorderStroke(
-            width = 1.dp,
-            color = if (device.isOn) accentColor.copy(alpha = 0.3f) else GlassBorder
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = animatedBgColor),
+        border = BorderStroke(width = 1.dp, color = animatedBorderColor),
+        elevation = CardDefaults.cardElevation(defaultElevation = animatedElevation),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
@@ -190,18 +581,24 @@ private fun DeviceCard(
                 .padding(12.dp),
             horizontalAlignment = Alignment.Start
         ) {
-            // Top row: icon + switch
+            // Top row: glow + icon + switch
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = device.type.icon,
-                    contentDescription = device.type.label,
-                    tint = if (device.isOn) accentColor else TextTertiary,
-                    modifier = Modifier.size(28.dp)
-                )
+                Box(contentAlignment = Alignment.Center) {
+                    // Glow ring behind icon when ON
+                    if (device.isOn) {
+                        IconGlowRing(color = accentColor)
+                    }
+                    Icon(
+                        imageVector = device.type.icon,
+                        contentDescription = device.type.label,
+                        tint = if (device.isOn) accentColor else TextTertiary,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
                 Switch(
                     checked = device.isOn,
                     onCheckedChange = { onToggle() },
@@ -217,17 +614,23 @@ private fun DeviceCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Device name
-            Text(
-                text = device.name,
-                style = MaterialTheme.typography.titleSmall.copy(
-                    fontFamily = FontFamily.Monospace,
-                    color = TextPrimary,
-                    fontSize = 13.sp
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            // Device name + status dot
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                StatusDot(isOn = device.isOn)
+                Text(
+                    text = device.name,
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        color = TextPrimary,
+                        fontSize = 13.sp
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
 
             // Value / status line
             if (device.value.isNotBlank()) {

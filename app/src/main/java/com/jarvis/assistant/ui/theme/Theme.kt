@@ -42,6 +42,15 @@ private val JarvisDarkColorScheme = darkColorScheme(
     surfaceVariant     = SurfaceNavyLight,
     onSurfaceVariant   = TextSecondary,
 
+    // ── Additional surface colors for elevation hierarchy ────────────
+    surfaceBright      = SurfaceNavyElevated,
+    surfaceDim         = SurfaceNavyDeep,
+    surfaceContainerLowest = SurfaceNavyDeep,
+    surfaceContainerLow    = DeepNavy,
+    surfaceContainer       = SurfaceNavy,
+    surfaceContainerHigh   = SurfaceNavyLight,
+    surfaceContainerHighest = SurfaceNavyElevated,
+
     outline            = GlassBorder,
     outlineVariant     = GlassHighlight,
 
@@ -109,4 +118,34 @@ fun glassmorphicBorderColor(alpha: Float = 0.20f): Color {
  */
 fun glassmorphicHighlightColor(alpha: Float = 0.05f): Color {
     return Color.White.copy(alpha = alpha)
+}
+
+// ─── Gradient Brush Factories ──────────────────────────────────────
+
+/**
+ * Creates a vertical background gradient for full-screen surfaces.
+ * Goes from GradientStart (top) → GradientMid → GradientEnd (bottom).
+ */
+fun jarvisBackgroundBrush(): androidx.compose.ui.graphics.Brush {
+    return androidx.compose.ui.graphics.Brush.verticalGradient(
+        colors = listOf(GradientStart, GradientMid, GradientEnd)
+    )
+}
+
+/**
+ * Creates a horizontal accent gradient from cyan → purple.
+ */
+fun jarvisAccentBrush(): androidx.compose.ui.graphics.Brush {
+    return androidx.compose.ui.graphics.Brush.horizontalGradient(
+        colors = listOf(JarvisCyan, JarvisPurple)
+    )
+}
+
+/**
+ * Creates a horizontal premium gradient from gold → orange.
+ */
+fun jarvisPremiumBrush(): androidx.compose.ui.graphics.Brush {
+    return androidx.compose.ui.graphics.Brush.horizontalGradient(
+        colors = listOf(JarvisGold, JarvisOrange)
+    )
 }

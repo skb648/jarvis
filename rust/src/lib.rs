@@ -2,6 +2,7 @@ mod audio;
 mod emotion;
 mod gemini;
 mod jni_helpers;
+mod voice_pattern;
 mod wake_word;
 
 use jni::objects::{JByteArray, JClass, JString};
@@ -183,6 +184,37 @@ pub extern "system" fn Java_com_jarvis_assistant_jni_RustBridge_nativeDetectWake
         1
     } else {
         0
+    }
+}
+
+/// JNI: nativeDetectVoicePattern(audioData, sampleRate) -> String?
+///
+/// Detects voice patterns in the audio data for call management commands
+/// (e.g., "answer", "reject"). Returns a JSON string like
+/// `{"id": "call_answer", "confidence": 0.85}` if a pattern is detected,
+/// or null if no pattern is found.
+///
+/// Uses layered audio analysis (energy, spectral, ZCR, duration, burst pattern)
+/// similar to the wake_word module but tuned for short command-like utterances.
+#[no_mangle]
+pub extern "system" fn Java_com_jarvis_assistant_jni_RustBridge_nativeDetectVoicePattern<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    audio_data: JByteArray<'local>,
+    sample_rate: jint,
+) -> jstring {
+    let audio_bytes = jni_helpers::jbytearray_to_vec(&mut env, &audio_data);
+    let result = voice_pattern::detect_voice_pattern(&audio_bytes, sample_rate as u32);
+
+    match result {
+        Some(pattern) => {
+            let json = serde_json::json!({
+                "id": pattern.id,
+                "confidence": (pattern.confidence * 100.0).round() / 100.0,
+            });
+            jni_helpers::string_to_jstring(&mut env, &json.to_string()).into_raw()
+        }
+        None => std::ptr::null_mut(), // Return null (Kotlin side handles null)
     }
 }
 

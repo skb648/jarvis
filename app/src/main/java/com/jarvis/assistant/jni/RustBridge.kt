@@ -190,18 +190,25 @@ object RustBridge {
      * This is a safe wrapper around [nativeDetectVoicePattern] that handles
      * native library errors gracefully. The native method returns a JSON string
      * like {"id": "call_answer", "confidence": 0.85} which is parsed here.
+     *
+     * NOTE: This runs on [Dispatchers.IO] to avoid blocking the calling thread.
+     * Previously this was a synchronous call that could block if invoked from
+     * the wrong context. The AudioEngine already calls this from its IO coroutine,
+     * but wrapping in withContext ensures safety from any calling context.
      */
-    fun detectVoicePatternSync(audioData: ByteArray, sampleRate: Int): VoicePatternResult? {
-        return try {
-            val json = nativeDetectVoicePattern(audioData, sampleRate)
-            if (json.isNullOrEmpty()) return null
-            parseVoicePatternJson(json)
-        } catch (e: UnsatisfiedLinkError) {
-            // Native method not available — voice pattern detection not supported
-            null
-        } catch (e: Exception) {
-            android.util.Log.w("RustBridge", "detectVoicePattern failed: ${e.message}")
-            null
+    suspend fun detectVoicePattern(audioData: ByteArray, sampleRate: Int): VoicePatternResult? {
+        return withContext(Dispatchers.IO) {
+            try {
+                val json = nativeDetectVoicePattern(audioData, sampleRate)
+                if (json.isNullOrEmpty()) return@withContext null
+                parseVoicePatternJson(json)
+            } catch (e: UnsatisfiedLinkError) {
+                // Native method not available — voice pattern detection not supported
+                null
+            } catch (e: Exception) {
+                android.util.Log.w("RustBridge", "detectVoicePattern failed: ${e.message}")
+                null
+            }
         }
     }
 

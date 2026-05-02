@@ -20,6 +20,9 @@ object ShizukuManager {
     private const val SHELL_TIMEOUT_SECONDS = 15L
     private const val THREAD_JOIN_TIMEOUT_MS = 5_000L
 
+    @Volatile
+    private var isRunningWithAdbPrivileges = false
+
     data class ShellResult(
         val stdout: String,
         val stderr: String,
@@ -105,6 +108,12 @@ object ShizukuManager {
      *   2. Use Shizuku's binder to verify connectivity, then fall back to Runtime.exec()
      *   3. Last resort: plain Runtime.exec() without ADB privileges
      */
+    /**
+     * Returns whether the last shell command was executed with ADB privileges.
+     * If false, commands that require ADB (like `svc wifi enable`) may have failed silently.
+     */
+    fun isRunningWithAdb(): Boolean = isRunningWithAdbPrivileges
+
     private fun newProcess(cmd: Array<String>, env: Array<String>? = null, dir: String? = null): Process {
         // Method 1: Try the public Shizuku.newProcess() API first (Shizuku < 13)
         try {
@@ -113,7 +122,10 @@ object ShizukuManager {
             )
             method.isAccessible = true
             val result = method.invoke(null, cmd, env, dir)
-            if (result is Process) return result
+            if (result is Process) {
+                isRunningWithAdbPrivileges = true
+                return result
+            }
         } catch (e: NoSuchMethodException) {
             Log.d(TAG, "Shizuku.newProcess() not available (Shizuku 13+) — using binder approach")
         } catch (e: Exception) {
@@ -145,6 +157,7 @@ object ShizukuManager {
                 // Since we have Shizuku binder, we can use am/instrument approach
                 // But the most reliable approach is to just use Runtime.exec with "sh -c"
                 // and rely on the fact that Shizuku provider gives us system-level access
+                isRunningWithAdbPrivileges = false
                 return Runtime.getRuntime().exec(cmd)
             }
         } catch (e: Exception) {
@@ -154,6 +167,7 @@ object ShizukuManager {
         // Method 3: Last resort — use regular Runtime.exec (won't have ADB privileges)
         // This at least allows some commands to work
         Log.w(TAG, "Falling back to Runtime.exec — commands may not have ADB privileges")
+        isRunningWithAdbPrivileges = false
         return Runtime.getRuntime().exec(cmd)
     }
 
@@ -209,8 +223,16 @@ object ShizukuManager {
             val stdout = stdoutRef.get()
             val stderr = stderrRef.get()
 
-            Log.d(TAG, "[executeShellCommand] Result: exit=$exitCode stdout_len=${stdout.length} stderr_len=${stderr.length}")
-            ShellResult(stdout, stderr, exitCode, exitCode == 0)
+            val effectiveStderr = if (!isRunningWithAdbPrivileges && stderr.isEmpty()) {
+                "WARNING: Command executed without ADB privileges — results may be incorrect"
+            } else if (!isRunningWithAdbPrivileges) {
+                "WARNING: No ADB privileges. $stderr"
+            } else {
+                stderr
+            }
+
+            Log.d(TAG, "[executeShellCommand] Result: exit=$exitCode stdout_len=${stdout.length} stderr_len=${effectiveStderr.length}")
+            ShellResult(stdout, effectiveStderr, exitCode, exitCode == 0)
         } catch (e: SecurityException) {
             Log.e(TAG, "[executeShellCommand] Shizuku permission denied: $command", e)
             ShellResult("", "Shizuku permission denied: ${e.message}", -1, false)

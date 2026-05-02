@@ -76,6 +76,15 @@ object CommandRouter {
 
         /** Autonomous task — install/download/get an app via AI+accessibility */
         data class AutonomousTask(val taskType: String, val target: String, val prompt: String) : RouteResult()
+
+        /** Game direction command — control snake game via voice */
+        data class GameDirectionCommand(val direction: String) : RouteResult()
+
+        /** Quick note command — create a note via voice command */
+        data class QuickNoteCommand(val text: String) : RouteResult()
+
+        /** Music command — show/play music (UI-only) */
+        data class MusicCommand(val action: String = "play") : RouteResult()
     }
 
     // ─── Well-known app name → package mapping ──────────────────
@@ -184,6 +193,43 @@ object CommandRouter {
      */
     fun route(query: String, context: Context): RouteResult {
         val normalized = normalizeHinglish(query.lowercase().trim())
+
+        // ─── Quick Note Commands ─────────────────────────────────────
+        // English: "note: ...", "remember ...", "write down ...", "take a note ..."
+        // Hinglish: "yaad rakhna ...", "likh ke rakhna ...", "note karo ..."
+        val noteMatch = Regex(
+            """^(?:note[:\s]+|remember\s+|write\s+down\s+|take\s+(?:a\s+)?note\s+(?:that\s+)?|yaad\s+rakhna\s+|likh\s+ke\s+rakhna\s+|note\s+karo\s+|likho\s+)(.+)""",
+            RegexOption.IGNORE_CASE
+        ).find(normalized)
+        if (noteMatch != null) {
+            val noteText = noteMatch.groupValues[1].trim()
+            if (noteText.isNotBlank()) {
+                return RouteResult.QuickNoteCommand(noteText)
+            }
+        }
+
+        // ─── Music Commands ──────────────────────────────────────────
+        // "play music", "play calming music", "sunao music", "music chalao"
+        if (normalized.matches(Regex("""(?:play|start)\s+(?:some\s+)?(?:music|song|tunes?)(?:\s+.*)?""")) ||
+            normalized.matches(Regex("""(?:music|song)\s+(?:chalao|sunao|baja)""")) ||
+            normalized == "music" || normalized == "play music" || normalized == "play some music") {
+            return RouteResult.MusicCommand("play")
+        }
+        if (normalized.matches(Regex("""(?:stop|pause)\s+(?:the\s+)?(?:music|song)""")) ||
+            normalized == "stop music" || normalized == "pause music") {
+            return RouteResult.MusicCommand("pause")
+        }
+
+        // ─── Game Direction Commands (Snake) ────────────────────────
+        val directionKeywords = mapOf(
+            "up" to "UP", "upar" to "UP", "uper" to "UP", "upward" to "UP",
+            "down" to "DOWN", "niche" to "DOWN", "neeche" to "DOWN", "downward" to "DOWN",
+            "left" to "LEFT", "baaye" to "LEFT", "bayen" to "LEFT", "leftward" to "LEFT",
+            "right" to "RIGHT", "daaye" to "RIGHT", "dayen" to "RIGHT", "rightward" to "RIGHT"
+        )
+        directionKeywords[normalized]?.let {
+            return RouteResult.GameDirectionCommand(it)
+        }
 
         // ─── Call Answer / Reject ────────────────────────────────
         if (normalized == "answer" || normalized == "answer call" || normalized == "receive") {
@@ -759,7 +805,7 @@ object CommandRouter {
             if (isNumber) {
                 // Direct number provided — call if we have permission, else dial
                 val uri = "tel:$target"
-                val hasCallPermission = context.checkCallingOrSelfPermission(Manifest.permission.CALL_PHONE) ==
+                val hasCallPermission = context.checkSelfPermission(Manifest.permission.CALL_PHONE) ==
                         PackageManager.PERMISSION_GRANTED
                 val action = if (hasCallPermission) Intent.ACTION_CALL else Intent.ACTION_DIAL
                 val intent = Intent(action, Uri.parse(uri)).apply {
@@ -777,7 +823,7 @@ object CommandRouter {
             val resolvedNumber = resolveContactNumber(target, context)
             if (resolvedNumber != null) {
                 val uri = "tel:$resolvedNumber"
-                val hasCallPermission = context.checkCallingOrSelfPermission(Manifest.permission.CALL_PHONE) ==
+                val hasCallPermission = context.checkSelfPermission(Manifest.permission.CALL_PHONE) ==
                         PackageManager.PERMISSION_GRANTED
                 val action = if (hasCallPermission) Intent.ACTION_CALL else Intent.ACTION_DIAL
                 val intent = Intent(action, Uri.parse(uri)).apply {

@@ -20,7 +20,58 @@ import kotlin.math.sqrt
  * AudioEngine — Production-grade silent audio capture engine WITH VAD.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CRITICAL OVERHAUL (v16) — FAST RESPONSE / MIC LOCK / BUG FIXES:
+ * CRITICAL OVERHAUL (v17) — MIC NEVER STOPS / DELAY / WAKE WORD FIXES:
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * v17 BUG FIXES — Critical mic/VAD/wake word issues:
+ *
+ *  B1: NOISE_GATE_THRESHOLD raised from 0.002f to 0.006f.
+ *      The AGC was boosting ambient room noise above the old
+ *      NOISE_GATE (0.002f) and even above SPEECH_THRESHOLD (0.008f),
+ *      keeping VAD in SPEECH_DETECTED indefinitely. The raised
+ *      gate filters more ambient noise BEFORE VAD processing,
+ *      while still allowing quiet speech (which is typically
+ *      0.01+ after gain+AGC) to pass through.
+ *
+ *  B2: MAX_CONTINUOUS_SPEECH_MS (15_000ms) — If recording exceeds
+ *      15 seconds without a silence-detected flush, force-flush
+ *      the command buffer. This prevents infinite recording when
+ *      AGC-boosted ambient noise keeps VAD in SPEECH_DETECTED
+ *      state forever.
+ *
+ *  B3: CONSECUTIVE SILENCE FRAMES counter — If we get 10+
+ *      consecutive frames below SPEECH_THRESHOLD (even if above
+ *      SILENCE_THRESHOLD — the "gray zone" where AGC keeps
+ *      boosting noise), force transition to SILENCE_AFTER_SPEECH.
+ *      This catches the case where AGC-boosted noise hovers in
+ *      the 0.004-0.008 range, never triggering the normal
+ *      silence detection path.
+ *
+ *  B4: GRAY ZONE SILENCE — If we've been in SPEECH_DETECTED for
+ *      more than 3 seconds with amplitude in the "gray zone"
+ *      (below SPEECH_THRESHOLD but above SILENCE_THRESHOLD),
+ *      treat it as silence and transition to SILENCE_AFTER_SPEECH.
+ *      This catches slow fade-outs where AGC gradually boosts
+ *      trailing noise.
+ *
+ *  B5: SYLLABLE PATTERN WAKE WORD — Replaced the simple amplitude-
+ *      threshold wake word detector with a syllable pattern matcher
+ *      that looks for the "JAR-vis" cadence: speech burst → brief
+ *      pause (100-400ms) → speech burst. This dramatically reduces
+ *      false positives while still detecting the wake word reliably.
+ *
+ *  B6: onPartialAudioReady callback — Added streaming partial audio
+ *      data callback that emits audio chunks every ~500ms during
+ *      recording. This enables the ViewModel to feed audio to
+ *      Android SpeechRecognizer in real-time for faster
+ *      transcription, reducing output delay.
+ *
+ *  B7: VAD STATE RESET — After flushCommandBuffer(), vadState is
+ *      now explicitly reset to IDLE in all code paths, preventing
+ *      stale VAD state from leaking into the next recording session.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * v16 CHANGES (preserved for reference):
  *
  *  G1: SOFTWARE GAIN BOOST 4.0x — Increased from 2.5x to 4.0x.
  *      A whisper at 0.003 RMS becomes 0.012 after gain, which now
@@ -68,9 +119,9 @@ import kotlin.math.sqrt
  *      shouts get dialed back.
  *
  *  G9: NOISE GATE — If the post-gain RMS is below NOISE_GATE_THRESHOLD
- *      (0.002f), the frame is skipped entirely for VAD processing.
- *      This prevents false VAD triggers from ambient background noise
- *      while letting even the quietest speech through.
+ *      (0.006f as of v17), the frame is skipped entirely for VAD
+ *      processing. This prevents false VAD triggers from ambient
+ *      background noise while letting even the quietest speech through.
  *
  *  G10: MAX_CMD_SECONDS 30 — Increased from 15 for long dictation.
  *       MIN_RECORDING_MS reduced to 300ms so even very short
@@ -140,7 +191,21 @@ class AudioEngine(
     val onWakeWordDetected: () -> Unit,
     val onCommandReady: (ByteArray) -> Unit,
     private val rawAudioFlow: MutableStateFlow<ByteArray>? = null,
-    private val voicePatternCallback: VoicePatternCallback? = null
+    private val voicePatternCallback: VoicePatternCallback? = null,
+    /**
+     * B6: Partial audio data callback for real-time transcription.
+     *
+     * When non-null, this callback is invoked every ~500ms during
+     * command recording with the accumulated audio chunk since the
+     * last emission. This enables the ViewModel to feed audio to
+     * Android SpeechRecognizer in real-time, dramatically reducing
+     * output delay by starting transcription before the user
+     * finishes speaking.
+     *
+     * The ByteArray contains raw PCM data (16-bit, mono, at the
+     * engine's actual sample rate) with software gain + AGC applied.
+     */
+    val onPartialAudioReady: ((ByteArray) -> Unit)? = null
 ) {
 
     companion object {
@@ -180,10 +245,17 @@ class AudioEngine(
 
         private const val RMS_SMOOTHING   = 0.3f
 
-        // ── G9: NOISE GATE ─────────────────────────────────────────────
-        // If post-gain RMS is below this, the frame is just background
+        // ── B1: NOISE GATE (raised from 0.002f to 0.006f) ───────────────
+        // If post-gain+AGC RMS is below this, the frame is just background
         // noise — skip it entirely to prevent false VAD triggers.
-        private const val NOISE_GATE_THRESHOLD = 0.002f
+        //
+        // v17: Raised from 0.002f to 0.006f because AGC was boosting
+        // ambient room noise above the old gate (0.002f) and even above
+        // SPEECH_THRESHOLD (0.008f), keeping VAD in SPEECH_DETECTED
+        // indefinitely. At 0.006f, the gate filters more ambient noise
+        // while still allowing quiet speech (typically 0.01+ after
+        // gain+AGC) to pass through.
+        private const val NOISE_GATE_THRESHOLD = 0.006f
 
         // ── G8: AGC (Automatic Gain Control) parameters ────────────────
         // After SOFTWARE_GAIN is applied, if RMS is still below
@@ -198,19 +270,12 @@ class AudioEngine(
         private const val AR_ERROR_DEAD_OBJECT      = -6
         private const val AR_ERROR                  = -1
 
-        // Software wake word detection constants
-        // v8.0: Even more aggressive for better wake word detection
-        private const val SW_WAKE_MIN_FRAMES_ABOVE = 2
-        private const val SW_WAKE_MAX_FRAMES_WINDOW = 40
-        // ── C2: Halved from 0.016f to 0.006f ──────────────────────────
-        // Now matches SPEECH_THRESHOLD so wake word triggers at normal
+        // ── B5: Software wake word detection threshold ──────────────────
+        // Used by the syllable-pattern wake word detector to identify
+        // speech bursts. Kept in companion object as a compile-time constant.
+        // Halved from 0.016f to 0.006f so wake word triggers at normal
         // speaking volume instead of requiring shouting.
         private const val SW_WAKE_SPEECH_THRESHOLD = 0.006f
-        // ── C3: Reduced from 3 to 2 frames (~92ms) ───────────────────
-        // Faster wake word detection — 2 frames at ~46ms = ~92ms
-        private const val SW_WAKE_MIN_SPEECH_FRAMES = 2  // ~92ms
-        // Cooldown: 2500ms (at ~46ms per frame)
-        private const val SW_WAKE_COOLDOWN_FRAMES = 54  // ~2500ms
 
         // ── v7.0: Configurable wake word phrase ────────────────────────
         // The software wake word uses amplitude-based detection.
@@ -218,7 +283,31 @@ class AudioEngine(
         // pattern: 2+ speech bursts with a brief pause between them
         // (matching the "JAR-vis" cadence).
         const val WAKE_WORD_PHRASE = "jarvis"
-        private const val SW_WAKE_SYLLABLE_GAP_MS = 300L  // Gap between syllables
+
+        // ── B2: MAX CONTINUOUS SPEECH TIMEOUT ─────────────────────────
+        // If recording exceeds this duration (15 seconds) without a
+        // silence-detected flush, force-flush the command buffer.
+        // This prevents infinite recording when AGC-boosted ambient
+        // noise keeps VAD in SPEECH_DETECTED state forever.
+        private const val MAX_CONTINUOUS_SPEECH_MS = 15_000L
+
+        // ── B3: CONSECUTIVE SILENCE FRAMES ─────────────────────────────
+        // If we get this many consecutive frames below SPEECH_THRESHOLD
+        // (even if above SILENCE_THRESHOLD — the "gray zone" where AGC
+        // keeps boosting noise), force transition to SILENCE_AFTER_SPEECH.
+        // At ~46ms per frame, 10 frames ≈ 460ms of near-silence.
+        private const val CONSECUTIVE_SILENCE_FRAMES_THRESHOLD = 10
+
+        // ── B4: GRAY ZONE SILENCE TIMEOUT ──────────────────────────────
+        // If we've been in SPEECH_DETECTED for more than this duration
+        // with amplitude in the "gray zone" (below SPEECH_THRESHOLD but
+        // above SILENCE_THRESHOLD), treat it as silence.
+        private const val GRAY_ZONE_SPEECH_TIMEOUT_MS = 3_000L
+
+        // ── B6: PARTIAL AUDIO EMISSION INTERVAL ───────────────────────
+        // How often (in ms) to emit partial audio data via the
+        // onPartialAudioReady callback during command recording.
+        private const val PARTIAL_AUDIO_INTERVAL_MS = 500L
 
         // ── C8: Voice pattern keywords for locked-mode detection ───────
         // These are keyword IDs that AudioEngine can signal via
@@ -258,6 +347,29 @@ class AudioEngine(
     private var silenceStartTime: Long = 0L
     private var recordingStartTime: Long = 0L
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    // ── B3: Consecutive silence frames counter ─────────────────────────
+    // Tracks how many consecutive frames have amplitude below
+    // SPEECH_THRESHOLD during command recording. When this counter
+    // reaches CONSECUTIVE_SILENCE_FRAMES_THRESHOLD, we force a
+    // transition to SILENCE_AFTER_SPEECH even if the amplitude
+    // hasn't dropped below SILENCE_THRESHOLD.
+    private var consecutiveSilenceFrames = 0
+
+    // ── B4: Gray zone tracking ─────────────────────────────────────────
+    // Timestamp when we first entered the "gray zone" (amplitude
+    // between SILENCE_THRESHOLD and SPEECH_THRESHOLD) during
+    // SPEECH_DETECTED state. Used to detect prolonged gray-zone
+    // occupation that indicates AGC-boosted noise, not speech.
+    private var grayZoneEntryTime: Long = 0L
+    private var isInGrayZone = false
+
+    // ── B6: Partial audio emission tracking ────────────────────────────
+    // Tracks when we last emitted partial audio and accumulates
+    // frames between emissions for the onPartialAudioReady callback.
+    private var lastPartialEmitTime: Long = 0L
+    private val partialAudioFrames = mutableListOf<ByteArray>()
+    private val partialAudioLock = Object()
 
     // G5: Use a regular mutable list with explicit synchronization
     private val commandBufferLock = Object()
@@ -374,6 +486,15 @@ class AudioEngine(
                 var zeroReadCounter = 0
                 var vadLogCounter = 0
 
+                // ── B3/B4/B6: Reset VAD tracking state ────────────────────
+                consecutiveSilenceFrames = 0
+                grayZoneEntryTime = 0L
+                isInGrayZone = false
+                lastPartialEmitTime = System.currentTimeMillis()
+                synchronized(partialAudioLock) {
+                    partialAudioFrames.clear()
+                }
+
                 while (isRunning && isActive) {
                     val read = ar.read(readBuf, 0, readBuf.size)
 
@@ -440,12 +561,17 @@ class AudioEngine(
                             cmdFrameCount++
                         }
 
+                        // ── B6: Accumulate frame for partial audio emission ──
+                        synchronized(partialAudioLock) {
+                            partialAudioFrames.add(frame)
+                        }
+
                         val recordingDuration = System.currentTimeMillis() - recordingStartTime
 
                         // G4: Log VAD state periodically for diagnostics
                         vadLogCounter++
                         if (vadLogCounter % 22 == 0) {
-                            Log.d(TAG, "[VAD] state=$vadState rawAmp=$rawAmp threshold=$SPEECH_THRESHOLD recDuration=${recordingDuration}ms frames=$cmdFrameCount micLocked=$userMicLocked")
+                            Log.d(TAG, "[VAD] state=$vadState rawAmp=$rawAmp threshold=$SPEECH_THRESHOLD recDuration=${recordingDuration}ms frames=$cmdFrameCount micLocked=$userMicLocked consecutiveSilent=$consecutiveSilenceFrames")
                         }
 
                         // ── C8: Voice pattern detection during locked mode ──
@@ -453,24 +579,53 @@ class AudioEngine(
                         // that could trigger call answer/reject actions.
                         if (userMicLocked && RustBridge.isNativeReady()) {
                             try {
-                                val patternResult = RustBridge.detectVoicePatternSync(frame, activeSampleRate)
-                                if (patternResult != null) {
-                                    Log.i(TAG, "[VAD] Voice pattern detected in locked mode: id=${patternResult.id} confidence=${patternResult.confidence}")
-                                    mainHandler.post {
-                                        voicePatternCallback?.onVoicePatternDetected(
-                                            patternResult.id,
-                                            patternResult.confidence,
-                                            frame.copyOf()
-                                        )
+                                // NOTE: detectVoicePattern is now a suspend function.
+                                // We're already inside a coroutine (engineScope.launch on Dispatchers.IO),
+                                // so we can call it directly. Using a launch block to avoid blocking
+                                // the audio read loop while the native call executes.
+                                val patternFrame = frame
+                                val patternSampleRate = activeSampleRate
+                                engineScope.launch {
+                                    try {
+                                        val patternResult = RustBridge.detectVoicePattern(patternFrame, patternSampleRate)
+                                        if (patternResult != null) {
+                                            Log.i(TAG, "[VAD] Voice pattern detected in locked mode: id=${patternResult.id} confidence=${patternResult.confidence}")
+                                            mainHandler.post {
+                                                voicePatternCallback?.onVoicePatternDetected(
+                                                    patternResult.id,
+                                                    patternResult.confidence,
+                                                    patternFrame.copyOf()
+                                                )
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.d(TAG, "[VAD] Voice pattern detection error: ${e.message}")
                                     }
                                 }
                             } catch (e: Exception) {
                                 // Non-critical — don't disrupt recording
-                                Log.d(TAG, "[VAD] Voice pattern detection error: ${e.message}")
+                                Log.d(TAG, "[VAD] Voice pattern detection launch error: ${e.message}")
                             }
                         }
 
-                        if (rawAmp < SILENCE_THRESHOLD && recordingDuration > MIN_RECORDING_MS) {
+                        // ── B2: MAX CONTINUOUS SPEECH TIMEOUT ──────────────────
+                        // If recording exceeds MAX_CONTINUOUS_SPEECH_MS without
+                        // a silence-detected flush, force-flush. This prevents
+                        // infinite recording when AGC-boosted ambient noise
+                        // keeps VAD in SPEECH_DETECTED state forever.
+                        if (!userMicLocked && recordingDuration > MAX_CONTINUOUS_SPEECH_MS) {
+                            Log.w(TAG, "[VAD] MAX_CONTINUOUS_SPEECH_MS ($MAX_CONTINUOUS_SPEECH_MS ms) exceeded (recording=${recordingDuration}ms) — force flushing command")
+                            vadState = VadState.IDLE  // B7: Reset VAD state before flush
+                            consecutiveSilenceFrames = 0
+                            isInGrayZone = false
+                            flushCommandBuffer()
+                            // Continue loop — don't break, we stay in listening mode
+                        }
+                        else if (rawAmp < SILENCE_THRESHOLD && recordingDuration > MIN_RECORDING_MS) {
+                            // ── Clear silence tracking on actual silence ──────
+                            consecutiveSilenceFrames++
+                            isInGrayZone = false
+
                             if (vadState == VadState.SPEECH_DETECTED) {
                                 vadState = VadState.SILENCE_AFTER_SPEECH
                                 silenceStartTime = System.currentTimeMillis()
@@ -487,23 +642,108 @@ class AudioEngine(
                                     Log.d(TAG, "[VAD] Mic LOCKED — ignoring silence timeout, continuing to record")
                                 } else {
                                     val silenceDuration = System.currentTimeMillis() - silenceStartTime
-                                    // C1: 700ms cutoff — fast response after user stops talking
+                                    // C1: 350ms cutoff — fast response after user stops talking
                                     if (silenceDuration >= SILENCE_TIMEOUT_MS) {
                                         Log.i(TAG, "[VAD] End-of-speech confirmed (silence=${silenceDuration}ms, recording=${recordingDuration}ms) — flushing command")
+                                        consecutiveSilenceFrames = 0  // B3: Reset counter
+                                        isInGrayZone = false
+                                        flushCommandBuffer()
+                                    }
+                                }
+                            }
+                        } else if (rawAmp < SPEECH_THRESHOLD) {
+                            // ── B3/B4: GRAY ZONE DETECTION ─────────────────────
+                            // Amplitude is between SILENCE_THRESHOLD and
+                            // SPEECH_THRESHOLD — the "gray zone" where AGC
+                            // keeps boosting ambient noise. This is NOT real
+                            // speech; it's likely AGC-amplified background noise.
+                            consecutiveSilenceFrames++
+
+                            // ── B3: Force transition if enough consecutive frames ──
+                            if (consecutiveSilenceFrames >= CONSECUTIVE_SILENCE_FRAMES_THRESHOLD
+                                && vadState == VadState.SPEECH_DETECTED
+                                && recordingDuration > MIN_RECORDING_MS
+                                && !userMicLocked) {
+                                Log.i(TAG, "[VAD] Consecutive silence frames ($consecutiveSilenceFrames) exceeded threshold ($CONSECUTIVE_SILENCE_FRAMES_THRESHOLD) — treating gray zone as silence")
+                                vadState = VadState.SILENCE_AFTER_SPEECH
+                                silenceStartTime = System.currentTimeMillis()
+                                // Immediately check if silence timeout has been met
+                                // (since we've already been in near-silence for
+                                // CONSECUTIVE_SILENCE_FRAMES_THRESHOLD * ~46ms)
+                                val effectiveSilenceMs = (CONSECUTIVE_SILENCE_FRAMES_THRESHOLD * FRAME_SAMPLES * 1000L) / actualSampleRate
+                                if (effectiveSilenceMs >= SILENCE_TIMEOUT_MS) {
+                                    Log.i(TAG, "[VAD] Gray zone silence already exceeds SILENCE_TIMEOUT (${effectiveSilenceMs}ms) — flushing command")
+                                    consecutiveSilenceFrames = 0
+                                    isInGrayZone = false
+                                    flushCommandBuffer()
+                                }
+                            }
+
+                            // ── B4: Gray zone timeout — if we've been in gray zone ──
+                            // for more than GRAY_ZONE_SPEECH_TIMEOUT_MS while in
+                            // SPEECH_DETECTED, treat it as silence.
+                            if (vadState == VadState.SPEECH_DETECTED && !userMicLocked) {
+                                if (!isInGrayZone) {
+                                    isInGrayZone = true
+                                    grayZoneEntryTime = System.currentTimeMillis()
+                                } else {
+                                    val grayZoneDuration = System.currentTimeMillis() - grayZoneEntryTime
+                                    if (grayZoneDuration >= GRAY_ZONE_SPEECH_TIMEOUT_MS
+                                        && recordingDuration > MIN_RECORDING_MS) {
+                                        Log.i(TAG, "[VAD] Gray zone timeout (${grayZoneDuration}ms > ${GRAY_ZONE_SPEECH_TIMEOUT_MS}ms) — treating as silence, flushing command")
+                                        consecutiveSilenceFrames = 0
+                                        isInGrayZone = false
+                                        vadState = VadState.IDLE  // B7: Reset VAD state
                                         flushCommandBuffer()
                                     }
                                 }
                             }
                         } else if (rawAmp >= SPEECH_THRESHOLD) {
+                            // ── Real speech detected ───────────────────────────
                             if (vadState == VadState.SILENCE_AFTER_SPEECH) {
                                 Log.d(TAG, "[VAD] Speech resumed, cancelling end-of-speech timer")
                             }
                             vadState = VadState.SPEECH_DETECTED
+                            consecutiveSilenceFrames = 0  // B3: Reset counter on speech
+                            isInGrayZone = false  // B4: Reset gray zone tracking
                         }
 
                         if (cmdFrameCount >= maxCmdFrames) {
                             Log.i(TAG, "[VAD] Max recording time reached ($MAX_CMD_SECONDS s), flushing command")
+                            vadState = VadState.IDLE  // B7: Reset VAD state before flush
+                            consecutiveSilenceFrames = 0
+                            isInGrayZone = false
                             flushCommandBuffer()
+                        }
+
+                        // ── B6: Emit partial audio for real-time transcription ──
+                        // Every ~500ms during recording, emit the accumulated
+                        // audio frames via onPartialAudioReady callback. This
+                        // enables the ViewModel to start transcription before
+                        // the user finishes speaking, reducing output delay.
+                        if (onPartialAudioReady != null) {
+                            val now = System.currentTimeMillis()
+                            if (now - lastPartialEmitTime >= PARTIAL_AUDIO_INTERVAL_MS) {
+                                val partialFrames: List<ByteArray>
+                                synchronized(partialAudioLock) {
+                                    partialFrames = partialAudioFrames.toList()
+                                    partialAudioFrames.clear()
+                                }
+                                if (partialFrames.isNotEmpty()) {
+                                    val partialOut = ByteArray(partialFrames.sumOf { it.size })
+                                    var partialOff = 0
+                                    for (f in partialFrames) {
+                                        f.copyInto(partialOut, partialOff)
+                                        partialOff += f.size
+                                    }
+                                    lastPartialEmitTime = now
+                                    try {
+                                        onPartialAudioReady.invoke(partialOut)
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "[VAD] onPartialAudioReady callback error: ${e.message}")
+                                    }
+                                }
+                            }
                         }
 
                     } else {
@@ -806,6 +1046,10 @@ class AudioEngine(
                 vadState = VadState.IDLE
                 recordingStartTime = System.currentTimeMillis()
                 silenceStartTime = 0L
+                consecutiveSilenceFrames = 0  // B3: Reset
+                isInGrayZone = false  // B4: Reset
+                lastPartialEmitTime = System.currentTimeMillis()  // B6: Reset
+                synchronized(partialAudioLock) { partialAudioFrames.clear() }  // B6: Reset
                 return
             } else {
                 Log.d(TAG, "[startCommandRecording] Already recording (not locked) — ignoring duplicate call")
@@ -822,6 +1066,10 @@ class AudioEngine(
         vadState = VadState.IDLE
         recordingStartTime = System.currentTimeMillis()
         silenceStartTime = 0L
+        consecutiveSilenceFrames = 0  // B3: Reset
+        isInGrayZone = false  // B4: Reset
+        lastPartialEmitTime = System.currentTimeMillis()  // B6: Reset
+        synchronized(partialAudioLock) { partialAudioFrames.clear() }  // B6: Reset
         Log.d(TAG, "[startCommandRecording] VAD command recording started — autoStopOnSilence=${if (userMicLocked) "DISABLED (mic locked)" else "${SILENCE_TIMEOUT_MS}ms"}")
     }
 
@@ -860,6 +1108,10 @@ class AudioEngine(
 
             isRecordingCommand = false
             vadState = VadState.IDLE
+            consecutiveSilenceFrames = 0  // B3/B7: Reset
+            isInGrayZone = false  // B4/B7: Reset
+            lastPartialEmitTime = System.currentTimeMillis()  // B6/B7: Reset
+            synchronized(partialAudioLock) { partialAudioFrames.clear() }  // B6/B7: Reset
 
             // Atomically swap the buffer
             val frames: List<ByteArray>
@@ -880,6 +1132,10 @@ class AudioEngine(
                     vadState = VadState.IDLE
                     recordingStartTime = System.currentTimeMillis()
                     silenceStartTime = 0L
+                    consecutiveSilenceFrames = 0  // B3: Reset
+                    isInGrayZone = false  // B4: Reset
+                    lastPartialEmitTime = System.currentTimeMillis()  // B6: Reset
+                    synchronized(partialAudioLock) { partialAudioFrames.clear() }  // B6: Reset
                 }
                 return@withLock
             }
@@ -904,6 +1160,10 @@ class AudioEngine(
                 isCommandBufferReady = false
                 recordingStartTime = System.currentTimeMillis()
                 silenceStartTime = 0L
+                consecutiveSilenceFrames = 0  // B3: Reset
+                isInGrayZone = false  // B4: Reset
+                lastPartialEmitTime = System.currentTimeMillis()  // B6: Reset
+                synchronized(partialAudioLock) { partialAudioFrames.clear() }  // B6: Reset
                 synchronized(commandBufferLock) {
                     commandFrames.clear()
                     cmdFrameCount = 0
@@ -926,45 +1186,173 @@ class AudioEngine(
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // SOFTWARE WAKE WORD DETECTION FALLBACK
+    // B5: SYLLABLE PATTERN WAKE WORD DETECTION ("JAR-vis" cadence)
+    //
+    // Instead of a simple amplitude threshold that triggers on ANY
+    // speech-like sound, we look for the specific syllable pattern
+    // of "JAR-vis": two speech bursts with a brief pause between
+    // them (burst 1 = "JAR", pause, burst 2 = "vis").
+    //
+    // Detection algorithm:
+    //   1. Track speech bursts — consecutive frames above the wake
+    //      word speech threshold.
+    //   2. When a speech burst ends (amplitude drops below threshold),
+    //      record its end timestamp.
+    //   3. When a new speech burst starts, check if it began within
+    //      the syllable gap window (100-400ms) after the previous
+    //      burst ended.
+    //   4. If two bursts match the syllable pattern (gap of 100-400ms
+    //      between them, total span under 600ms), trigger wake word.
+    //   5. Apply cooldown to prevent rapid re-triggering.
+    //
+    // This dramatically reduces false positives from single
+    // utterances, coughs, door slams, etc., while still reliably
+    // detecting "JAR-vis" which naturally has a brief pause
+    // between the two syllables.
     // ═══════════════════════════════════════════════════════════════════════
 
-    private var swWakeFramesAboveThreshold = 0
-    private var swWakeTotalFrames = 0
+    /**
+     * Represents a detected speech burst for wake word syllable matching.
+     *
+     * @param startTimeMs Timestamp when the burst started (frame time)
+     * @param endTimeMs Timestamp when the burst ended (frame time)
+     * @param peakAmplitude Peak amplitude during the burst
+     */
+    private data class SpeechBurst(
+        val startTimeMs: Long,
+        val endTimeMs: Long,
+        val peakAmplitude: Float
+    )
+
+    // ── B5: Syllable pattern wake word state ────────────────────────────
+    // Tracks speech bursts for the "JAR-vis" syllable pattern detector.
+    // We keep a sliding window of recent bursts and check for the
+    // two-burst pattern with a 100-400ms gap.
+    private val swWakeBursts = mutableListOf<SpeechBurst>()
+    private var swWakeCurrentBurstStart: Long = 0L
+    private var swWakeCurrentBurstPeak: Float = 0f
+    private var swWakeInBurst = false
     private var swWakeTriggered = false
-    private var swWakeCooldownFrames = 0
+    private var swWakeCooldownEndTime: Long = 0L
 
+    // Syllable gap constraints for "JAR-vis" pattern:
+    // - Minimum gap between bursts: 100ms (too short = same syllable)
+    // - Maximum gap between bursts: 400ms (too long = separate words)
+    // - Maximum total span of both bursts + gap: 600ms
+    private val swWakeSyllableGapMinMs = 100L
+    private val swWakeSyllableGapMaxMs = 400L
+    private val swWakeTotalSpanMaxMs = 600L
+
+    // Minimum frames in a burst to be considered a valid syllable
+    // At ~46ms per frame, 2 frames ≈ 92ms — short enough to catch
+    // the "vis" syllable but long enough to filter noise spikes.
+    private val swWakeMinBurstFrames = 2
+
+    // Cooldown after wake word detection: 2500ms
+    private val swWakeCooldownMs = 2500L
+
+    // Maximum age for burst entries before they're pruned
+    private val swWakeBurstMaxAgeMs = 2000L
+
+    private var swWakeCurrentBurstFrames = 0
+
+    /**
+     * B5: Syllable-pattern wake word detector for "JAR-vis".
+     *
+     * Instead of triggering on any speech-like amplitude, this detector
+     * looks for the characteristic two-syllable pattern of "JAR-vis":
+     * speech burst ("JAR") → brief pause (100-400ms) → speech burst ("vis").
+     *
+     * This dramatically reduces false positives from:
+     *   - Single-syllable utterances ("hey", "no", etc.)
+     *   - Non-speech sounds (coughs, door slams, keyboard clicks)
+     *   - Continuous speech without the distinctive pause pattern
+     *
+     * @param rawAmp Current frame's raw RMS amplitude (post gain + AGC)
+     * @param smoothedAmp Smoothed RMS amplitude
+     * @return true if the "JAR-vis" syllable pattern was detected
+     */
     private fun detectWakeWordSoftware(rawAmp: Float, smoothedAmp: Float): Boolean {
+        val now = System.currentTimeMillis()
+
+        // ── Cooldown check ──────────────────────────────────────────────
         if (swWakeTriggered) {
-            swWakeCooldownFrames--
-            if (swWakeCooldownFrames <= 0) {
-                swWakeTriggered = false
-                swWakeFramesAboveThreshold = 0
-                swWakeTotalFrames = 0
+            if (now < swWakeCooldownEndTime) {
+                return false
             }
-            return false
+            // Cooldown expired — reset state
+            swWakeTriggered = false
+            swWakeBursts.clear()
+            swWakeInBurst = false
+            swWakeCurrentBurstFrames = 0
         }
 
-        swWakeTotalFrames++
+        // ── Prune old bursts ────────────────────────────────────────────
+        // Remove burst entries older than swWakeBurstMaxAgeMs to
+        // prevent the list from growing indefinitely.
+        swWakeBursts.removeAll { now - it.endTimeMs > swWakeBurstMaxAgeMs }
 
-        if (smoothedAmp > SW_WAKE_SPEECH_THRESHOLD) {
-            swWakeFramesAboveThreshold++
+        // ── Detect speech burst boundaries ──────────────────────────────
+        val isSpeech = smoothedAmp > SW_WAKE_SPEECH_THRESHOLD
+
+        if (isSpeech) {
+            if (!swWakeInBurst) {
+                // Start of a new speech burst
+                swWakeInBurst = true
+                swWakeCurrentBurstStart = now
+                swWakeCurrentBurstPeak = smoothedAmp
+                swWakeCurrentBurstFrames = 1
+            } else {
+                // Continuation of current burst
+                swWakeCurrentBurstPeak = maxOf(swWakeCurrentBurstPeak, smoothedAmp)
+                swWakeCurrentBurstFrames++
+            }
         } else {
-            if (swWakeFramesAboveThreshold >= SW_WAKE_MIN_SPEECH_FRAMES &&
-                swWakeTotalFrames <= SW_WAKE_MAX_FRAMES_WINDOW) {
-                swWakeTriggered = true
-                swWakeCooldownFrames = SW_WAKE_COOLDOWN_FRAMES
-                swWakeFramesAboveThreshold = 0
-                swWakeTotalFrames = 0
-                return true
-            }
-            swWakeFramesAboveThreshold = 0
-            swWakeTotalFrames = 0
-        }
+            if (swWakeInBurst) {
+                // End of current speech burst — record it if it's long enough
+                if (swWakeCurrentBurstFrames >= swWakeMinBurstFrames) {
+                    val burst = SpeechBurst(
+                        startTimeMs = swWakeCurrentBurstStart,
+                        endTimeMs = now,
+                        peakAmplitude = swWakeCurrentBurstPeak
+                    )
+                    swWakeBursts.add(burst)
+                    Log.d(TAG, "[WakeWord/SW] Burst ended: start=${burst.startTimeMs} end=${burst.endTimeMs} peak=${"%.4f".format(burst.peakAmplitude)} frames=$swWakeCurrentBurstFrames")
 
-        if (swWakeTotalFrames > SW_WAKE_MAX_FRAMES_WINDOW) {
-            swWakeFramesAboveThreshold = 0
-            swWakeTotalFrames = 0
+                    // ── Check for "JAR-vis" syllable pattern ─────────────
+                    // Look for two bursts where:
+                    //   1. The gap between burst1.end and burst2.start is
+                    //      between SYLLABLE_GAP_MIN and SYLLABLE_GAP_MAX
+                    //   2. The total span (burst1.start to burst2.end) is
+                    //      less than TOTAL_SPAN_MAX
+                    if (swWakeBursts.size >= 2) {
+                        val prevBurst = swWakeBursts[swWakeBursts.size - 2]
+                        val currBurst = swWakeBursts[swWakeBursts.size - 1]
+
+                        val gapMs = currBurst.startTimeMs - prevBurst.endTimeMs
+                        val totalSpanMs = currBurst.endTimeMs - prevBurst.startTimeMs
+
+                        if (gapMs in swWakeSyllableGapMinMs..swWakeSyllableGapMaxMs
+                            && totalSpanMs <= swWakeTotalSpanMaxMs) {
+                            // ── "JAR-vis" PATTERN DETECTED ───────────────
+                            Log.i(TAG, "[WakeWord/SW] SYLLABLE PATTERN DETECTED: gap=${gapMs}ms span=${totalSpanMs}ms burst1_peak=${"%.4f".format(prevBurst.peakAmplitude)} burst2_peak=${"%.4f".format(currBurst.peakAmplitude)}")
+                            swWakeTriggered = true
+                            swWakeCooldownEndTime = now + swWakeCooldownMs
+                            swWakeBursts.clear()
+                            swWakeInBurst = false
+                            swWakeCurrentBurstFrames = 0
+                            return true
+                        } else {
+                            Log.d(TAG, "[WakeWord/SW] Two bursts but not JAR-vis pattern: gap=${gapMs}ms (need ${swWakeSyllableGapMinMs}-${swWakeSyllableGapMaxMs}ms) span=${totalSpanMs}ms (need <=${swWakeTotalSpanMaxMs}ms)")
+                        }
+                    }
+                } else {
+                    Log.d(TAG, "[WakeWord/SW] Burst too short ($swWakeCurrentBurstFrames frames < $swWakeMinBurstFrames) — ignoring")
+                }
+
+                swWakeInBurst = false
+                swWakeCurrentBurstFrames = 0
+            }
         }
 
         return false

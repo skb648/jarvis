@@ -21,6 +21,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.*
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -41,6 +42,7 @@ fun AssistantScreen(
     onToggleListening: () -> Unit,
     userMicLocked: Boolean = false,
     onToggleMicLock: () -> Unit = {},
+    wakeFlash: Boolean = false,
     modifier: Modifier = Modifier
 ) = JarvisMainScreen(
     brainState          = brainState,
@@ -52,6 +54,7 @@ fun AssistantScreen(
     onToggleListening   = onToggleListening,
     userMicLocked       = userMicLocked,
     onToggleMicLock     = onToggleMicLock,
+    wakeFlash           = wakeFlash,
     modifier            = modifier
 )
 
@@ -76,12 +79,19 @@ fun AssistantScreen(
  *   • Core PULSE: faster breathing when speaking
  *   • Layer BLEND: more intense color mixing when loud
  *
+ * WAKE WORD REACTION (v7):
+ * - [wakeFlash] triggers a full-screen cyan flash overlay that fades out
+ * - "WAKE DETECTED" text appears briefly at the top
+ * - wakeFlash is passed to HolographicOrb for expanding ring burst
+ * - Orb scales up 1.0x → 1.4x on wake, settles to 1.15x for LISTENING
+ *
  * LAYER ARCHITECTURE (bottom to top):
  *   0  Background scan-grid Canvas (fillMaxSize)
  *   1  Bottom content column — response cards + mic button (zIndex = 1)
  *   2  Hologram orb Canvas — always visible, centred (zIndex = 2)
  *   3  Centre icon over orb (zIndex = 3)
  *   4  Top HUD bar (zIndex = 4)
+ *   5  Wake flash overlay + WAKE DETECTED text (zIndex = 5)
  * ═══════════════════════════════════════════════════════════════════════
  */
 @Composable
@@ -95,6 +105,7 @@ fun JarvisMainScreen(
     onToggleListening: () -> Unit,
     userMicLocked: Boolean = false,
     onToggleMicLock: () -> Unit = {},
+    wakeFlash: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     // ═══════════════════════════════════════════════════════════════════════
@@ -120,6 +131,7 @@ fun JarvisMainScreen(
     )
     val glowColor by animateColorAsState(
         targetValue = when (brainState) {
+            BrainState.WAKE     -> Color(0xFF00FFFF)
             BrainState.ERROR    -> Color(0xFFFF2200)
             BrainState.SPEAKING -> Color(0xFF00FFD4)
             BrainState.THINKING -> JarvisPurple
@@ -131,6 +143,33 @@ fun JarvisMainScreen(
 
     // ── Active: any non-idle state ────────────────────────────────────────────
     val isAwake = brainState != BrainState.IDLE
+
+    // ── Wake flash overlay animation ─────────────────────────────────────────
+    // Full-screen cyan flash that fades out when wakeFlash is triggered
+    var wakeOverlayAlpha by remember { mutableFloatStateOf(0f) }
+    val wakeOverlayAnim by animateFloatAsState(
+        targetValue = wakeOverlayAlpha,
+        animationSpec = tween(durationMillis = 700, easing = EaseOutCubic),
+        label = "wake-overlay"
+    )
+
+    // "WAKE DETECTED" text alpha
+    var wakeTextAlpha by remember { mutableFloatStateOf(0f) }
+    val wakeTextAnim by animateFloatAsState(
+        targetValue = wakeTextAlpha,
+        animationSpec = tween(durationMillis = 1200, easing = EaseOutCubic),
+        label = "wake-text"
+    )
+
+    LaunchedEffect(wakeFlash) {
+        if (wakeFlash) {
+            wakeOverlayAlpha = 0.35f
+            wakeTextAlpha = 1f
+            // Start fading immediately
+            wakeOverlayAlpha = 0f
+            wakeTextAlpha = 0f
+        }
+    }
 
     // ── Infinite transitions ──────────────────────────────────────────────────
     val inf = rememberInfiniteTransition(label = "holo")
@@ -338,6 +377,13 @@ fun JarvisMainScreen(
             val cy  = size.height / 2f
             val amp = smoothedAmplitude   // already animated by animateFloatAsState
 
+            // ── Wake scale: 1.0x idle → 1.4x wake → 1.15x listening ──────
+            val wakeScaleFactor = when {
+                wakeFlash -> 1.4f
+                brainState == BrainState.LISTENING -> 1.15f
+                else -> 1f
+            }
+
             // ── Idle breathing: subtle scale oscillation when no voice ──────
             val breathScale = if (brainState == BrainState.IDLE) {
                 1f + 0.03f * sin(breathPhase)
@@ -347,7 +393,26 @@ fun JarvisMainScreen(
 
             // Base radius: ~34% of canvas; expands with voice amplitude
             val base = size.minDimension * 0.34f
-            val orbR = base * (1f + amp * 0.30f) * breathScale
+            val orbR = base * (1f + amp * 0.30f) * breathScale * wakeScaleFactor
+
+            // ════════════════════════════════════════════════════════════════
+            // WAKE FLASH: Expanding ring burst on wake word detection
+            // ════════════════════════════════════════════════════════════════
+            if (wakeFlash) {
+                // Animated expanding rings are handled by HolographicOrb internally,
+                // but we add a large bright ring burst here too for the main screen canvas
+                val ringAlpha = 0.6f
+                for (i in 0..3) {
+                    val expansion = 1.2f + i * 0.6f
+                    val alpha = ringAlpha / (i + 1)
+                    drawCircle(
+                        color = Color(0xFF00FFFF).copy(alpha = alpha),
+                        radius = orbR * expansion,
+                        center = Offset(cx, cy),
+                        style = Stroke(width = (3f - i * 0.5f).coerceAtLeast(0.5f).dp.toPx())
+                    )
+                }
+            }
 
             // ════════════════════════════════════════════════════════════════
             // SHAPE 1: Outer ambient glow (Cyan → Transparent)
@@ -356,11 +421,12 @@ fun JarvisMainScreen(
             // Uses radialGradient with voice-reactive alpha.
             // ════════════════════════════════════════════════════════════════
             val glowR = orbR * (1.9f + amp * 0.7f) * glowPulse
+            val wakeGlowBoost = if (wakeFlash || brainState == BrainState.WAKE) 0.15f else 0f
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
-                        glowColor.copy(alpha = (0.20f + amp * 0.15f) * glowPulse),
-                        glowColor.copy(alpha = 0.05f + amp * 0.05f),
+                        glowColor.copy(alpha = (0.20f + amp * 0.15f + wakeGlowBoost) * glowPulse),
+                        glowColor.copy(alpha = 0.05f + amp * 0.05f + wakeGlowBoost * 0.3f),
                         Color.Transparent
                     ),
                     center = Offset(cx, cy),
@@ -370,14 +436,15 @@ fun JarvisMainScreen(
                 center = Offset(cx, cy)
             )
 
-            // ── Ripple rings (LISTENING / SPEAKING) ───────────────────────
+            // ── Ripple rings (WAKE / LISTENING / SPEAKING) ───────────────────
             if (brainState.showRipples) {
-                listOf(r1 to 0.22f, r2 to 0.17f, r3 to 0.11f).forEach { (p, maxA) ->
+                val rippleMaxAlpha = if (brainState == BrainState.WAKE) 0.4f else 0.22f
+                listOf(r1 to rippleMaxAlpha, r2 to rippleMaxAlpha * 0.77f, r3 to rippleMaxAlpha * 0.5f).forEach { (p, maxA) ->
                     drawCircle(
                         color  = primaryColor.copy(alpha = maxA * (1f - p) * (0.5f + amp)),
                         radius = orbR * (1.05f + p * 1.1f),
                         center = Offset(cx, cy),
-                        style  = Stroke(width = 1.8.dp.toPx())
+                        style  = Stroke(width = if (brainState == BrainState.WAKE) 2.5.dp.toPx() else 1.8.dp.toPx())
                     )
                 }
             }
@@ -421,11 +488,12 @@ fun JarvisMainScreen(
             // to simulate 3D lighting (highlight top-left, shadow bottom-right).
             // ════════════════════════════════════════════════════════════════
             val hlOff = Offset(cx - orbR * 0.28f, cy - orbR * 0.28f)
+            val sphereAlpha = if (brainState == BrainState.WAKE) 1f else (0.9f + amp * 0.1f)
             drawCircle(
                 brush = Brush.radialGradient(
                     colorStops = arrayOf(
-                        0.00f to Color.White.copy(alpha = 0.25f + amp * 0.1f),
-                        0.22f to primaryColor.copy(alpha = 0.90f + amp * 0.1f),
+                        0.00f to Color.White.copy(alpha = 0.25f + amp * 0.1f + if (brainState == BrainState.WAKE) 0.2f else 0f),
+                        0.22f to primaryColor.copy(alpha = sphereAlpha),
                         0.60f to primaryColor.copy(alpha = 0.55f),
                         1.00f to primaryColor.copy(alpha = 0.15f)
                     ),
@@ -448,8 +516,9 @@ fun JarvisMainScreen(
             // When amplitude is high (user speaking), the secondary layer
             // becomes more prominent and shifts color toward Magenta.
             // ════════════════════════════════════════════════════════════════
-            val secondaryAlpha = 0.15f + amp * 0.35f
+            val secondaryAlpha = 0.15f + amp * 0.35f + if (brainState == BrainState.WAKE) 0.2f else 0f
             val secondaryColor = when {
+                brainState == BrainState.WAKE -> Color(0xFF00FFFF)  // Cyan for wake
                 amp > 0.4f -> Color(0xFFFF00FF)  // Magenta spike when loud
                 amp > 0.15f -> Color(0xFF4400FF)  // Deep Blue for moderate
                 else -> Color(0xFF0066FF)          // Cool Blue for idle
@@ -477,8 +546,8 @@ fun JarvisMainScreen(
             // actively reacting to voice, creating intense bright spots
             // where the Cyan and Magenta layers overlap.
             // ════════════════════════════════════════════════════════════════
-            if (amp > 0.05f || brainState == BrainState.SPEAKING) {
-                val tertiaryAlpha = (0.08f + amp * 0.25f).coerceIn(0f, 0.4f)
+            if (amp > 0.05f || brainState == BrainState.SPEAKING || brainState == BrainState.WAKE) {
+                val tertiaryAlpha = (0.08f + amp * 0.25f + if (brainState == BrainState.WAKE) 0.3f else 0f).coerceIn(0f, 0.6f)
                 val tertiaryColor = Color(0xFF00FFFF)  // Pure Cyan for additive glow
                 drawCircle(
                     brush = Brush.radialGradient(
@@ -511,11 +580,12 @@ fun JarvisMainScreen(
                 center = Offset(cx, cy)
             )
             // Rim outline
+            val rimAlpha = if (brainState == BrainState.WAKE) 0.9f else (0.6f + amp * 0.2f)
             drawCircle(
-                color  = primaryColor.copy(alpha = 0.6f + amp * 0.2f),
+                color  = primaryColor.copy(alpha = rimAlpha),
                 radius = orbR,
                 center = Offset(cx, cy),
-                style  = Stroke(width = (1.5f + amp * 1f).dp.toPx())
+                style  = Stroke(width = if (brainState == BrainState.WAKE) 3.dp.toPx() else (1.5f + amp * 1f).dp.toPx())
             )
 
             // ── Scan line ─────────────────────────────────────────────────
@@ -547,12 +617,13 @@ fun JarvisMainScreen(
             // is what makes the orb feel ALIVE. It pulses faster when
             // the user speaks and swells with amplitude.
             // ════════════════════════════════════════════════════════════════
-            val coreR = orbR * 0.20f * (0.8f + corePulse * 0.35f + amp * 0.45f)
+            val coreScale = if (brainState == BrainState.WAKE) 1.5f else 1f
+            val coreR = orbR * 0.20f * (0.8f + corePulse * 0.35f + amp * 0.45f) * coreScale
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
-                        Color.White.copy(alpha = 0.95f),
-                        primaryColor.copy(alpha = 0.75f + amp * 0.25f),
+                        Color.White.copy(alpha = if (brainState == BrainState.WAKE) 1f else 0.95f),
+                        primaryColor.copy(alpha = 0.75f + amp * 0.25f + if (brainState == BrainState.WAKE) 0.25f else 0f),
                         Color.Transparent
                     ),
                     center = Offset(cx, cy),
@@ -569,11 +640,13 @@ fun JarvisMainScreen(
             // the orb to simulate energy discharge. Their positions are
             // deterministic (based on frame calculation) for consistency.
             // ════════════════════════════════════════════════════════════════
-            if (amp > 0.3f) {
-                val particleCount = ((amp - 0.3f) * 12).toInt().coerceIn(1, 6)
-                val particleAlpha = (amp - 0.3f) * 1.4f
+            val showParticles = amp > 0.3f || brainState == BrainState.WAKE
+            if (showParticles) {
+                val particleBase = if (brainState == BrainState.WAKE) 8 else ((amp - 0.3f) * 12).toInt().coerceIn(1, 6)
+                val particleCount = particleBase.coerceIn(1, 10)
+                val particleAlpha = if (brainState == BrainState.WAKE) 0.9f else (amp - 0.3f) * 1.4f
                 for (i in 0 until particleCount) {
-                    val angle = (orbitalRotation * 2f + i * 60f) * (PI / 180f)
+                    val angle = (orbitalRotation * 2f + i * 36f) * (PI / 180f)
                     val dist = orbR * (1.15f + amp * 0.3f + i * 0.05f)
                     val px = cx + (dist * cos(angle)).toFloat()
                     val py = cy + (dist * sin(angle)).toFloat()
@@ -599,15 +672,16 @@ fun JarvisMainScreen(
         Icon(
             imageVector = when (brainState) {
                 BrainState.IDLE      -> Icons.Filled.Mic
+                BrainState.WAKE      -> Icons.Filled.NotificationsActive
                 BrainState.LISTENING -> Icons.Filled.Mic
                 BrainState.THINKING  -> Icons.Filled.Psychology
                 BrainState.SPEAKING  -> Icons.AutoMirrored.Filled.VolumeUp
                 BrainState.ERROR     -> Icons.Filled.Error
             },
             contentDescription = brainState.label,
-            tint = Color.White.copy(alpha = 0.88f),
+            tint = Color.White.copy(alpha = if (brainState == BrainState.WAKE) 1f else 0.88f),
             modifier = Modifier
-                .size(34.dp)
+                .size(if (brainState == BrainState.WAKE) 38.dp else 34.dp)
                 .align(Alignment.TopCenter)
                 .offset(y = (48 + 133).dp)
                 .zIndex(3f)
@@ -640,6 +714,65 @@ fun JarvisMainScreen(
                     color      = primaryColor,
                     fontSize   = 10.sp,
                     fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // LAYER 5: WAKE FLASH OVERLAY + WAKE DETECTED TEXT
+        //
+        // When wakeFlash is true, a full-screen cyan overlay flashes and
+        // fades out, and "WAKE DETECTED" text appears briefly at the top.
+        // ═══════════════════════════════════════════════════════════════════════
+
+        // Full-screen cyan flash overlay
+        if (wakeOverlayAnim > 0.01f) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(5f)
+            ) {
+                drawRect(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            Color(0xFF00FFFF).copy(alpha = wakeOverlayAnim),
+                            Color(0xFF00FFFF).copy(alpha = wakeOverlayAnim * 0.4f),
+                            Color.Transparent
+                        ),
+                        center = Offset(size.width / 2f, size.height / 3f),
+                        radius = size.maxDimension * 0.8f
+                    )
+                )
+            }
+        }
+
+        // "WAKE DETECTED" text at the top
+        if (wakeTextAnim > 0.01f) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .padding(top = 50.dp)
+                    .zIndex(6f),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "WAKE DETECTED",
+                    color = Color(0xFF00FFFF).copy(alpha = wakeTextAnim),
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 4.sp,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "\"JARVIS\" ACTIVATED",
+                    color = Color.White.copy(alpha = wakeTextAnim * 0.7f),
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 2.sp,
+                    textAlign = TextAlign.Center
                 )
             }
         }

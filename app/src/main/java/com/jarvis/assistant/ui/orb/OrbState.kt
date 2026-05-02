@@ -13,6 +13,11 @@ enum class BrainState(val label: String, val color: Color, val description: Stri
         color = OrbIdleColor,
         description = "Standing by"
     ),
+    WAKE(
+        label = "WAKE",
+        color = Color(0xFF00FFFF),
+        description = "Wake word detected"
+    ),
     LISTENING(
         label = "LISTENING",
         color = OrbListeningColor,
@@ -36,11 +41,11 @@ enum class BrainState(val label: String, val color: Color, val description: Stri
 
     /** Whether the ripple rings should be visible for this state. */
     val showRipples: Boolean
-        get() = this == LISTENING || this == SPEAKING
+        get() = this == WAKE || this == LISTENING || this == SPEAKING
 
     /** Whether the orb should pulse more intensely. */
     val intensePulse: Boolean
-        get() = this == THINKING || this == LISTENING
+        get() = this == WAKE || this == THINKING || this == LISTENING
 
     companion object {
         fun fromString(name: String): BrainState {

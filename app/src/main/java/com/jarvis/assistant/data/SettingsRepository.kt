@@ -8,6 +8,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.jarvis.assistant.privacy.PrivacyVault
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -266,33 +267,56 @@ class SettingsRepository(private val context: Context) {
     }
 
     private fun readStringBlocking(key: Preferences.Key<String>, default: String): String {
+        warnIfMainThread("readStringBlocking")
         return runBlocking {
             try {
-                context.dataStore.data.map { it[key] ?: default }.first()
+                withTimeout(2000L) {
+                    context.dataStore.data.map { it[key] ?: default }.first()
+                }
             } catch (e: Exception) {
+                Log.w(TAG, "readStringBlocking failed for key=${key.name}: ${e.message}")
                 default
             }
         }
     }
 
     private fun readEncryptedStringBlocking(key: Preferences.Key<String>, vaultKey: String, default: String): String {
+        warnIfMainThread("readEncryptedStringBlocking")
         return runBlocking {
             try {
-                val rawValue = context.dataStore.data.map { it[key] ?: default }.first()
-                if (rawValue.isEmpty()) rawValue else decryptValue(vaultKey, rawValue)
+                withTimeout(2000L) {
+                    val rawValue = context.dataStore.data.map { it[key] ?: default }.first()
+                    if (rawValue.isEmpty()) rawValue else decryptValue(vaultKey, rawValue)
+                }
             } catch (e: Exception) {
+                Log.w(TAG, "readEncryptedStringBlocking failed for key=${key.name}: ${e.message}")
                 default
             }
         }
     }
 
     private fun readBooleanBlocking(key: Preferences.Key<Boolean>, default: Boolean): Boolean {
+        warnIfMainThread("readBooleanBlocking")
         return runBlocking {
             try {
-                context.dataStore.data.map { it[key] ?: default }.first()
+                withTimeout(2000L) {
+                    context.dataStore.data.map { it[key] ?: default }.first()
+                }
             } catch (e: Exception) {
+                Log.w(TAG, "readBooleanBlocking failed for key=${key.name}: ${e.message}")
                 default
             }
+        }
+    }
+
+    /**
+     * Warn if a blocking method is called from the main thread.
+     * This can cause ANRs and should be avoided. Use the suspend
+     * alternatives instead.
+     */
+    private fun warnIfMainThread(methodName: String) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            Log.w(TAG, "$methodName called on main thread — this can cause ANRs. Use suspend alternative instead.")
         }
     }
 }

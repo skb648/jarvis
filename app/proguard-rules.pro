@@ -88,7 +88,9 @@
 
 # ─── JARVIS Models (used in JSON serialization) ─────────────────
 -keep class com.jarvis.assistant.ui.screens.ChatMessage { *; }
+-keep class com.jarvis.assistant.ui.screens.ChatSession { *; }
 -keep class com.jarvis.assistant.ui.screens.SmartDevice { *; }
+-keep class com.jarvis.assistant.ui.screens.DeviceType { *; }
 -keep class com.jarvis.assistant.automation.RoutineEngine$* { *; }
 -keep class com.jarvis.assistant.viewmodel.JarvisViewModel$HistoryEntry { *; }
 
