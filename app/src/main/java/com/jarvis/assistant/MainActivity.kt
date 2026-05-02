@@ -185,6 +185,7 @@ class MainActivity : ComponentActivity() {
                     "battery"  -> viewModel.sendMessage("How's my battery and device status?", context)
                     "alarm"    -> viewModel.sendMessage("Set an alarm", context)
                     "search"   -> viewModel.sendMessage("What do you want me to search for?", context)
+                    "daily_brief" -> viewModel.requestDailyBrief(context)
                     else       -> viewModel.sendMessage(action, context)
                 }
             },
@@ -227,6 +228,8 @@ class MainActivity : ComponentActivity() {
             // SmartHome quick action & settings navigation
             onSmartHomeQuickAction = { scene -> viewModel.sendMessage("Execute scene: $scene", context) },
             onGoToSettings = { /* Navigation handled by NavGraph */ },
+            // MQTT Connect button — triggers actual MQTT reconnection
+            onMqttConnect = { viewModel.triggerMqttConnect(context) },
             // HomeScreen location context
             locationContext = viewModel.locationContext.value,
             // Wake flash effect

@@ -2,6 +2,7 @@ package com.jarvis.assistant.smarthome
 
 import android.util.Log
 import com.jarvis.assistant.channels.JarviewModel
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.eclipse.paho.android.service.MqttAndroidClient
 import org.eclipse.paho.client.mqttv3.IMqttActionListener
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
@@ -9,6 +10,7 @@ import org.eclipse.paho.client.mqttv3.IMqttToken
 import org.eclipse.paho.client.mqttv3.MqttCallbackExtended
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions
 import org.eclipse.paho.client.mqttv3.MqttMessage
+import kotlin.coroutines.resume
 
 /**
  * MQTT Manager — Smart Home communication via MQTT.
@@ -38,8 +40,9 @@ object MqttManager {
 
     /**
      * Connect to MQTT broker.
+     * SUSPEND: Waits for the connection result instead of returning true prematurely.
      */
-    fun connect(
+    suspend fun connect(
         context: android.content.Context,
         broker: String,
         port: Int = 1883,
@@ -106,7 +109,7 @@ object MqttManager {
                 })
             }
 
-            val options = MqttConnectOptions().apply {
+            val mqttConnectOptions = MqttConnectOptions().apply {
                 isAutomaticReconnect = true
                 isCleanSession = true
                 connectionTimeout = 10
@@ -117,18 +120,25 @@ object MqttManager {
                 }
             }
 
-            client?.connect(options, null, object : IMqttActionListener {
-                override fun onSuccess(asyncActionToken: IMqttToken?) {
-                    Log.i(TAG, "MQTT connection initiated successfully")
+            return try {
+                suspendCancellableCoroutine { cont ->
+                    client?.connect(mqttConnectOptions, null, object : IMqttActionListener {
+                        override fun onSuccess(asyncActionToken: IMqttToken?) {
+                            mqttConnected = true
+                            Log.i(TAG, "MQTT connected successfully")
+                            if (cont.isActive) cont.resume(true) {}
+                        }
+                        override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                            mqttConnected = false
+                            Log.e(TAG, "MQTT connection failed: ${exception?.message}")
+                            if (cont.isActive) cont.resume(false) {}
+                        }
+                    })
                 }
-                override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                    Log.e(TAG, "MQTT connection failed", exception)
-                    mqttConnected = false
-                    JarviewModel.mqttConnected = false
-                }
-            })
-
-            return true
+            } catch (e: Exception) {
+                Log.e(TAG, "MQTT connect error: ${e.message}")
+                false
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initiate MQTT connection", e)
             return false

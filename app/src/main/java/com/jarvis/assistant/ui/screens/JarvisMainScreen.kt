@@ -165,7 +165,10 @@ fun JarvisMainScreen(
         if (wakeFlash) {
             wakeOverlayAlpha = 0.35f
             wakeTextAlpha = 1f
-            // Start fading immediately
+            // BUG-P2-15 FIX: Add delay before fading so the flash is actually visible.
+            // Previously the "on" values were immediately overwritten to 0, making
+            // the flash invisible.
+            delay(300)
             wakeOverlayAlpha = 0f
             wakeTextAlpha = 0f
         }

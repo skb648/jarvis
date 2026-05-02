@@ -232,12 +232,12 @@ object GroqApiClient {
      * Returns (success, errorMessage) pair.
      * Treats 429 (rate limited) as valid — the key works but is throttled.
      */
-    fun testApiKey(apiKey: String): Pair<Boolean, String> {
+    suspend fun testApiKey(apiKey: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val trimmedKey = apiKey.trim()
-        if (trimmedKey.isBlank()) return Pair(false, "Key is empty")
-        if (trimmedKey.length < 20) return Pair(false, "Key too short (${trimmedKey.length} chars)")
+        if (trimmedKey.isBlank()) return@withContext Pair(false, "Key is empty")
+        if (trimmedKey.length < 20) return@withContext Pair(false, "Key too short (${trimmedKey.length} chars)")
 
-        return try {
+        try {
             val testBody = JSONObject().apply {
                 put("model", "llama-3.1-8b-instant")
                 put("messages", org.json.JSONArray().put(

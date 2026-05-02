@@ -1,18 +1,15 @@
-# ─── JARVIS ProGuard Rules v7.0 ──────────────────────────────────
+# ─── JARVIS ProGuard Rules v8.0 ──────────────────────────────────
 
 # ─── Keep all JARVIS classes ──────────────────────────────────────
 -keep class com.jarvis.assistant.** { *; }
 -keepclassmembers class com.jarvis.assistant.** { *; }
 
 # ─── JNI / Rust Bridge ──────────────────────────────────────────
-# Keep all classes with native methods — the Rust JNI functions
-# depend on exact class+method names matching the JNI naming convention.
-# CRITICAL: This prevents R8 from stripping JNI methods in release builds.
+-keep class com.jarvis.assistant.jni.RustBridge { *; }
+-keep class com.jarvis.assistant.jni.RustBridge$* { *; }
 -keepclassmembers class com.jarvis.assistant.jni.RustBridge {
     native <methods>;
 }
--keep class com.jarvis.assistant.jni.RustBridge { *; }
--keep class com.jarvis.assistant.jni.RustBridge$* { *; }
 
 # ─── Shizuku ────────────────────────────────────────────────────
 -keep class rikka.shizuku.** { *; }
@@ -37,13 +34,10 @@
 -keep class * implements com.google.gson.JsonSerializer
 -keep class * implements com.google.gson.JsonDeserializer
 -dontwarn com.google.gson.**
-# Gson specific classes
 -dontwarn sun.misc.**
 -keep class com.google.gson.stream.** { *; }
-# Prevent R8 from stripping interface information from TypeAdapter
 -keep,allowobfuscation,allowshrinking class com.google.gson.reflect.TypeToken
 -keep,allowobfuscation,allowshrinking class * extends com.google.gson.reflect.TypeToken
-# Keep classes with @SerializedName
 -keepclassmembers,allowobfuscation class * {
     @com.google.gson.annotations.SerializedName <fields>;
 }
@@ -112,7 +106,6 @@
     @android.webkit.JavascriptInterface <methods>;
 }
 
-# Don't strip any native methods — ensures JNI bridges are never removed
 -keepclasseswithmembernames class * {
     native <methods>;
 }
@@ -133,11 +126,6 @@
 -keep class com.jarvis.assistant.automation.TaskExecutorBridge { *; }
 -keep class com.jarvis.assistant.automation.TaskExecutorBridge$StepResult { *; }
 -keep class com.jarvis.assistant.automation.TaskExecutorBridge$StepResult$* { *; }
-
-# ─── Gemini Function Caller ────────────────────────────────────
--keep class com.jarvis.assistant.automation.GeminiFunctionCaller { *; }
--keep class com.jarvis.assistant.automation.GeminiFunctionCaller$ProcessResult { *; }
--keep class com.jarvis.assistant.automation.GeminiFunctionCaller$ProcessResult$* { *; }
 
 # ─── Room Database entities ─────────────────────────────────────
 -keep class com.jarvis.assistant.data.local.MessageEntity { *; }
@@ -165,10 +153,23 @@
 # ─── System Action Executor ─────────────────────────────────────
 -keep class com.jarvis.assistant.router.SystemActionExecutor { *; }
 
-# ─── Gemini API Client ─────────────────────────────────────────
--keep class com.jarvis.assistant.network.GeminiApiClient { *; }
--keep class com.jarvis.assistant.network.GeminiApiClient$ApiResult { *; }
--keep class com.jarvis.assistant.network.GeminiApiClient$ApiResult$* { *; }
+# ─── Groq API Client ─────────────────────────────────────────
+-keep class com.jarvis.assistant.network.GroqApiClient { *; }
+-keep class com.jarvis.assistant.network.GroqApiClient$* { *; }
+
+# ─── Groq Function Caller ─────────────────────────────────────
+-keep class com.jarvis.assistant.automation.GroqFunctionCaller { *; }
+-keep class com.jarvis.assistant.automation.GroqFunctionCaller$* { *; }
+
+# ─── Accessibility Service ────────────────────────────────────
+-keep class com.jarvis.assistant.services.JarvisAccessibilityService { *; }
+
+# ─── Privacy Vault ────────────────────────────────────────────
+-keep class com.jarvis.assistant.privacy.PrivacyVault { *; }
+
+# ─── Keep source file + line numbers for crash logs ────────────
+-keepattributes SourceFile,LineNumberTable
+-keep public class * extends java.lang.Exception
 
 -dontwarn javax.annotation.**
 -dontwarn java.lang.invoke.StringConcatFactory

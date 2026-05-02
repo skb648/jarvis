@@ -78,13 +78,8 @@ android {
             }
         }
         release {
-            // NOTE: isMinifyEnabled and isShrinkResources are set to false
-            // to prevent the APK from being stripped too aggressively.
-            // Previous builds with these enabled resulted in APKs that
-            // wouldn't install (missing components, corrupt DEX).
-            // Once the build is stable, re-enable these and test carefully.
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

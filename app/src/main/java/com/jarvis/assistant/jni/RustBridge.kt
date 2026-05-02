@@ -71,8 +71,20 @@ object RustBridge {
     // ─── External JNI Declarations ──────────────────────────────────
     // These MUST match the Rust function signatures in lib.rs exactly.
 
+    /**
+     * Initialize the native Rust library.
+     *
+     * NOTE: The parameter was renamed from `geminiKey` to `groqKey` because the
+     * Kotlin codebase now uses Groq API. The Rust native path is currently DISABLED
+     * (CMake stub fallback) — if re-enabled, the Rust code must also be updated
+     * to call Groq instead of Gemini.
+     *
+     * @param groqKey      Groq API key (was `geminiKey` — renamed to reflect current API)
+     * @param elevenLabsKey ElevenLabs API key for TTS
+     * @return true if native initialization succeeded
+     */
     @JvmStatic
-    external fun nativeInitialize(geminiKey: String, elevenLabsKey: String): Boolean
+    external fun nativeInitialize(groqKey: String, elevenLabsKey: String): Boolean
 
     @JvmStatic
     external fun nativeProcessQuery(query: String, context: String, historyJson: String, systemPrompt: String): String
@@ -115,10 +127,17 @@ object RustBridge {
     // JNI calls involve network I/O (Groq API, ElevenLabs TTS)
     // and can take seconds — they MUST run off the main thread.
 
-    suspend fun initialize(geminiKey: String, elevenLabsKey: String): Boolean {
+    /**
+     * Initialize the native Rust library with Groq API key.
+     *
+     * NOTE: The Rust native path is currently DISABLED (CMake stub fallback).
+     * This method is kept for compatibility but the Kotlin HTTP fallback
+     * is used instead, which correctly calls the Groq API.
+     */
+    suspend fun initialize(groqKey: String, elevenLabsKey: String): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                nativeInitialize(geminiKey, elevenLabsKey)
+                nativeInitialize(groqKey, elevenLabsKey)
             } catch (e: UnsatisfiedLinkError) {
                 android.util.Log.e("RustBridge", "nativeInitialize: Native library not loaded — ${e.message}")
                 false
@@ -132,11 +151,26 @@ object RustBridge {
     /**
      * Process a user query — runs on [Dispatchers.IO].
      * This makes network calls to Groq API — must NEVER be on main thread.
+     *
+     * SAFETY CHECK: If the native library IS somehow loaded but still points to
+     * the old Gemini API, the response may contain Gemini-specific errors.
+     * We detect this and return a clear error message instead of a cryptic response.
      */
     suspend fun processQuery(query: String, context: String = "", historyJson: String = "[]", systemPrompt: String = ""): String {
         return withContext(Dispatchers.IO) {
             try {
-                nativeProcessQuery(query, context, historyJson, systemPrompt)
+                val result = nativeProcessQuery(query, context, historyJson, systemPrompt)
+                // Safety check: detect stale Gemini API errors from the Rust native path
+                if (result.contains("gemini", ignoreCase = true) &&
+                    (result.contains("API key", ignoreCase = true) ||
+                     result.contains("401", ignoreCase = true) ||
+                     result.contains("403", ignoreCase = true) ||
+                     result.contains("error", ignoreCase = true))) {
+                    android.util.Log.w("RustBridge", "processQuery: Response contains Gemini API error — native code needs updating to Groq")
+                    "[ERROR] Native library still uses Gemini API. Please rebuild Rust core with Groq support."
+                } else {
+                    result
+                }
             } catch (e: UnsatisfiedLinkError) {
                 android.util.Log.e("RustBridge", "nativeProcessQuery: Native library not loaded — ${e.message}")
                 "[ERROR] Native library not loaded. Build Rust core with: ./gradlew buildRustDebug"

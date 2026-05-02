@@ -32,7 +32,7 @@ class JarvisSensoryService : Service() {
 
     companion object {
         private const val TAG = "JarvisSensory"
-        private const val CHANNEL_ID = "jarvis_sensory_channel"
+        private const val CHANNEL_ID = JarvisNotificationChannels.CHANNEL_JARVIS_SERVICES
         private const val NOTIFICATION_ID = 2002
         const val ACTION_START = "com.jarvis.assistant.SENSORY_START"
         const val ACTION_STOP = "com.jarvis.assistant.SENSORY_STOP"
@@ -226,15 +226,7 @@ class JarvisSensoryService : Service() {
     // ─── Foreground Notification ────────────────────────────────
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "JARVIS Sensory Service",
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "Sensor monitoring service"
-            setShowBadge(false)
-        }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        JarvisNotificationChannels.ensureChannels(this)
     }
 
     private fun buildNotification(text: String): Notification {

@@ -23,6 +23,10 @@ import android.view.Surface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -65,6 +69,16 @@ class VisionManager {
         private const val JPEG_QUALITY = 80
         private const val MAX_IMAGE_DIMENSION = 1024  // Resize for API limits
         private const val CAPTURE_TIMEOUT_MS = 10_000L
+    }
+
+    /** Shared OkHttp client for vision requests — longer timeouts for large image payloads */
+    private val visionHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)  // Longer timeout for vision
+            .writeTimeout(60, TimeUnit.SECONDS)  // Large image payloads
+            .retryOnConnectionFailure(true)
+            .build()
     }
 
     private var cameraDevice: CameraDevice? = null
@@ -340,71 +354,70 @@ class VisionManager {
 
     /**
      * Send an image + prompt to Groq's Vision API (OpenAI-compatible format).
+     * Uses OkHttp with proper timeouts, retry, and connection pooling.
      */
-    private fun sendToGroqVision(
+    private suspend fun sendToGroqVision(
         base64Image: String,
         prompt: String,
         apiKey: String
     ): String {
-        try {
-            val url = java.net.URL(GROQ_VISION_URL)
-            val connection = url.openConnection() as java.net.HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.setRequestProperty("Content-Type", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer ${apiKey.trim()}")
-            connection.doOutput = true
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 60_000
-
-            // Build OpenAI-compatible vision request: text + image_url
-            val requestBody = JSONObject().apply {
-                put("model", GROQ_MODEL)
-                put("messages", JSONArray().put(
-                    JSONObject().apply {
-                        put("role", "user")
-                        put("content", JSONArray().apply {
-                            // Text prompt
-                            put(JSONObject().apply {
-                                put("type", "text")
-                                put("text", "You are JARVIS, Tony Stark's AI assistant. You are looking through the device camera. $prompt. Describe what you see concisely and with British elegance. Address the user as Sir. If you see text, read it. If you see objects, identify them. If you see people, describe what they're doing (don't identify faces for privacy).")
-                            })
-                            // Image data as base64 data URI
-                            put(JSONObject().apply {
-                                put("type", "image_url")
-                                put("image_url", JSONObject().apply {
-                                    put("url", "data:image/jpeg;base64,$base64Image")
+        return withContext(Dispatchers.IO) {
+            try {
+                // Build OpenAI-compatible vision request: text + image_url
+                val requestBody = JSONObject().apply {
+                    put("model", GROQ_MODEL)
+                    put("messages", JSONArray().put(
+                        JSONObject().apply {
+                            put("role", "user")
+                            put("content", JSONArray().apply {
+                                // Text prompt
+                                put(JSONObject().apply {
+                                    put("type", "text")
+                                    put("text", "You are JARVIS, Tony Stark's AI assistant. You are looking through the device camera. $prompt. Describe what you see concisely and with British elegance. Address the user as Sir. If you see text, read it. If you see objects, identify them. If you see people, describe what they're doing (don't identify faces for privacy).")
+                                })
+                                // Image data as base64 data URI
+                                put(JSONObject().apply {
+                                    put("type", "image_url")
+                                    put("image_url", JSONObject().apply {
+                                        put("url", "data:image/jpeg;base64,$base64Image")
+                                    })
                                 })
                             })
-                        })
-                    }
-                ))
-                put("max_tokens", 1024)
-            }.toString()
+                        }
+                    ))
+                    put("max_tokens", 1024)
+                }.toString()
 
-            connection.outputStream.use { it.write(requestBody.toByteArray(Charsets.UTF_8)) }
+                val request = Request.Builder()
+                    .url(GROQ_VISION_URL)
+                    .addHeader("Authorization", "Bearer ${apiKey.trim()}")
+                    .addHeader("Content-Type", "application/json")
+                    .post(requestBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
 
-            val responseCode = connection.responseCode
-            if (responseCode != 200) {
-                val errorBody = connection.errorStream?.bufferedReader()?.readText() ?: "unknown"
-                Log.e(TAG, "[sendToGroqVision] HTTP $responseCode: ${errorBody.take(300)}")
-                connection.disconnect()
-                return "Sir, I couldn't analyze the image. The vision API returned an error (HTTP $responseCode)."
+                val response = visionHttpClient.newCall(request).execute()
+                if (response.code == 200) {
+                    val responseBody = response.body?.string() ?: ""
+                    response.close()
+
+                    // Parse OpenAI-compatible response: choices[0].message.content
+                    val root = JSONObject(responseBody)
+                    val choices = root.optJSONArray("choices")
+                    val firstChoice = choices?.optJSONObject(0)
+                    val message = firstChoice?.optJSONObject("message")
+                    val text = message?.optString("content", "") ?: ""
+
+                    if (text.isNotBlank()) text else "Sir, I captured the image but couldn't analyze it properly."
+                } else {
+                    val errorBody = response.body?.string() ?: ""
+                    response.close()
+                    Log.e(TAG, "[sendToGroqVision] HTTP ${response.code}: ${errorBody.take(300)}")
+                    "Sir, I couldn't analyze the image. The vision API returned an error (HTTP ${response.code})."
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[sendToGroqVision] Error: ${e.message}")
+                "Sir, I had trouble connecting to the vision service: ${e.message?.take(100)}"
             }
-
-            val responseBody = connection.inputStream.bufferedReader().readText()
-            connection.disconnect()
-
-            // Parse OpenAI-compatible response: choices[0].message.content
-            val root = JSONObject(responseBody)
-            val choices = root.optJSONArray("choices")
-            val firstChoice = choices?.optJSONObject(0)
-            val message = firstChoice?.optJSONObject("message")
-            val text = message?.optString("content", "") ?: ""
-
-            return if (text.isNotBlank()) text else "Sir, I captured the image but couldn't analyze it properly."
-        } catch (e: Exception) {
-            Log.e(TAG, "[sendToGroqVision] Error: ${e.message}")
-            return "Sir, I had trouble connecting to the vision service: ${e.message?.take(100)}"
         }
     }
 

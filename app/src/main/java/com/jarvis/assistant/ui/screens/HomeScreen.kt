@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -47,8 +48,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -99,15 +103,14 @@ data class QuickAction(
     val accentColor: Color
 )
 
-/**
- * Data for a recent conversation preview bubble.
- */
-data class RecentConversation(
-    val title: String,
-    val preview: String,
-    val timestamp: String,
-    val accentColor: Color
-)
+/** Format current date/time for display — called by the LaunchedEffect ticker */
+private fun formatDateTime(): String {
+    val date = LocalDate.now()
+    val time = LocalTime.now()
+    val dayFormatter = DateTimeFormatter.ofPattern("EEEE, MMMM d")
+    val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+    return "${dayFormatter.format(date).uppercase()} • ${timeFormatter.format(time)}"
+}
 
 @Composable
 fun HomeScreen(
@@ -123,6 +126,7 @@ fun HomeScreen(
     isCharging: Boolean = false,
     availableMemoryMb: Long = -1L,
     recentCommands: List<String> = emptyList(),
+    onRequestDailyBrief: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -153,13 +157,13 @@ fun HomeScreen(
         tileMode = TileMode.Mirror
     )
 
-    // ── Formatted date/time ────────────────────────────────────────
-    val currentDateTime = remember {
-        val date = LocalDate.now()
-        val time = LocalTime.now()
-        val dayFormatter = DateTimeFormatter.ofPattern("EEEE, MMMM d")
-        val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
-        "${dayFormatter.format(date).uppercase()} • ${timeFormatter.format(time)}"
+    // ── Formatted date/time — updates every 60 seconds ────────────────
+    var currentDateTime by remember { mutableStateOf(formatDateTime()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(60_000L)
+            currentDateTime = formatDateTime()
+        }
     }
 
     // ── Generate floating particles data ───────────────────────────
@@ -433,8 +437,11 @@ fun HomeScreen(
             }
 
             // ── Daily Brief Card (Featured with golden border) ───────────
+            // BUG-P2-04 FIX: Added onClick handler that triggers daily brief generation
             GlassmorphicFeaturedCard(
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onRequestDailyBrief() }
             ) {
                 Row(
                     modifier = Modifier
@@ -520,11 +527,12 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(12.dp))
 
             // ══════════════════════════════════════════════════════════════
-            // RECENT CONVERSATIONS — Bubble-style preview entries
+            // RECENT CONVERSATIONS — Removed hardcoded fake data card
+            // (BUG-P2-05 FIX: Was showing fake data; removed until real
+            //  chat history can be connected from ViewModel)
             // ══════════════════════════════════════════════════════════════
-            RecentConversationsCard()
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(0.dp))
 
             // ── Device Status Summary Card ──────────────────────────────
             GlassmorphicCardSimple(
@@ -738,87 +746,6 @@ private fun AiEngineStatusBar(
 }
 
 
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// RECENT CONVERSATIONS — Bubble-style preview entries
-// ═══════════════════════════════════════════════════════════════════════════════
-
-@Composable
-private fun RecentConversationsCard() {
-    val recentChats = remember {
-        listOf(
-            RecentConversation("Weather query", "What's the weather today?", "2m ago", JarvisCyan),
-            RecentConversation("Smart home", "Turn off the living room lights", "15m ago", JarvisGreen),
-            RecentConversation("Joke time", "Tell me something funny", "1h ago", JarvisPurple)
-        )
-    }
-
-    GlassmorphicCardSimple(
-        modifier = Modifier.fillMaxWidth(),
-        showHighlight = true
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            Text(
-                text = "RECENT CONVERSATIONS",
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontFamily = FontFamily.Monospace,
-                    color = TextTertiary,
-                    letterSpacing = 2.sp,
-                    fontSize = 9.sp
-                )
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-
-            recentChats.forEach { chat ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Colored dot indicator
-                    Canvas(modifier = Modifier.size(6.dp)) {
-                        drawCircle(
-                            color = chat.accentColor,
-                            radius = size.minDimension / 2f
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = chat.title,
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = FontFamily.Monospace,
-                                color = TextPrimary,
-                                fontSize = 12.sp
-                            )
-                        )
-                        Text(
-                            text = chat.preview,
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = TextTertiary,
-                                fontSize = 10.sp
-                            ),
-                            maxLines = 1
-                        )
-                    }
-                    Text(
-                        text = chat.timestamp,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontFamily = FontFamily.Monospace,
-                            color = TextTertiary,
-                            fontSize = 9.sp
-                        )
-                    )
-                }
-            }
-        }
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SYSTEM STATUS CARD — Device info with battery, charging, memory

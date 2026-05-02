@@ -550,7 +550,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     // ─── New Feature Systems ───────────────────────────────────────────
 
     private val visionManager = VisionManager()
-    private val webSearchEngine = WebSearchEngine()
+    private val webSearchEngine = WebSearchEngine
 
     private val _notificationsEnabled = MutableStateFlow(false)
     val notificationsEnabled: StateFlow<Boolean> = _notificationsEnabled.asStateFlow()
@@ -855,27 +855,103 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         Log.i(TAG, "[deleteNote] Note deleted: id=$id")
     }
 
-    // ─── Music Player State (UI-only) ────────────────────────────────────
+    // ─── Music Player State ─────────────────────────────────────────────
     private val _isMusicPlaying = MutableStateFlow(false)
     val isMusicPlaying: StateFlow<Boolean> = _isMusicPlaying.asStateFlow()
 
     private val _showMusicPlayer = MutableStateFlow(false)
     val showMusicPlayer: StateFlow<Boolean> = _showMusicPlayer.asStateFlow()
 
+    /** Music URL — can be a streaming URL or local file path */
+    private var musicSourceUrl: String? = null
+
+    /** Dedicated MediaPlayer for music playback (separate from TTS mediaPlayer) */
+    private var musicMediaPlayer: MediaPlayer? = null
+
     /** Toggle music player visibility */
     fun toggleMusicPlayer() {
         _showMusicPlayer.value = !_showMusicPlayer.value
     }
 
-    /** Toggle play/pause for music */
+    /**
+     * Toggle play/pause for music — uses real Android MediaPlayer.
+     * If no music source is configured, shows "No music configured" message.
+     */
     fun toggleMusicPlayback() {
-        _isMusicPlaying.value = !_isMusicPlaying.value
+        val source = musicSourceUrl
+        if (source.isNullOrBlank()) {
+            // No music source configured — update state and inform user
+            _isMusicPlaying.value = false
+            _lastResponse.value = "No music configured, Sir. Set a music URL in settings."
+            return
+        }
+
+        val player = musicMediaPlayer
+        if (player != null && _isMusicPlaying.value) {
+            // Pause current playback
+            try {
+                if (player.isPlaying) player.pause()
+            } catch (e: Exception) {
+                Log.w(TAG, "[toggleMusicPlayback] Pause failed: ${e.message}")
+            }
+            _isMusicPlaying.value = false
+        } else if (player != null) {
+            // Resume existing playback
+            try {
+                player.start()
+                _isMusicPlaying.value = true
+            } catch (e: Exception) {
+                Log.w(TAG, "[toggleMusicPlayback] Resume failed: ${e.message}")
+                _isMusicPlaying.value = false
+            }
+        } else {
+            // Create new MediaPlayer and start playback
+            try {
+                val newPlayer = MediaPlayer()
+                newPlayer.setDataSource(source)
+                newPlayer.setOnCompletionListener {
+                    _isMusicPlaying.value = false
+                    musicMediaPlayer?.release()
+                    musicMediaPlayer = null
+                }
+                newPlayer.setOnErrorListener { _, what, extra ->
+                    Log.e(TAG, "[toggleMusicPlayback] MediaPlayer error: what=$what extra=$extra")
+                    _isMusicPlaying.value = false
+                    musicMediaPlayer?.release()
+                    musicMediaPlayer = null
+                    false
+                }
+                newPlayer.prepare()
+                newPlayer.start()
+                musicMediaPlayer = newPlayer
+                _isMusicPlaying.value = true
+            } catch (e: Exception) {
+                Log.e(TAG, "[toggleMusicPlayback] Failed to play: ${e.message}")
+                _isMusicPlaying.value = false
+                _lastResponse.value = "Failed to play music, Sir. ${e.message?.take(80)}"
+            }
+        }
+    }
+
+    /**
+     * Configure the music source URL and start playing.
+     * @param url A streaming URL or local file path
+     */
+    fun setMusicSource(url: String) {
+        musicSourceUrl = url.ifBlank { null }
+        // Stop current playback if source changed
+        try {
+            musicMediaPlayer?.stop()
+            musicMediaPlayer?.release()
+        } catch (_: Exception) {}
+        musicMediaPlayer = null
+        _isMusicPlaying.value = false
     }
 
     /** Show music player (voice-activated) */
     fun showMusic() {
         _showMusicPlayer.value = true
-        _isMusicPlaying.value = true
+        toggleMusicPlayback()
     }
 
     // ─── Overlay Manager ─────────────────────────────────────────────────
@@ -1112,7 +1188,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     /**
      * Groq API key test — uses GroqApiClient.testApiKey() for instant validation.
      */
-    private fun testGroqKeyDetailed(key: String): Pair<Boolean, String> {
+    private suspend fun testGroqKeyDetailed(key: String): Pair<Boolean, String> {
         if (key.isBlank()) return Pair(false, "Key is empty")
         val trimmedKey = key.trim()
         if (trimmedKey.length < 20) return Pair(false, "Key too short (${trimmedKey.length} chars)")
@@ -3295,7 +3371,14 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     // SMART HOME CONNECTION
     // ═══════════════════════════════════════════════════════════════════════
 
-    private fun connectSmartHome(context: Context) {
+    /** Public trigger for MQTT connect — called from SmartHome "CONNECT" button */
+    fun triggerMqttConnect(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            connectSmartHome(context)
+        }
+    }
+
+    private suspend fun connectSmartHome(context: Context) {
         try {
             val haUrl = _homeAssistantUrl.value
             val haToken = _homeAssistantToken.value
@@ -3325,7 +3408,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         }
     }
 
-    private fun reconnectSmartHome() {
+    private suspend fun reconnectSmartHome() {
         val ctx = getApplicationContext() ?: return
 
         try {
@@ -3342,6 +3425,19 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     // ═══════════════════════════════════════════════════════════════════════
     // PER-FIELD SETTERS
     // ═══════════════════════════════════════════════════════════════════════
+
+    // BUG-P2-08 FIX: Debounced MQTT reconnection — cancels previous reconnect
+    // and waits 2 seconds before actually reconnecting, so rapid keystrokes
+    // in MQTT settings fields don't trigger a reconnect on every character.
+    private var mqttReconnectJob: Job? = null
+
+    private fun debouncedMqttReconnect() {
+        mqttReconnectJob?.cancel()
+        mqttReconnectJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(2000L)
+            reconnectSmartHome()
+        }
+    }
 
     fun setGroqApiKey(key: String) {
         _groqApiKey.value = key
@@ -3384,7 +3480,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 settingsRepository.setMqttBrokerUrl(url)
-                reconnectSmartHome()
+                debouncedMqttReconnect()
             } catch (e: Exception) { Log.e(TAG, "Persist MQTT broker URL failed: ${e.message}") }
         }
     }
@@ -3394,7 +3490,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 settingsRepository.setMqttUsername(u)
-                reconnectSmartHome()
+                debouncedMqttReconnect()
             } catch (e: Exception) { Log.e(TAG, "Persist MQTT username failed: ${e.message}") }
         }
     }
@@ -3404,7 +3500,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 settingsRepository.setMqttPassword(p)
-                reconnectSmartHome()
+                debouncedMqttReconnect()
             } catch (e: Exception) { Log.e(TAG, "Persist MQTT password failed: ${e.message}") }
         }
     }
@@ -3414,7 +3510,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 settingsRepository.setHomeAssistantUrl(url)
-                reconnectSmartHome()
+                debouncedMqttReconnect()
             } catch (e: Exception) { Log.e(TAG, "Persist Home Assistant URL failed: ${e.message}") }
         }
     }
@@ -3424,7 +3520,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 settingsRepository.setHomeAssistantToken(token)
-                reconnectSmartHome()
+                debouncedMqttReconnect()
             } catch (e: Exception) { Log.e(TAG, "Persist Home Assistant token failed: ${e.message}") }
         }
     }
@@ -3964,6 +4060,13 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         try {
             toneGenerator?.release()
             toneGenerator = null
+        } catch (_: Exception) {}
+
+        // Release music MediaPlayer
+        try {
+            musicMediaPlayer?.stop()
+            musicMediaPlayer?.release()
+            musicMediaPlayer = null
         } catch (_: Exception) {}
 
         // Quick Notes cleanup

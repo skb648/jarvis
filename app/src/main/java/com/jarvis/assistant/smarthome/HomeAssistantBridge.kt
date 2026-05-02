@@ -1,17 +1,23 @@
 package com.jarvis.assistant.smarthome
 
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.net.HttpURLConnection
-import java.net.URL
+import java.util.concurrent.TimeUnit
 
 /**
  * Home Assistant Bridge — REST API integration.
  *
  * Provides direct control of Home Assistant entities via the REST API.
+ * All public methods are suspend functions to avoid blocking the calling thread.
+ * Uses OkHttp with proper timeouts, retry, and connection pooling.
+ *
  * Supports:
  *   - Fetching all entity states
  *   - Calling services (turn_on, turn_off, toggle)
@@ -21,6 +27,16 @@ import java.net.URL
 object HomeAssistantBridge {
 
     private const val TAG = "JarvisHABridge"
+
+    /** Shared OkHttp client for Home Assistant REST calls */
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .writeTimeout(10, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
 
     private var baseUrl: String = ""
     private var token: String = ""
@@ -60,7 +76,7 @@ object HomeAssistantBridge {
     /**
      * Fetch all entity states from Home Assistant.
      */
-    fun getStates(): JSONArray? {
+    suspend fun getStates(): JSONArray? {
         if (!isConfigured) return null
         return try {
             val response = httpGet("/api/states")
@@ -74,7 +90,7 @@ object HomeAssistantBridge {
     /**
      * Call a Home Assistant service.
      */
-    fun callService(domain: String, service: String, entityId: String, serviceData: JSONObject? = null): JSONObject? {
+    suspend fun callService(domain: String, service: String, entityId: String, serviceData: JSONObject? = null): JSONObject? {
         if (!isConfigured) return null
         return try {
             val body = JSONObject().apply {
@@ -95,7 +111,7 @@ object HomeAssistantBridge {
      * Toggle an entity — auto-detects domain from entity_id.
      * Uses domain-specific toggle logic since not all domains support the "toggle" service.
      */
-    fun toggleEntity(entityId: String): JSONObject? {
+    suspend fun toggleEntity(entityId: String): JSONObject? {
         val domain = getDomainFromEntityId(entityId)
         return when (domain) {
             "climate" -> {
@@ -123,7 +139,7 @@ object HomeAssistantBridge {
     /**
      * Turn on an entity — uses domain-specific service where needed.
      */
-    fun turnOn(entityId: String): JSONObject? {
+    suspend fun turnOn(entityId: String): JSONObject? {
         val domain = getDomainFromEntityId(entityId)
         return when (domain) {
             "lock" -> callService(domain, "lock", entityId)
@@ -136,7 +152,7 @@ object HomeAssistantBridge {
     /**
      * Turn off an entity — uses domain-specific service where needed.
      */
-    fun turnOff(entityId: String): JSONObject? {
+    suspend fun turnOff(entityId: String): JSONObject? {
         val domain = getDomainFromEntityId(entityId)
         return when (domain) {
             "lock" -> callService(domain, "unlock", entityId)
@@ -149,7 +165,7 @@ object HomeAssistantBridge {
     /**
      * Get the state of a specific entity.
      */
-    fun getEntityState(entityId: String): JSONObject? {
+    suspend fun getEntityState(entityId: String): JSONObject? {
         if (!isConfigured) return null
         return try {
             val response = httpGet("/api/states/$entityId")
@@ -163,7 +179,7 @@ object HomeAssistantBridge {
     /**
      * Get Home Assistant configuration.
      */
-    fun getConfig(): JSONObject? {
+    suspend fun getConfig(): JSONObject? {
         if (!isConfigured) return null
         return try {
             val response = httpGet("/api/config")
@@ -180,64 +196,61 @@ object HomeAssistantBridge {
         return DOMAIN_MAP[prefix] ?: "homeassistant"
     }
 
-    // ─── HTTP Helpers ───────────────────────────────────────────
+    // ─── HTTP Helpers (OkHttp) ──────────────────────────────────
 
-    // BUG FIX: Read from errorStream when response code is not 200.
-    // Previously, reading conn.inputStream on 4xx/5xx responses threw IOException.
-    // Also added .use {} to close BufferedReader and prevent resource leaks.
-    private fun httpGet(path: String): String {
-        val url = URL("$baseUrl$path")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            setRequestProperty("Authorization", "Bearer $token")
-            setRequestProperty("Content-Type", "application/json")
-            connectTimeout = 10000
-            readTimeout = 10000
-        }
+    private suspend fun httpGet(path: String): String {
+        return withContext(Dispatchers.IO) {
+            try {
+                val request = Request.Builder()
+                    .url("$baseUrl$path")
+                    .addHeader("Authorization", "Bearer $token")
+                    .addHeader("Content-Type", "application/json")
+                    .get()
+                    .build()
 
-        try {
-            val responseCode = conn.responseCode
-            if (responseCode != HttpURLConnection.HTTP_OK) {
-                Log.w(TAG, "HTTP GET $path returned $responseCode")
-                // Read error body for diagnostics
-                val errorBody = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                Log.d(TAG, "Error body: ${errorBody.take(500)}")
-                return ""
+                val response = httpClient.newCall(request).execute()
+                if (response.code != 200) {
+                    Log.w(TAG, "HTTP GET $path returned ${response.code}")
+                    val errorBody = response.body?.string() ?: ""
+                    response.close()
+                    Log.d(TAG, "Error body: ${errorBody.take(500)}")
+                    return@withContext ""
+                }
+                val body = response.body?.string() ?: ""
+                response.close()
+                body
+            } catch (e: Exception) {
+                Log.e(TAG, "HTTP GET $path failed", e)
+                ""
             }
-            return conn.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            conn.disconnect()
         }
     }
 
-    private fun httpPost(path: String, body: JSONObject): String {
-        val url = URL("$baseUrl$path")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            setRequestProperty("Authorization", "Bearer $token")
-            setRequestProperty("Content-Type", "application/json")
-            doOutput = true
-            connectTimeout = 10000
-            readTimeout = 10000
-        }
+    private suspend fun httpPost(path: String, body: JSONObject): String {
+        return withContext(Dispatchers.IO) {
+            try {
+                val requestBody = body.toString()
+                    .toRequestBody("application/json; charset=utf-8".toMediaType())
 
-        try {
-            conn.outputStream.use { os ->
-                val input = body.toString().toByteArray(Charsets.UTF_8)
-                os.write(input, 0, input.size)
-            }
+                val request = Request.Builder()
+                    .url("$baseUrl$path")
+                    .addHeader("Authorization", "Bearer $token")
+                    .addHeader("Content-Type", "application/json")
+                    .post(requestBody)
+                    .build()
 
-            val responseCode = conn.responseCode
-            return try {
-                // BUG FIX: Use errorStream for non-200 responses to avoid IOException.
-                // Added .use {} to close BufferedReader and prevent resource leaks.
-                val stream = if (responseCode in 200..299) conn.inputStream else conn.errorStream
-                stream?.bufferedReader()?.use { it.readText() } ?: ""
+                val response = httpClient.newCall(request).execute()
+                val responseBody = try {
+                    response.body?.string() ?: ""
+                } catch (e: Exception) {
+                    "" // Some responses have empty body
+                }
+                response.close()
+                responseBody
             } catch (e: Exception) {
-                "" // Some responses have empty body
+                Log.e(TAG, "HTTP POST $path failed", e)
+                ""
             }
-        } finally {
-            conn.disconnect()
         }
     }
 }

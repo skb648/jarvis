@@ -4,7 +4,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
-import android.net.wifi.WifiManager
 import android.provider.AlarmClock
 import android.provider.CalendarContract
 import android.provider.Settings
@@ -278,35 +277,58 @@ object MacroEngine {
 
     // ─── Action Implementations ────────────────────────────────────────
 
-    @Suppress("DEPRECATION")
+    /**
+     * Toggle WiFi on/off.
+     *
+     * Uses Shizuku exclusively for toggling. On Android 10+ (API 29),
+     * WifiManager.isWifiEnabled is deprecated and no longer works for third-party apps.
+     * If Shizuku is unavailable, opens WiFi settings as a fallback so the user can
+     * toggle manually — this is the correct behavior per Android guidelines.
+     */
     private fun setWifi(enable: Boolean, context: Context): Boolean {
         return try {
+            // Try Shizuku first (can actually toggle WiFi programmatically)
             if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
                 val result = ShizukuManager.toggleWifi(enable)
-                result.isSuccess
-            } else {
-                // Fallback: try WifiManager (works on older Android)
-                val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                wifiManager.isWifiEnabled = enable
-                true
+                if (result.isSuccess) return true
             }
+            // Fallback: open WiFi settings so the user can toggle manually.
+            // Cannot toggle WiFi without Shizuku on Android 10+.
+            Log.w(TAG, "[setWifi] Shizuku unavailable — opening WiFi settings for manual toggle")
+            val intent = Intent(Settings.ACTION_WIFI_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            false
         } catch (e: Exception) {
             Log.e(TAG, "[setWifi] Error: ${e.message}")
             false
         }
     }
 
+    /**
+     * Toggle Bluetooth on/off.
+     *
+     * Uses Shizuku exclusively for toggling. On Android 13+ (API 33),
+     * BluetoothAdapter.enable()/disable() is deprecated and requires
+     * BLUETOOTH_PRIVILEGED permission unavailable to third-party apps.
+     * If Shizuku is unavailable, opens Bluetooth settings as a fallback.
+     */
     private fun setBluetooth(enable: Boolean, context: Context): Boolean {
         return try {
+            // Try Shizuku first (can actually toggle Bluetooth programmatically)
             if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
                 val result = ShizukuManager.toggleBluetooth(enable)
-                result.isSuccess
-            } else {
-                // Fallback: try via BluetoothAdapter
-                val adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
-                if (enable) adapter?.enable() else adapter?.disable()
-                true
+                if (result.isSuccess) return true
             }
+            // Fallback: open Bluetooth settings so the user can toggle manually.
+            // Cannot toggle Bluetooth without Shizuku on Android 13+.
+            Log.w(TAG, "[setBluetooth] Shizuku unavailable — opening Bluetooth settings for manual toggle")
+            val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            false
         } catch (e: Exception) {
             Log.e(TAG, "[setBluetooth] Error: ${e.message}")
             false

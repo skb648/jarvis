@@ -7,6 +7,9 @@ import android.os.Build
 import android.util.Log
 import com.jarvis.assistant.channels.JarviewModel
 import com.jarvis.assistant.shizuku.ShizukuManager
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Gesture Controller — Unified gesture execution interface.
@@ -134,33 +137,48 @@ object GestureController {
     // ─── Gesture Dispatch ───────────────────────────────────────
 
     /**
-     * BUG FIX: dispatchGesture() now returns whether the dispatch was
-     * INITIATED successfully (not the async completion result).
+     * Dispatch a gesture and WAIT for it to actually complete (or be cancelled)
+     * before returning, using CountDownLatch + GestureResultCallback.
      *
-     * The previous code had a critical bug: it set `result = true/false`
-     * in the async callback but always returned `true` from the function.
-     * Since GestureResultCallback is async and the result is set AFTER
-     * the function returns, the local `result` variable was never read.
+     * Returns true only if onCompleted() was called.
+     * Returns false if onCancelled() was called, dispatch failed to initiate,
+     * or the gesture timed out after 5 seconds.
      *
-     * The correct behavior is:
-     *   - Return `true` if dispatchGesture() was called without throwing
-     *   - The actual gesture result is available via the callback
-     *   - Callers should check the callback or use a suspend function
-     *     for completion tracking
+     * Thread-safe: uses AtomicBoolean for the result and CountDownLatch
+     * for synchronization between the callback and the calling thread.
      */
     private fun dispatchGesture(service: AccessibilityService, gesture: GestureDescription): Boolean {
         return try {
+            val completed = AtomicBoolean(false)
+            val latch = CountDownLatch(1)
+
             val callback = object : AccessibilityService.GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
-                    Log.d(TAG, "Gesture completed")
+                    completed.set(true)
+                    latch.countDown()
+                    Log.d(TAG, "Gesture completed successfully")
                 }
                 override fun onCancelled(gestureDescription: GestureDescription?) {
-                    Log.w(TAG, "Gesture cancelled")
+                    completed.set(false)
+                    latch.countDown()
+                    Log.w(TAG, "Gesture cancelled by system")
                 }
             }
 
-            // Returns true if the dispatch was initiated successfully
-            service.dispatchGesture(gesture, callback, null)
+            val dispatchInitiated = service.dispatchGesture(gesture, callback, null)
+            if (!dispatchInitiated) {
+                Log.w(TAG, "Gesture dispatch failed to initiate")
+                return false
+            }
+
+            // Wait up to 5 seconds for the gesture to complete
+            val finished = latch.await(5, TimeUnit.SECONDS)
+            if (!finished) {
+                Log.w(TAG, "Gesture timed out after 5 seconds")
+                return false
+            }
+
+            completed.get()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to dispatch gesture", e)
             false

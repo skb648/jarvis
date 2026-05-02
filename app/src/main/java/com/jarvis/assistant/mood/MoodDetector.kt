@@ -7,10 +7,22 @@ import kotlin.math.sqrt
 /**
  * MoodDetector — Detects user mood from voice audio features.
  *
- * Analyzes PCM audio to extract prosodic features and classify the
- * speaker's emotional state. This enables JARVIS to respond with
- * empathy — suggesting music when stressed, offering encouragement
- * when sad, or matching excitement.
+ * ═══════════════════════════════════════════════════════════════════════
+ * ⚠️  DISCLAIMER — ACCURACY LIMITATIONS:
+ *
+ * Rule-based mood detection from simple audio features (pitch, volume,
+ * speech rate, energy variation) is inherently unreliable. These features
+ * are noisy proxies for emotional state and can produce essentially random
+ * classifications, especially in short or quiet utterances.
+ *
+ * Confidence scores are NOT calibrated and should NOT be used to make
+ * significant UX decisions. They are intentionally conservative (capped
+ * low) to prevent over-reliance on unreliable classifications.
+ *
+ * Results below the MIN_CONFIDENCE_THRESHOLD are reported as "neutral"
+ * to reduce misclassification. For production-grade emotion detection,
+ * consider using a trained ML model (e.g., SER deep learning models).
+ * ═══════════════════════════════════════════════════════════════════════
  *
  * Features analyzed:
  *   - Pitch (F0): High = excited/stressed, Low = calm/sad
@@ -23,6 +35,21 @@ import kotlin.math.sqrt
 object MoodDetector {
 
     private const val TAG = "MoodDetector"
+
+    /**
+     * Minimum confidence threshold. Results below this are reported as "neutral"
+     * to avoid misclassification from unreliable rule-based scoring.
+     * Keep this relatively high (0.35+) since the rule-based scores are noisy.
+     */
+    private const val MIN_CONFIDENCE_THRESHOLD = 0.35f
+
+    /**
+     * Maximum confidence cap. Even when the rule-based scorer produces a high
+     * gap between scores, we cap confidence to signal that this method is
+     * fundamentally imprecise. Users of this API should treat anything above
+     * this cap with skepticism.
+     */
+    private const val MAX_CONFIDENCE_CAP = 0.7f
 
     /** Valid mood values */
     val VALID_MOODS = setOf(
@@ -253,20 +280,36 @@ object MoodDetector {
         val bestMood = scores.maxByOrNull { it.value }?.key ?: "neutral"
         val bestScore = scores[bestMood] ?: 0.4f
 
-        // Confidence is the gap between best and second-best score
+        // Confidence is the gap between best and second-best score.
+        // Apply conservative cap — rule-based scoring is inherently imprecise.
         val sortedScores = scores.values.sortedDescending()
-        val confidence = if (sortedScores.size >= 2) {
-            (sortedScores[0] - sortedScores[1]).coerceIn(0.1f, 1.0f)
+        val rawConfidence = if (sortedScores.size >= 2) {
+            (sortedScores[0] - sortedScores[1]).coerceIn(0.05f, 1.0f)
         } else {
-            0.3f
+            0.1f
         }
 
-        val suggestedAction = getSuggestedAction(bestMood)
+        // Cap confidence to signal that rule-based detection is unreliable
+        val confidence = rawConfidence.coerceAtMost(MAX_CONFIDENCE_CAP)
 
-        Log.i(TAG, "[classifyMood] mood=$bestMood confidence=$confidence scores=$scores")
+        // If confidence is below the minimum threshold, report "neutral" instead
+        // of a potentially misclassified mood. This prevents actions like
+        // "play_calm_music" from firing on essentially random classifications.
+        val finalMood = if (confidence < MIN_CONFIDENCE_THRESHOLD) "neutral" else bestMood
+        val finalConfidence = if (confidence < MIN_CONFIDENCE_THRESHOLD) {
+            // Report a very low confidence for neutral when we fell back
+            confidence * 0.5f
+        } else {
+            confidence
+        }
+
+        val suggestedAction = getSuggestedAction(finalMood)
+
+        Log.i(TAG, "[classifyMood] mood=$finalMood confidence=$finalConfidence " +
+                "(rawConfidence=$rawConfidence, bestMood=$bestMood) scores=$scores")
         return MoodResult(
-            mood = bestMood,
-            confidence = confidence,
+            mood = finalMood,
+            confidence = finalConfidence,
             suggestedAction = suggestedAction
         )
     }

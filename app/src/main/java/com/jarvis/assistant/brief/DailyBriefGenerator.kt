@@ -246,8 +246,40 @@ object DailyBriefGenerator {
     private suspend fun getWeather(context: Context): String {
         return withContext(Dispatchers.IO) {
             try {
-                // Try OpenMeteo (no API key needed, IP-based location)
-                val url = URL("https://api.open-meteo.com/v1/forecast?latitude=28.6&longitude=77.2&current_weather=true&timezone=auto")
+                // Resolve location: try device GPS first, then IP geolocation, then default (Delhi)
+                var lat = 28.6   // Default: Delhi
+                var lon = 77.2
+
+                // Try to get user's location from LocationAwarenessManager
+                try {
+                    val location = com.jarvis.assistant.location.LocationAwarenessManager.getCurrentLocation(context)
+                    if (location != null) {
+                        lat = location.latitude
+                        lon = location.longitude
+                        Log.i(TAG, "[getWeather] Using device location: $lat, $lon")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "[getWeather] Device location not available, trying IP geolocation: ${e.message}")
+                    // Try IP-based geolocation via ipapi.co (free, no key needed)
+                    try {
+                        val geoUrl = URL("https://ipapi.co/json/")
+                        val geoConn = geoUrl.openConnection() as HttpURLConnection
+                        geoConn.requestMethod = "GET"
+                        geoConn.connectTimeout = 3000
+                        geoConn.readTimeout = 3000
+                        if (geoConn.responseCode == 200) {
+                            val geoResponse = geoConn.inputStream.bufferedReader().readText()
+                            val geoJson = JSONObject(geoResponse)
+                            lat = geoJson.optDouble("latitude", lat)
+                            lon = geoJson.optDouble("longitude", lon)
+                            Log.i(TAG, "[getWeather] IP geolocation: $lat, $lon")
+                        }
+                        geoConn.disconnect()
+                    } catch (_: Exception) {}
+                }
+
+                // Try OpenMeteo (no API key needed)
+                val url = URL("https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current_weather=true&timezone=auto")
                 val connection = url.openConnection() as HttpURLConnection
                 connection.requestMethod = "GET"
                 connection.connectTimeout = 8_000
@@ -474,12 +506,9 @@ Generate the brief:"""
             return try {
                 Log.i(TAG, "[DailyBriefWorker] Executing morning brief")
 
-                // Get API key from DataStore
+                // Get API key from JarviewModel (in-memory cache, always synced with DataStore)
                 val context = applicationContext
-                val apiKey = try {
-                    val prefs = context.getSharedPreferences("jarvis_settings_apikey_cache", Context.MODE_PRIVATE)
-                    prefs.getString("groq_api_key", "") ?: ""
-                } catch (_: Exception) { "" }
+                val apiKey = com.jarvis.assistant.channels.JarviewModel.groqApiKey
 
                 val brief = generateBrief(context, apiKey)
 

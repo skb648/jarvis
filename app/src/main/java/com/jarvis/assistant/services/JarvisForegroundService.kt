@@ -36,7 +36,7 @@ class JarvisForegroundService : Service() {
 
     companion object {
         private const val TAG = "JarvisForeground"
-        private const val CHANNEL_ID = "jarvis_always_listening"
+        private const val CHANNEL_ID = JarvisNotificationChannels.CHANNEL_JARVIS_SERVICES
         private const val NOTIFICATION_ID = 1001
         const val ACTION_START = "com.jarvis.assistant.FOREGROUND_START"
         const val ACTION_STOP = "com.jarvis.assistant.FOREGROUND_STOP"
@@ -120,17 +120,7 @@ class JarvisForegroundService : Service() {
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "JARVIS Always Listening",
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "JARVIS is always listening for your voice commands"
-            setShowBadge(false)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        }
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(channel)
+        JarvisNotificationChannels.ensureChannels(this)
     }
 
     private fun buildNotification(text: String): Notification {

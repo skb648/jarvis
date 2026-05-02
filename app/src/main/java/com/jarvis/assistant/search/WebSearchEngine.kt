@@ -34,7 +34,7 @@ import java.net.URLEncoder
  *   "1. [Title](URL)\n   Snippet text...\n\n2. ..."
  * ═══════════════════════════════════════════════════════════════════════
  */
-class WebSearchEngine {
+object WebSearchEngine {
 
     companion object {
         private const val TAG = "WebSearchEngine"

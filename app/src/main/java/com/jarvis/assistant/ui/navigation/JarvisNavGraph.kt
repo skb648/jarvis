@@ -143,6 +143,8 @@ fun JarvisNavGraph(
     onToggleMusicPlayback: () -> Unit = {},
     // Export chat callback
     onExportChat: () -> Unit = {},
+    // MQTT Connect callback
+    onMqttConnect: () -> Unit = {},
     // Computer Use state
     computerUseActive: Boolean = false,
     cursorX: Float = 0.5f,
@@ -191,6 +193,9 @@ fun JarvisNavGraph(
             }
             "music" -> {
                 onToggleMusicPlayer()
+            }
+            "daily_brief" -> {
+                onQuickAction("daily_brief")
             }
             else -> onQuickAction(action)
         }
@@ -277,7 +282,8 @@ fun JarvisNavGraph(
                     engineStatusText = engineStatusText,
                     locationContext = locationContext,
                     batteryLevel = diagnosticsBatteryLevel,
-                    isCharging = diagnosticsIsCharging
+                    isCharging = diagnosticsIsCharging,
+                    onRequestDailyBrief = { onQuickAction("daily_brief") }
                 )
             }
             composable("assistant") {
@@ -331,7 +337,9 @@ fun JarvisNavGraph(
                     homeAssistantUrl = homeAssistantUrl,
                     homeAssistantToken = homeAssistantToken,
                     onHomeAssistantUrlChange = onHomeAssistantUrlChange,
-                    onHomeAssistantTokenChange = onHomeAssistantTokenChange
+                    onHomeAssistantTokenChange = onHomeAssistantTokenChange,
+                    // Wire MQTT connect button to actual reconnection logic
+                    onMqttConnect = onMqttConnect
                 )
             }
             composable("notes") {

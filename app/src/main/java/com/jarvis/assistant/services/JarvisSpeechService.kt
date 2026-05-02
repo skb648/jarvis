@@ -42,7 +42,7 @@ class JarvisSpeechService : Service() {
 
     companion object {
         private const val TAG = "JarvisSpeech"
-        private const val CHANNEL_ID = "jarvis_speech_channel"
+        private const val CHANNEL_ID = JarvisNotificationChannels.CHANNEL_JARVIS_SERVICES
         private const val NOTIFICATION_ID = 2001
         const val ACTION_START = "com.jarvis.assistant.SPEECH_START"
         const val ACTION_STOP = "com.jarvis.assistant.SPEECH_STOP"
@@ -102,16 +102,7 @@ class JarvisSpeechService : Service() {
     // ─── Foreground Notification ────────────────────────────────
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "JARVIS Voice Service",
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "Silent background voice monitoring"
-            setShowBadge(false)
-        }
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(channel)
+        JarvisNotificationChannels.ensureChannels(this)
     }
 
     private fun buildNotification(text: String): Notification {

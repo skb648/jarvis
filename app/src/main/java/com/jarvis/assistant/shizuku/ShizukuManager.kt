@@ -4,11 +4,33 @@ import android.app.Activity
 import android.content.pm.PackageManager
 import android.util.Log
 import rikka.shizuku.Shizuku
+import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
  * JARVIS Shizuku Manager — ADB-level system control without root.
+ *
+ * CRITICAL FIX (C1): Silent ADB privilege degradation on Shizuku 13+.
+ *
+ * Prior behaviour: When Shizuku.newProcess() was unavailable (Shizuku 13+),
+ * the code fell back to Runtime.getRuntime().exec() which runs commands
+ * WITHOUT ADB privileges. Commands like `svc wifi enable`, `settings put`,
+ * `input tap`, and `screencap` would silently fail — the process exited
+ * with code 0 but the command never executed with ADB rights.
+ *
+ * Fix:
+ *   1. Added requiresAdbPrivileges() — classifies commands that need ADB.
+ *   2. newProcess() now tries multiple Shizuku 13+ approaches and clearly
+ *      tracks whether ADB privileges were obtained.  It no longer silently
+ *      degrades; it still falls back to Runtime.exec() for commands that
+ *      don't require ADB, but flags the privilege state.
+ *   3. executeShellCommand() now checks the ADB requirement BEFORE and
+ *      AFTER execution. If a command requires ADB and we don't have it,
+ *      a FAILED ShellResult is returned with a clear error message
+ *      instead of a fake success.
  *
  * CRITICAL FIX (v4): Reader threads are now joined BEFORE reading exitValue.
  * Previously, exitValue() was called immediately after waitFor() returned,
@@ -29,6 +51,10 @@ object ShizukuManager {
         val exitCode: Int,
         val isSuccess: Boolean
     )
+
+    // ──────────────────────────────────────────────────────────────
+    // Shizuku lifecycle
+    // ──────────────────────────────────────────────────────────────
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
         Log.i(TAG, "Shizuku binder received — ADB access available")
@@ -68,6 +94,10 @@ object ShizukuManager {
         }
     }
 
+    // ──────────────────────────────────────────────────────────────
+    // Permission & readiness checks
+    // ──────────────────────────────────────────────────────────────
+
     fun isReady(): Boolean = try { pingBinder() } catch (_: Exception) { false }
 
     fun pingBinder(): Boolean = try { Shizuku.pingBinder() } catch (e: Exception) {
@@ -88,6 +118,10 @@ object ShizukuManager {
         catch (e: Exception) { Log.e(TAG, "Failed to request Shizuku permission", e) }
     }
 
+    // ──────────────────────────────────────────────────────────────
+    // State change notification
+    // ──────────────────────────────────────────────────────────────
+
     private fun notifyShizukuStateChanged(available: Boolean) {
         _shizukuStateListener?.invoke(available && hasPermission())
     }
@@ -99,23 +133,92 @@ object ShizukuManager {
     }
 
     /**
-     * CRITICAL FIX (C7): Replaced reflection-only newProcess() with multi-fallback approach.
-     *
-     * Shizuku 13+ removed the public newProcess() method, causing ALL shell commands
-     * to fail with a RuntimeException on modern Shizuku versions. This fix provides
-     * three fallback strategies:
-     *   1. Try the legacy Shizuku.newProcess() via reflection (Shizuku < 13)
-     *   2. Use Shizuku's binder to verify connectivity, then fall back to Runtime.exec()
-     *   3. Last resort: plain Runtime.exec() without ADB privileges
-     */
-    /**
      * Returns whether the last shell command was executed with ADB privileges.
-     * If false, commands that require ADB (like `svc wifi enable`) may have failed silently.
+     * If false, commands that require ADB (like `svc wifi enable`) will have
+     * been rejected rather than silently failing.
      */
     fun isRunningWithAdb(): Boolean = isRunningWithAdbPrivileges
 
+    // ──────────────────────────────────────────────────────────────
+    // ADB privilege classification
+    // ──────────────────────────────────────────────────────────────
+
+    /**
+     * Determines whether a shell command requires ADB privileges to work
+     * correctly.  Commands that merely query state (e.g. `getprop`,
+     * `settings get`) typically work without ADB, whereas commands that
+     * change system state (e.g. `svc wifi enable`, `pm grant`) require ADB.
+     *
+     * CRITICAL (C1): This classification is the key to preventing silent
+     * failures.  Commands that require ADB but are run without it will
+     * appear to succeed (exit code 0) but have no effect.
+     */
+    private fun requiresAdbPrivileges(command: String): Boolean {
+        val cmdLower = command.lowercase().trim()
+
+        // Remove leading "sh -c " wrapper if present
+        val stripped = cmdLower.removePrefix("sh -c ").removePrefix("sh-c")
+
+        // Commands that ALWAYS need ADB privileges
+        return stripped.startsWith("svc ") ||                    // svc wifi/bt/data enable/disable
+               stripped.startsWith("settings put") ||            // settings put global/system/secure
+               stripped.startsWith("settings delete") ||         // settings delete
+               stripped.startsWith("pm grant") ||                // pm grant <pkg> <perm>
+               stripped.startsWith("pm revoke") ||               // pm revoke <pkg> <perm>
+               stripped.startsWith("pm install") ||              // pm install
+               stripped.startsWith("pm uninstall") ||            // pm uninstall
+               stripped.startsWith("pm clear") ||                // pm clear
+               stripped.startsWith("pm disable") ||              // pm disable-user
+               stripped.startsWith("pm enable") ||               // pm enable
+               stripped.startsWith("pm hide") ||                 // pm hide
+               stripped.startsWith("pm unhide") ||               // pm unhide
+               stripped.startsWith("screencap") ||               // screencap -p <path>
+               stripped.startsWith("screenrecord") ||            // screenrecord
+               stripped.startsWith("cmd ") ||                    // cmd wifi/bt/etc.
+               stripped.startsWith("dumpsys ") ||                // dumpsys (varies, but typically needs ADB)
+               stripped.startsWith("am force-stop") ||           // am force-stop
+               stripped.startsWith("am kill") ||                 // am kill
+               stripped.startsWith("am kill-all") ||             // am kill-all
+               stripped.startsWith("setprop ") ||                // setprop
+               stripped.startsWith("input tap") ||               // input tap (needs INJECT_EVENTS)
+               stripped.startsWith("input swipe") ||             // input swipe (needs INJECT_EVENTS)
+               stripped.startsWith("input drag") ||              // input drag (needs INJECT_EVENTS)
+               stripped.startsWith("input press") ||             // input press (needs INJECT_EVENTS)
+               stripped.startsWith("input roll") ||              // input roll (needs INJECT_EVENTS)
+               stripped.startsWith("input text") ||              // input text (needs INJECT_EVENTS)
+               stripped.startsWith("input keyevent") ||           // input keyevent (needs INJECT_EVENTS)
+               stripped.startsWith("service call ") ||           // service call (needs ADB)
+               stripped.contains("android.shell") ||             // Shell service access
+               stripped.startsWith("media volume")              // media volume --set (needs ADB on most devices)
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Process creation with ADB privilege tracking
+    // ──────────────────────────────────────────────────────────────
+
+    /**
+     * CRITICAL FIX (C1): Multi-strategy process creation for Shizuku 13+.
+     *
+     * Strategy 1 — Legacy reflection: Shizuku.newProcess() via reflection.
+     *   Works on Shizuku < 13. Returns a true ADB-privileged Process.
+     *
+     * Strategy 2 — Shizuku 13+ internal API: Try to access Shizuku's
+     *   internal process creation through the ShizukuProvider class.
+     *   This is a best-effort attempt and may not work on all versions.
+     *
+     * Strategy 3 — Runtime.exec() fallback: Used ONLY for commands that
+     *   do NOT require ADB privileges. For ADB-required commands, a
+     *   FakeErrorProcess is returned that immediately reports failure
+     *   instead of silently pretending to succeed.
+     *
+     * The isRunningWithAdbPrivileges flag is set truthfully after each
+     * attempt so that executeShellCommand() can make the right decision.
+     */
     private fun newProcess(cmd: Array<String>, env: Array<String>? = null, dir: String? = null): Process {
-        // Method 1: Try the public Shizuku.newProcess() API first (Shizuku < 13)
+        val command = cmd.joinToString(" ")
+        val needsAdb = requiresAdbPrivileges(command)
+
+        // ── Strategy 1: Legacy Shizuku.newProcess() via reflection (Shizuku < 13) ──
         try {
             val method = Shizuku::class.java.getDeclaredMethod(
                 "newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java
@@ -124,64 +227,165 @@ object ShizukuManager {
             val result = method.invoke(null, cmd, env, dir)
             if (result is Process) {
                 isRunningWithAdbPrivileges = true
+                Log.d(TAG, "newProcess: Strategy 1 (legacy reflection) succeeded — ADB privileges: true")
                 return result
             }
         } catch (e: NoSuchMethodException) {
-            Log.d(TAG, "Shizuku.newProcess() not available (Shizuku 13+) — using binder approach")
+            Log.d(TAG, "newProcess: Strategy 1 — Shizuku.newProcess() not available (Shizuku 13+)")
         } catch (e: Exception) {
-            Log.w(TAG, "Shizuku.newProcess() reflection failed: ${e.message}")
+            Log.w(TAG, "newProcess: Strategy 1 failed — ${e.message}")
         }
 
-        // Method 2: Use Shizuku's binder to execute shell commands
-        // Create a process via Runtime.exec() that uses Shizuku's shell
+        // ── Strategy 2: Shizuku 13+ — try internal APIs ──
         try {
-            val command = cmd.joinToString(" ")
-            // Use Shizuku's binder-based execution
             val binder = Shizuku.getBinder()
             if (binder != null && binder.pingBinder()) {
-                // Execute via Shizuku's shell - construct a Process that runs through Shizuku
-                // The proper way in Shizuku 13+ is to use IUserManager/IActivityManager via binder
-                // But for shell commands, we can use the rikka.shizuku.Shizuku helper
 
-                // Try the newer API: Shizuku.executeShellCommand (available in newer versions)
+                // 2a: Try ShizukuProvider's internal exec method
                 try {
-                    val execMethod = Shizuku::class.java.getDeclaredMethod("executeShellCommand", String::class.java)
+                    val providerClass = Class.forName("rikka.shizuku.ShizukuProvider")
+                    val execMethod = providerClass.getDeclaredMethod("exec", Array<String>::class.java)
                     execMethod.isAccessible = true
-                    val execResult = execMethod.invoke(null, command)
-                    if (execResult != null) {
-                        // This returns void in some versions; not a Process
+                    val procResult = execMethod.invoke(null, cmd)
+                    if (procResult is Process) {
+                        isRunningWithAdbPrivileges = true
+                        Log.d(TAG, "newProcess: Strategy 2a (ShizukuProvider.exec) succeeded — ADB privileges: true")
+                        return procResult
                     }
-                } catch (_: Exception) {}
+                } catch (e: ClassNotFoundException) {
+                    Log.d(TAG, "newProcess: Strategy 2a — ShizukuProvider class not found")
+                } catch (e: NoSuchMethodException) {
+                    Log.d(TAG, "newProcess: Strategy 2a — ShizukuProvider.exec() not found")
+                } catch (e: Exception) {
+                    Log.d(TAG, "newProcess: Strategy 2a failed — ${e.message}")
+                }
 
-                // Fallback: Use Runtime.exec with Shizuku's permission context
-                // Since we have Shizuku binder, we can use am/instrument approach
-                // But the most reliable approach is to just use Runtime.exec with "sh -c"
-                // and rely on the fact that Shizuku provider gives us system-level access
-                isRunningWithAdbPrivileges = false
-                return Runtime.getRuntime().exec(cmd)
+                // 2b: Try Shizuku's hidden newProcess via the ShizukuService class
+                try {
+                    val serviceClass = Class.forName("rikka.shizuku.ShizukuService")
+                    // ShizukuService has a static method to create processes via binder
+                    for (methodName in listOf("newProcess", "executeCommand", "createProcess")) {
+                        try {
+                            val method = serviceClass.getDeclaredMethod(
+                                methodName, Array<String>::class.java, Array<String>::class.java, String::class.java
+                            )
+                            method.isAccessible = true
+                            val result = method.invoke(null, cmd, env, dir)
+                            if (result is Process) {
+                                isRunningWithAdbPrivileges = true
+                                Log.d(TAG, "newProcess: Strategy 2b ($methodName) succeeded — ADB privileges: true")
+                                return result
+                            }
+                        } catch (_: NoSuchMethodException) { /* try next method name */ }
+                    }
+                } catch (e: ClassNotFoundException) {
+                    Log.d(TAG, "newProcess: Strategy 2b — ShizukuService class not found")
+                } catch (e: Exception) {
+                    Log.d(TAG, "newProcess: Strategy 2b failed — ${e.message}")
+                }
+
+                // 2c: Binder is alive but we couldn't find a process-creation API.
+                //     Fall through to Strategy 3 with clear flagging.
+                Log.w(TAG, "newProcess: Shizuku binder is alive but no process-creation API found (Shizuku 13+)")
+            } else {
+                Log.w(TAG, "newProcess: Shizuku binder is null or not responding")
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Binder-based execution failed: ${e.message}")
+            Log.w(TAG, "newProcess: Strategy 2 failed — ${e.message}")
         }
 
-        // Method 3: Last resort — use regular Runtime.exec (won't have ADB privileges)
-        // This at least allows some commands to work
-        Log.w(TAG, "Falling back to Runtime.exec — commands may not have ADB privileges")
+        // ── Strategy 3: Runtime.exec() fallback ──
+        // IMPORTANT (C1 FIX): If the command requires ADB and we don't have it,
+        // we MUST NOT silently return a Runtime.exec() process that will appear
+        // to succeed (exit 0) but won't actually execute the command with ADB.
         isRunningWithAdbPrivileges = false
+
+        if (needsAdb) {
+            // Command requires ADB but we can't provide it — return a process
+            // that immediately reports failure instead of faking success.
+            Log.e(TAG, "newProcess: Command '$command' requires ADB privileges but none available. " +
+                       "Returning explicit failure instead of silent degradation.")
+            return FakeErrorProcess(
+                "ADB privileges not available. Command '$command' requires ADB access. " +
+                "Ensure Shizuku is running and permission is granted. " +
+                "On Shizuku 13+, the newProcess() API may be unavailable — " +
+                "check Shizuku version compatibility."
+            )
+        }
+
+        // Command does NOT require ADB — Runtime.exec() is fine
+        Log.d(TAG, "newProcess: Falling back to Runtime.exec() (command does not require ADB)")
         return Runtime.getRuntime().exec(cmd)
     }
 
     /**
-     * CRITICAL FIX (v4):
-     * Reader threads joined BEFORE calling process.exitValue().
+     * A fake Process that immediately reports an error via stderr and exits
+     * with code -1.  Used when a command requires ADB privileges but we
+     * cannot provide them — this prevents the silent-failure bug where
+     * Runtime.exec() would return exit code 0 despite the command having
+     * no effect.
+     */
+    private class FakeErrorProcess(errorMessage: String) : Process() {
+        private val errorBytes = errorMessage.toByteArray(Charsets.UTF_8)
+        private val _inputStream = ByteArrayInputStream(ByteArray(0))  // empty stdout
+        private val _errorStream = ByteArrayInputStream(errorBytes)     // error on stderr
+        override fun getOutputStream(): OutputStream = object : OutputStream() {
+            override fun write(b: Int) { /* discard */ }
+        }
+        override fun getInputStream(): InputStream = _inputStream
+        override fun getErrorStream(): InputStream = _errorStream
+        override fun waitFor(): Int = -1
+        override fun exitValue(): Int = -1
+        override fun destroy() { /* no-op */ }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Shell command execution
+    // ──────────────────────────────────────────────────────────────
+
+    /**
+     * Execute a shell command through Shizuku with ADB privileges.
+     *
+     * CRITICAL FIX (C1): If a command requires ADB privileges but we
+     * cannot obtain them, this method now returns a FAILED ShellResult
+     * with a clear error message instead of silently returning a fake
+     * success (exit code 0 with empty output).
+     *
+     * CRITICAL FIX (v4): Reader threads joined BEFORE calling process.exitValue().
      */
     fun executeShellCommand(command: String): ShellResult {
         Log.d(TAG, "[executeShellCommand] command=\"$command\"")
         if (!isReady()) return ShellResult("", "Shizuku not ready", -1, false)
         if (!hasPermission()) return ShellResult("", "Shizuku permission not granted", -1, false)
 
+        // Pre-flight check: if this command requires ADB and we already know
+        // we don't have it, fail fast with a clear message.
+        val needsAdb = requiresAdbPrivileges(command)
+        if (needsAdb && !isRunningWithAdbPrivileges) {
+            // Attempt a quick probe: try creating a test process to see if
+            // Shizuku has become available since the last attempt.
+            val testProc = try {
+                newProcess(arrayOf("sh", "-c", "echo adb_test"), null, null)
+            } catch (_: Exception) { null }
+            if (testProc != null) {
+                try { testProc.destroy() } catch (_: Exception) {}
+            }
+            // If the probe didn't give us ADB, newProcess() will have returned
+            // a FakeErrorProcess and isRunningWithAdbPrivileges is still false.
+        }
+
         return try {
             val process = newProcess(arrayOf("sh", "-c", command), null, null)
+
+            // If newProcess returned a FakeErrorProcess, we know ADB is unavailable.
+            // The FakeErrorProcess streams will contain the error message.
+            val isFakeError = !isRunningWithAdbPrivileges && needsAdb && process is FakeErrorProcess
+            if (isFakeError) {
+                // Read the error from the fake process's stderr
+                val errorStderr = process.errorStream.bufferedReader().use { it.readText().trim() }
+                Log.e(TAG, "[executeShellCommand] ADB required but unavailable: $command")
+                return ShellResult("", errorStderr, -1, false)
+            }
 
             val stdoutRef = AtomicReference("")
             val stderrRef = AtomicReference("")
@@ -201,7 +405,7 @@ object ShizukuManager {
 
             val completed = process.waitFor(SHELL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
 
-            // CRITICAL FIX: Join reader threads BEFORE reading exitValue.
+            // CRITICAL FIX (v4): Join reader threads BEFORE reading exitValue.
             Log.d(TAG, "[executeShellCommand] waitFor completed=$completed — joining reader threads")
             stdoutThread.join(THREAD_JOIN_TIMEOUT_MS)
             stderrThread.join(THREAD_JOIN_TIMEOUT_MS)
@@ -223,15 +427,36 @@ object ShizukuManager {
             val stdout = stdoutRef.get()
             val stderr = stderrRef.get()
 
+            // Post-execution ADB privilege check (C1 FIX):
+            // If the command requires ADB and we didn't have privileges,
+            // return a FAILED result even if the process exited with code 0.
+            // This prevents silent failures where Runtime.exec() returns 0
+            // but the command had no effect.
+            if (needsAdb && !isRunningWithAdbPrivileges) {
+                Log.e(TAG, "[executeShellCommand] Command '$command' requires ADB but was executed without it. " +
+                           "Result is unreliable — returning failure.")
+                val explicitError = "ADB privileges not available for command '$command'. " +
+                                    "The command was not executed with ADB access and the result is unreliable. " +
+                                    "Ensure Shizuku is properly configured."
+                return ShellResult(
+                    stdout,
+                    if (stderr.isEmpty()) explicitError else "$explicitError\n$stderr",
+                    -1,
+                    false
+                )
+            }
+
+            // For commands that don't require ADB, add a warning if we're
+            // running without ADB (informational only — command may still work)
             val effectiveStderr = if (!isRunningWithAdbPrivileges && stderr.isEmpty()) {
-                "WARNING: Command executed without ADB privileges — results may be incorrect"
+                "WARNING: Executed without ADB privileges — results may be incomplete"
             } else if (!isRunningWithAdbPrivileges) {
                 "WARNING: No ADB privileges. $stderr"
             } else {
                 stderr
             }
 
-            Log.d(TAG, "[executeShellCommand] Result: exit=$exitCode stdout_len=${stdout.length} stderr_len=${effectiveStderr.length}")
+            Log.d(TAG, "[executeShellCommand] Result: exit=$exitCode stdout_len=${stdout.length} stderr_len=${effectiveStderr.length} adb=$isRunningWithAdbPrivileges")
             ShellResult(stdout, effectiveStderr, exitCode, exitCode == 0)
         } catch (e: SecurityException) {
             Log.e(TAG, "[executeShellCommand] Shizuku permission denied: $command", e)
@@ -241,6 +466,10 @@ object ShizukuManager {
             ShellResult("", e.message ?: "Unknown error", -1, false)
         }
     }
+
+    // ──────────────────────────────────────────────────────────────
+    // High-level command helpers
+    // ──────────────────────────────────────────────────────────────
 
     fun toggleWifi(enable: Boolean): ShellResult {
         val state = if (enable) "enable" else "disable"

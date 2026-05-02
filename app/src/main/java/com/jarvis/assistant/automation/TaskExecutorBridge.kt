@@ -333,9 +333,8 @@ object TaskExecutorBridge {
                     }
                 }
             }
-            // Final fallback: just try tap
-            val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENTER")
-            return if (result.isSuccess) StepResult.Success("Attempted press via Shizuku for '$label'") else StepResult.Failed("All click methods failed for '$label'")
+            // No valid fallback — KEYCODE_ENTER does not click a button
+            return StepResult.Failed("All click methods failed for '$label'")
         }
 
         return StepResult.Failed("Could not click '$label' — enable Accessibility Service or Shizuku")
@@ -394,9 +393,16 @@ object TaskExecutorBridge {
         // Fallback: Shizuku shell command for swipe-based scrolling
         if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
             Log.i(TAG, "[scroll] Accessibility failed, trying Shizuku fallback for $direction")
+            val sw = com.jarvis.assistant.channels.JarviewModel.screenWidth
+            val sh = com.jarvis.assistant.channels.JarviewModel.screenHeight
+            // Fallback to 1080x1920 if screen dimensions not yet populated
+            val effectiveSw = if (sw > 0) sw else 1080
+            val effectiveSh = if (sh > 0) sh else 1920
+            val centerX = effectiveSw / 2
+            val centerY = effectiveSh / 2
             val swipeCmd = when (direction) {
-                "down" -> "input swipe 540 1500 540 500"
-                "up" -> "input swipe 540 500 540 1500"
+                "down" -> "input swipe $centerX ${(effectiveSh * 0.8).toInt()} $centerX ${(effectiveSh * 0.2).toInt()}"
+                "up" -> "input swipe $centerX ${(effectiveSh * 0.2).toInt()} $centerX ${(effectiveSh * 0.8).toInt()}"
                 else -> null
             }
             if (swipeCmd != null) {
@@ -552,9 +558,8 @@ object TaskExecutorBridge {
                     }
                 }
             }
-            // Final fallback: just try tap
-            val result = ShizukuManager.executeShellCommand("input keyevent KEYCODE_ENTER")
-            return if (result.isSuccess) StepResult.Success("Attempted press via Shizuku for '$textOrId'") else StepResult.Failed("All click methods failed for '$textOrId'")
+            // No valid fallback — KEYCODE_ENTER does not click a UI element
+            return StepResult.Failed("All click methods failed for '$textOrId'")
         }
 
         return StepResult.Failed("Could not find or click UI element '$textOrId' — enable Accessibility Service or Shizuku. Try dump_screen to see available elements.")
@@ -579,11 +584,18 @@ object TaskExecutorBridge {
         // Fallback: Shizuku shell command for swipe-based scrolling
         if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
             Log.i(TAG, "[scroll_screen] Accessibility failed, trying Shizuku fallback for $direction")
+            val sw = com.jarvis.assistant.channels.JarviewModel.screenWidth
+            val sh = com.jarvis.assistant.channels.JarviewModel.screenHeight
+            // Fallback to 1080x1920 if screen dimensions not yet populated
+            val effectiveSw = if (sw > 0) sw else 1080
+            val effectiveSh = if (sh > 0) sh else 1920
+            val centerX = effectiveSw / 2
+            val centerY = effectiveSh / 2
             val swipeCmd = when (direction) {
-                "down" -> "input swipe 540 1500 540 500"
-                "up" -> "input swipe 540 500 540 1500"
-                "left" -> "input swipe 900 960 200 960"
-                "right" -> "input swipe 200 960 900 960"
+                "down" -> "input swipe $centerX ${(effectiveSh * 0.8).toInt()} $centerX ${(effectiveSh * 0.2).toInt()}"
+                "up" -> "input swipe $centerX ${(effectiveSh * 0.2).toInt()} $centerX ${(effectiveSh * 0.8).toInt()}"
+                "left" -> "input swipe ${(effectiveSw * 0.8).toInt()} $centerY ${(effectiveSw * 0.2).toInt()} $centerY"
+                "right" -> "input swipe ${(effectiveSw * 0.2).toInt()} $centerY ${(effectiveSw * 0.8).toInt()} $centerY"
                 else -> null
             }
             if (swipeCmd != null) {
@@ -732,7 +744,7 @@ object TaskExecutorBridge {
         val query = args["query"]?.trim() ?: return StepResult.Failed("Missing 'query' argument")
         return try {
             val result = withContext(Dispatchers.IO) {
-                WebSearchEngine().search(query)
+                WebSearchEngine.search(query)
             }
             StepResult.Success(result)
         } catch (e: Exception) {

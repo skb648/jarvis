@@ -1,11 +1,9 @@
 package com.jarvis.assistant.services
 
 import android.annotation.SuppressLint
-import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -21,7 +19,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
@@ -58,7 +55,7 @@ class OverlayCursorService : Service() {
 
     companion object {
         private const val TAG = "OverlayCursor"
-        private const val CHANNEL_ID = "jarvis_cursor_overlay"
+        private const val CHANNEL_ID = JarvisNotificationChannels.CHANNEL_JARVIS_OVERLAY
         private const val NOTIFICATION_ID = 1002
 
         // Intent actions
@@ -226,22 +223,29 @@ class OverlayCursorService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Restart service when app is swiped from recents
-        val restartIntent = Intent(this, OverlayCursorService::class.java).apply {
-            action = ACTION_START
-        }
-        val pendingIntent = PendingIntent.getService(
-            this, 2, restartIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val alarmManager = getSystemService(ALARM_SERVICE) as AlarmManager
-        alarmManager.set(
-            AlarmManager.ELAPSED_REALTIME_WAKEUP,
-            SystemClock.elapsedRealtime() + 1500,
-            pendingIntent
-        )
-        Log.i(TAG, "Service restart scheduled after task removal")
+        // User explicitly swiped the app away — stop gracefully instead of auto-restarting.
+        // Auto-restart via AlarmManager is an anti-pattern: on Android 12+ the alarm may be
+        // deferred indefinitely, and users expect the overlay to stop when they dismiss the app.
+        Log.i(TAG, "App removed from recents — stopping cursor overlay gracefully")
+        cleanupOverlay()
+        stopSelf()
         super.onTaskRemoved(rootIntent)
+    }
+
+    /**
+     * Clean up the overlay and reset state. Called from onTaskRemoved() and onDestroy().
+     */
+    private fun cleanupOverlay() {
+        mainHandler.post {
+            moveAnimator?.cancel()
+            moveAnimator = null
+            removeOverlay()
+        }
+        if (JarviewModel.overlayCursorService?.get() == this) {
+            JarviewModel.overlayCursorService = null
+        }
+        JarviewModel.cursorServiceRunning = false
+        isRunning = false
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -569,17 +573,7 @@ class OverlayCursorService : Service() {
     // ────────────────────────────────────────────────────────────────────
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "JARVIS Cursor Overlay",
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "JARVIS AI cursor overlay is active"
-            setShowBadge(false)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        }
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(channel)
+        JarvisNotificationChannels.ensureChannels(this)
     }
 
     private fun buildNotification(text: String): Notification {

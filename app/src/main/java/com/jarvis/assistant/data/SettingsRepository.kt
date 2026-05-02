@@ -17,7 +17,7 @@ import kotlinx.coroutines.runBlocking
  * All API keys, MQTT credentials, and user preferences are saved here
  * so they survive app restarts and process death.
  *
- * SECURITY: API keys (Gemini, ElevenLabs) are encrypted via PrivacyVault
+ * SECURITY: API keys (Groq, ElevenLabs) and MQTT password are encrypted via PrivacyVault
  * (AES-256-GCM with Android KeyStore) before storage. They are decrypted
  * on read. Legacy plaintext keys are automatically re-encrypted on first read.
  *
@@ -90,6 +90,7 @@ class SettingsRepository(private val context: Context) {
         // PrivacyVault key aliases for encrypting sensitive values
         private const val VAULT_KEY_GROQ = "groq_api_key"
         private const val VAULT_KEY_ELEVENLABS = "elevenlabs_api_key"
+        private const val VAULT_KEY_MQTT_PASSWORD = "mqtt_password"
     }
 
     // ─── Read Operations (suspend) ───────────────────────────────
@@ -103,7 +104,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun isWakeWordEnabled(): Boolean = readBoolean(WAKE_WORD_ENABLED, false)
     suspend fun getMqttBrokerUrl(): String = readString(MQTT_BROKER_URL, "")
     suspend fun getMqttUsername(): String = readString(MQTT_USERNAME, "")
-    suspend fun getMqttPassword(): String = readString(MQTT_PASSWORD, "")
+    suspend fun getMqttPassword(): String = readEncryptedString(MQTT_PASSWORD, VAULT_KEY_MQTT_PASSWORD, "")
     suspend fun getHomeAssistantUrl(): String = readString(HOME_ASSISTANT_URL, "")
     suspend fun getHomeAssistantToken(): String = readString(HOME_ASSISTANT_TOKEN, "")
     suspend fun getWebSearchApiKey(): String = readString(WEB_SEARCH_API_KEY, "")
@@ -121,7 +122,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun setWakeWordEnabled(enabled: Boolean) = writeBoolean(WAKE_WORD_ENABLED, enabled)
     suspend fun setMqttBrokerUrl(url: String) = writeString(MQTT_BROKER_URL, url)
     suspend fun setMqttUsername(username: String) = writeString(MQTT_USERNAME, username)
-    suspend fun setMqttPassword(password: String) = writeString(MQTT_PASSWORD, password)
+    suspend fun setMqttPassword(password: String) = writeEncryptedString(MQTT_PASSWORD, VAULT_KEY_MQTT_PASSWORD, password)
     suspend fun setHomeAssistantUrl(url: String) = writeString(HOME_ASSISTANT_URL, url)
     suspend fun setHomeAssistantToken(token: String) = writeString(HOME_ASSISTANT_TOKEN, token)
     suspend fun setWebSearchApiKey(key: String) = writeString(WEB_SEARCH_API_KEY, key)
@@ -144,9 +145,10 @@ class SettingsRepository(private val context: Context) {
         homeAssistantToken: String,
         keepAliveEnabled: Boolean
     ) {
-        // Encrypt API keys before storing
+        // Encrypt API keys and MQTT password before storing
         val encryptedGroq = encryptValue(VAULT_KEY_GROQ, groqApiKey)
         val encryptedElevenLabs = encryptValue(VAULT_KEY_ELEVENLABS, elevenLabsApiKey)
+        val encryptedMqttPassword = encryptValue(VAULT_KEY_MQTT_PASSWORD, mqttPassword)
 
         context.dataStore.edit { prefs ->
             prefs[GROQ_API_KEY] = encryptedGroq
@@ -155,7 +157,7 @@ class SettingsRepository(private val context: Context) {
             prefs[WAKE_WORD_ENABLED] = wakeWordEnabled
             prefs[MQTT_BROKER_URL] = mqttBrokerUrl
             prefs[MQTT_USERNAME] = mqttUsername
-            prefs[MQTT_PASSWORD] = mqttPassword
+            prefs[MQTT_PASSWORD] = encryptedMqttPassword
             prefs[HOME_ASSISTANT_URL] = homeAssistantUrl
             prefs[HOME_ASSISTANT_TOKEN] = homeAssistantToken
             prefs[KEEP_ALIVE_ENABLED] = keepAliveEnabled

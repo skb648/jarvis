@@ -81,6 +81,10 @@ class JarvisAccessibilityService : AccessibilityService() {
     private var screenWidth: Int = 1080
     private var screenHeight: Int = 1920
 
+    // Throttle timestamp for screenTextData updates
+    @Volatile
+    private var lastScreenTextUpdate: Long = 0L
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         ensureNoTouchExploration()
@@ -159,6 +163,16 @@ class JarvisAccessibilityService : AccessibilityService() {
             }
 
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                // BUG-P2-07 FIX: Update screenTextData so AI can see current screen content
+                // Throttled: only update if at least 2 seconds have passed since last update
+                val now = System.currentTimeMillis()
+                if (now - lastScreenTextUpdate >= 2000L) {
+                    lastScreenTextUpdate = now
+                    val screenText = extractScreenText()
+                    if (screenText.isNotBlank()) {
+                        JarviewModel.screenTextData = screenText
+                    }
+                }
                 JarviewModel.sendEventToUi("window_content_changed", mapOf(
                     "package" to (event.packageName?.toString() ?: ""),
                     "timestamp" to System.currentTimeMillis()
