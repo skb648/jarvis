@@ -259,21 +259,21 @@ build_abi() {
     mkdir -p "$abi_output_dir"
 
     # Build with cargo-ndk
-    # CRITICAL FIX: --manifest-path is a CARGO option, not a cargo-ndk option.
-    # It MUST be placed AFTER the 'build' subcommand, not before it.
-    # When placed before 'build', cargo-ndk tries to interpret it as its own
-    # flag and fails with "could not find Cargo.toml" errors.
+    # CRITICAL FIX: Run cargo-ndk FROM the rust/ directory so that
+    # `cargo metadata` (which cargo-ndk runs internally) can find Cargo.toml.
+    # Previously, we ran from the project root and passed --manifest-path,
+    # but cargo-ndk's internal `cargo metadata` call doesn't use --manifest-path,
+    # causing "could not find Cargo.toml" errors in CI.
     local cargo_args=(
         ndk
         -t "$target"
         -o "$JNILIBS_DIR"
         --platform "$API_LEVEL"
+        build
     )
 
     if [ "$build_type" = "release" ]; then
-        cargo_args+=(build --release --manifest-path "$RUST_DIR/Cargo.toml")
-    else
-        cargo_args+=(build --manifest-path "$RUST_DIR/Cargo.toml")
+        cargo_args+=(--release)
     fi
 
     # In CI, use --locked to ensure Cargo.lock is respected
@@ -281,10 +281,10 @@ build_abi() {
         cargo_args+=("$CARGO_LOCKED")
     fi
 
-    log_info "Running: cargo ${cargo_args[*]}"
+    log_info "Running: (cd $RUST_DIR && cargo ${cargo_args[*]})"
 
-    # Execute cargo-ndk
-    if ! cargo "${cargo_args[@]}" 2>&1; then
+    # Execute cargo-ndk from the rust/ directory
+    if ! (cd "$RUST_DIR" && cargo "${cargo_args[@]}") 2>&1; then
         log_err "cargo-ndk build failed for $abi"
         if [ "$CI_MODE" = "true" ]; then
             log_err "CI build failed — dumping cargo config info:"

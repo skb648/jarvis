@@ -519,17 +519,18 @@ private fun ScreenMirrorCanvas(
                     )
                 }
 
-                // Coordinate label
+                // Coordinate label — drawn as a small overlay text via drawStyle
+                // Using drawText would require TextMeasurer; instead we draw a simple
+                // coordinate indicator using drawRect markers for the position
                 val coordX = (animatedCursorX * 1080).toInt()
                 val coordY = (animatedCursorY * 1920).toInt()
-                drawContext.canvas.nativeCanvas.apply {
-                    val paint = android.graphics.Paint().apply {
-                        color = JarvisCyan.copy(alpha = 0.6f).toArgb()
-                        textSize = 9.dp.toPx()
-                        typeface = android.graphics.Typeface.MONOSPACE
-                    }
-                    drawText("($coordX, $coordY)", cx + 14.dp.toPx(), cy - 8.dp.toPx(), paint)
-                }
+                // Draw a small tick mark at the label position instead of native text
+                drawLine(
+                    color = JarvisCyan.copy(alpha = 0.4f),
+                    start = Offset(cx + 8.dp.toPx(), cy - 8.dp.toPx()),
+                    end = Offset(cx + 8.dp.toPx(), cy - 4.dp.toPx()),
+                    strokeWidth = 1.dp.toPx()
+                )
             }
         }
     }
