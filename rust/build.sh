@@ -39,7 +39,11 @@ RUST_DIR="$SCRIPT_DIR"
 CI_MODE="${CI:-false}"
 if [ "$CI_MODE" = "true" ]; then
     echo "[JARVIS] Running in CI mode"
-    # In CI, ensure Cargo.lock is respected for reproducible builds
+    # In CI, generate Cargo.lock if it doesn't exist, then use --locked
+    if [ ! -f "$SCRIPT_DIR/Cargo.lock" ]; then
+        echo "[JARVIS] Cargo.lock not found — generating from Cargo.toml"
+        (cd "$SCRIPT_DIR" && cargo generate-lockfile 2>/dev/null || true)
+    fi
     CARGO_LOCKED="--locked"
 else
     CARGO_LOCKED=""

@@ -91,7 +91,10 @@ jobs:
       run: |
         chmod +x rust/build.sh
         echo "=== Building Rust native libraries ==="
-        ./rust/build.sh all release 2>&1 || {
+        # Only build arm64 + armv7 (the targets installed above)
+        # Do NOT use 'all' — x86/x86_64 targets are not installed
+        ./rust/build.sh arm64 release 2>&1 || true
+        ./rust/build.sh arm release 2>&1 || {
           echo "::warning::Rust build failed — CMake stub will be used as fallback"
           echo "rust_build_failed=true" >> "$GITHUB_OUTPUT"
           # Ensure jniLibs directories exist even if Rust build failed,
