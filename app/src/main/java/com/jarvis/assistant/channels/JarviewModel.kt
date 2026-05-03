@@ -16,18 +16,43 @@ import java.lang.ref.WeakReference
  */
 object JarviewModel {
 
-    // ─── Event Sink ───────────────────────────────────────────────
-    @Volatile
-    var eventSink: ((String, Map<String, Any>) -> Unit)? = null
+    // ─── Event Sink (multi-listener) ────────────────────────────────
+    // BUG FIX: eventSink was a single-slot callback — setting it from one
+    // screen would overwrite the listener from another screen. Now uses a
+    // CopyOnWriteArrayList so multiple screens can listen simultaneously.
+    private val eventListeners = java.util.concurrent.CopyOnWriteArrayList<(String, Map<String, Any>) -> Unit>()
+
+    /**
+     * Add an event listener. Returns a removal handle.
+     * Usage: val remove = JarviewModel.addEventListener { type, data -> ... }
+     * When done: remove()  // or use DisposableEffect in Compose
+     */
+    fun addEventListener(listener: (String, Map<String, Any>) -> Unit): () -> Unit {
+        eventListeners.add(listener)
+        return { eventListeners.remove(listener) }
+    }
+
+    /**
+     * Remove a previously added event listener.
+     */
+    fun removeEventListener(listener: (String, Map<String, Any>) -> Unit) {
+        eventListeners.remove(listener)
+    }
 
     private val uiHandler = Handler(Looper.getMainLooper())
 
     /**
-     * Send an event to the UI layer. Always posts to the main thread.
+     * Send an event to ALL registered UI listeners. Always posts to the main thread.
      */
     fun sendEventToUi(type: String, data: Map<String, Any> = emptyMap()) {
         uiHandler.post {
-            eventSink?.invoke(type, data)
+            for (listener in eventListeners) {
+                try {
+                    listener(type, data)
+                } catch (e: Exception) {
+                    android.util.Log.w("JarviewModel", "Event listener threw: ${e.message}")
+                }
+            }
         }
     }
 
@@ -210,7 +235,7 @@ object JarviewModel {
      * Reset all volatile state to defaults.
      */
     fun reset() {
-        eventSink = null
+        eventListeners.clear()
         accessibilityService = null  // WeakReference cleared; GC can reclaim the service
         foregroundService = null
         speechService = null

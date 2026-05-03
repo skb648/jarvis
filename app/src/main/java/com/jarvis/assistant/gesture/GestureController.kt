@@ -4,6 +4,8 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.jarvis.assistant.channels.JarviewModel
 import com.jarvis.assistant.shizuku.ShizukuManager
@@ -24,9 +26,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 object GestureController {
 
     private const val TAG = "JarvisGesture"
+    private const val TAP_DURATION_MS = 150L
     private const val LONG_PRESS_DURATION_MS = 500L
     private const val SWIPE_DURATION_MS = 300L
     private const val PINCH_DURATION_MS = 300L
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
      * Perform a tap gesture at the specified coordinates.
@@ -37,7 +42,7 @@ object GestureController {
         if (service != null) {
             val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
             val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0L, 50L))
+                .addStroke(GestureDescription.StrokeDescription(path, 0L, TAP_DURATION_MS))
                 .build()
 
             return dispatchGesture(service, gesture)
@@ -147,7 +152,49 @@ object GestureController {
      * Thread-safe: uses AtomicBoolean for the result and CountDownLatch
      * for synchronization between the callback and the calling thread.
      */
+    /**
+     * Dispatch a gesture and WAIT for it to actually complete (or be cancelled)
+     * before returning, using CountDownLatch + GestureResultCallback.
+     *
+     * BUG FIX: dispatchGesture() MUST be called on the main thread.
+     * If called from a non-main thread (e.g., from OverlayCursorService via
+     * mainHandler.postDelayed), the dispatch will silently fail. This method
+     * ensures the dispatch always happens on the main thread.
+     *
+     * Returns true only if onCompleted() was called.
+     * Returns false if onCancelled() was called, dispatch failed to initiate,
+     * or the gesture timed out after 5 seconds.
+     */
     private fun dispatchGesture(service: AccessibilityService, gesture: GestureDescription): Boolean {
+        // If already on the main thread, dispatch directly
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return dispatchGestureInternal(service, gesture)
+        }
+
+        // Otherwise, post to main thread and wait for the result
+        val completed = AtomicBoolean(false)
+        val latch = CountDownLatch(1)
+
+        mainHandler.post {
+            val result = dispatchGestureInternal(service, gesture)
+            completed.set(result)
+            latch.countDown()
+        }
+
+        // Wait up to 5 seconds for the main thread dispatch to complete
+        val finished = latch.await(5, TimeUnit.SECONDS)
+        if (!finished) {
+            Log.w(TAG, "Gesture dispatch timed out waiting for main thread")
+            return false
+        }
+
+        return completed.get()
+    }
+
+    /**
+     * Internal: Actually dispatch the gesture on the current (must be main) thread.
+     */
+    private fun dispatchGestureInternal(service: AccessibilityService, gesture: GestureDescription): Boolean {
         return try {
             val completed = AtomicBoolean(false)
             val latch = CountDownLatch(1)

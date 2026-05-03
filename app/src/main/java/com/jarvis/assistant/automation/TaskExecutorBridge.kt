@@ -94,6 +94,10 @@ object TaskExecutorBridge {
             "send_sms" -> executeSendSms(args, context)
             "take_screenshot" -> executeTakeScreenshot()
             "set_volume" -> executeSetVolume(args, context)
+            "create_calendar_event" -> executeCreateCalendarEvent(args, context)
+            "read_notifications" -> executeReadNotifications(args)
+            "press_key" -> executePressKey(args)
+            "swipe_gesture" -> executeSwipeGesture(args)
             else -> StepResult.Failed("Unknown tool: $toolName")
         }
     }
@@ -760,7 +764,7 @@ object TaskExecutorBridge {
     /**
      * set_alarm — Set an alarm, timer, or reminder via Android intents.
      */
-    private fun executeSetAlarm(args: Map<String, String>, context: Context): StepResult {
+    private suspend fun executeSetAlarm(args: Map<String, String>, context: Context): StepResult {
         val type = args["type"]?.lowercase()?.trim() ?: "alarm"
         val hour = args["hour"]?.toIntOrNull()
         val minute = args["minute"]?.toIntOrNull() ?: 0
@@ -1103,6 +1107,216 @@ object TaskExecutorBridge {
     // ═══════════════════════════════════════════════════════════════════════
     // Helpers
     // ═══════════════════════════════════════════════════════════════════════
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // NEW v21 TOOLS — Calendar, Notifications, Key Press, Swipe Gesture
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * create_calendar_event — Create a calendar event using Android's Calendar Provider.
+     * Requires WRITE_CALENDAR permission.
+     */
+    private fun executeCreateCalendarEvent(args: Map<String, String>, context: Context): StepResult {
+        val title = args["title"]?.trim() ?: return StepResult.Failed("Missing 'title' argument")
+        val startTimeStr = args["start_time"]?.trim() ?: return StepResult.Failed("Missing 'start_time' argument")
+        val endTimeStr = args["end_time"]?.trim()
+        val description = args["description"]?.trim() ?: ""
+        val location = args["location"]?.trim() ?: ""
+
+        return try {
+            // Parse ISO 8601 start time
+            val startMillis = parseIso8601ToMillis(startTimeStr)
+                ?: return StepResult.Failed("Invalid start_time format: '$startTimeStr'. Use ISO 8601 (e.g., '2025-03-15T14:00:00')")
+
+            // Parse end time, default to 1 hour after start
+            val endMillis = if (endTimeStr != null) {
+                parseIso8601ToMillis(endTimeStr) ?: startMillis + 3600_000L
+            } else {
+                startMillis + 3600_000L
+            }
+
+            val values = android.content.ContentValues().apply {
+                put(android.provider.CalendarContract.Events.DTSTART, startMillis)
+                put(android.provider.CalendarContract.Events.DTEND, endMillis)
+                put(android.provider.CalendarContract.Events.TITLE, title)
+                if (description.isNotBlank()) put(android.provider.CalendarContract.Events.DESCRIPTION, description)
+                if (location.isNotBlank()) put(android.provider.CalendarContract.Events.EVENT_LOCATION, location)
+                put(android.provider.CalendarContract.Events.CALENDAR_ID, getDefaultCalendarId(context))
+                put(android.provider.CalendarContract.Events.EVENT_TIMEZONE, java.util.TimeZone.getDefault().id)
+            }
+
+            val uri = context.contentResolver.insert(android.provider.CalendarContract.Events.CONTENT_URI, values)
+            if (uri != null) {
+                Log.i(TAG, "[createCalendarEvent] Event '$title' created: $uri")
+                StepResult.Success("Calendar event '$title' created for $startTimeStr")
+            } else {
+                StepResult.Failed("Failed to insert calendar event — may need WRITE_CALENDAR permission")
+            }
+        } catch (e: SecurityException) {
+            StepResult.Failed("Missing WRITE_CALENDAR permission: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "[createCalendarEvent] Failed: ${e.message}")
+            StepResult.Failed("Failed to create calendar event: ${e.message}")
+        }
+    }
+
+    /**
+     * Get the default calendar ID for event creation.
+     */
+    private fun getDefaultCalendarId(context: Context): Long {
+        return try {
+            val projection = arrayOf(
+                android.provider.CalendarContract.Calendars._ID,
+                android.provider.CalendarContract.Calendars.IS_PRIMARY
+            )
+            val uri = android.provider.CalendarContract.Calendars.CONTENT_URI
+            context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(0)
+                    val isPrimary = cursor.getInt(1)
+                    if (isPrimary == 1) return id
+                }
+                if (cursor.moveToFirst()) return cursor.getLong(0)
+            }
+            1L // Fallback
+        } catch (e: Exception) {
+            1L
+        }
+    }
+
+    /**
+     * Parse ISO 8601 datetime string to epoch millis.
+     * Supports formats: "2025-03-15T14:00:00", "2025-03-15T14:00:00+05:30"
+     */
+    private fun parseIso8601ToMillis(isoStr: String): Long? {
+        return try {
+            // Try java.time if available (API 26+)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                try {
+                    val instant = java.time.OffsetDateTime.parse(isoStr).toInstant()
+                    return instant.toEpochMilli()
+                } catch (_: Exception) {}
+                try {
+                    val ldt = java.time.LocalDateTime.parse(isoStr)
+                    return ldt.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+                } catch (_: Exception) {}
+            }
+            // Fallback: simple manual parse for "yyyy-MM-ddTHH:mm:ss"
+            val parts = isoStr.split("T")
+            if (parts.size != 2) return null
+            val dateParts = parts[0].split("-")
+            val timeParts = parts[1].split("+").first().split(":")
+            if (dateParts.size != 3 || timeParts.size < 2) return null
+            val cal = java.util.Calendar.getInstance()
+            cal.set(dateParts[0].toInt(), dateParts[1].toInt() - 1, dateParts[2].toInt(),
+                timeParts[0].toInt(), timeParts[1].toInt(),
+                if (timeParts.size > 2) timeParts[2].toInt() else 0)
+            cal.set(java.util.Calendar.MILLISECOND, 0)
+            cal.timeInMillis
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * read_notifications — Read recent notifications from NotificationReaderService.
+     */
+    private fun executeReadNotifications(args: Map<String, String>): StepResult {
+        val limit = (args["limit"]?.toIntOrNull() ?: 10).coerceIn(1, 50)
+
+        return try {
+            val notifications = com.jarvis.assistant.notifications.NotificationReaderService
+                .getRecentNotifications(limit)
+
+            if (notifications.isEmpty()) {
+                StepResult.Success("No recent notifications found. Enable notification access for JARVIS in Settings.")
+            } else {
+                val sb = StringBuilder("Recent notifications (${notifications.size}):\n")
+                notifications.forEach { n ->
+                    sb.append("- [${n.appName}] ${n.title}")
+                    if (n.content.isNotBlank()) sb.append(": ${n.content.take(100)}")
+                    sb.append("\n")
+                }
+                Log.i(TAG, "[readNotifications] Read ${notifications.size} notifications")
+                StepResult.Success(sb.toString().trimEnd())
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[readNotifications] Failed: ${e.message}")
+            StepResult.Failed("Failed to read notifications: ${e.message}. Enable notification access for JARVIS.")
+        }
+    }
+
+    /**
+     * press_key — Press a specific hardware or system key.
+     */
+    private fun executePressKey(args: Map<String, String>): StepResult {
+        val key = args["key"]?.lowercase()?.trim()
+            ?: return StepResult.Failed("Missing 'key' argument")
+
+        val validKeys = listOf("volume_up", "volume_down", "power", "enter", "back", "home", "recent")
+        if (key !in validKeys) {
+            return StepResult.Failed("Unknown key: $key. Supported: ${validKeys.joinToString(", ")}")
+        }
+
+        // Try accessibility service first
+        val svc = accessibilityService?.get()
+        if (svc != null) {
+            // Use global actions for navigation keys
+            val globalResult = when (key) {
+                "back" -> svc.goBack()
+                "home" -> svc.goHome()
+                "recent" -> svc.openRecents()
+                else -> false
+            }
+            if (globalResult) return StepResult.Success("Pressed $key via Accessibility Service")
+        }
+
+        // Fallback: Shizuku shell command
+        if (ShizukuManager.isReady() && ShizukuManager.hasPermission()) {
+            val keyEventName = when (key) {
+                "volume_up" -> "KEYCODE_VOLUME_UP"
+                "volume_down" -> "KEYCODE_VOLUME_DOWN"
+                "power" -> "KEYCODE_POWER"
+                "enter" -> "KEYCODE_ENTER"
+                "back" -> "KEYCODE_BACK"
+                "home" -> "KEYCODE_HOME"
+                "recent" -> "KEYCODE_APP_SWITCH"
+                else -> "KEYCODE_$key".uppercase()
+            }
+            val result = ShizukuManager.executeShellCommand("input keyevent $keyEventName")
+            return if (result.isSuccess) {
+                StepResult.Success("Pressed $key via Shizuku")
+            } else {
+                StepResult.Failed("Shizuku key press failed for $key: ${result.stderr}")
+            }
+        }
+
+        return StepResult.Failed("Cannot press key '$key' — enable Accessibility Service or Shizuku")
+    }
+
+    /**
+     * swipe_gesture — Perform a swipe with custom start/end coordinates and duration.
+     */
+    private fun executeSwipeGesture(args: Map<String, String>): StepResult {
+        val startX = args["start_x"]?.toIntOrNull() ?: return StepResult.Failed("Missing or invalid 'start_x' coordinate")
+        val startY = args["start_y"]?.toIntOrNull() ?: return StepResult.Failed("Missing or invalid 'start_y' coordinate")
+        val endX = args["end_x"]?.toIntOrNull() ?: return StepResult.Failed("Missing or invalid 'end_x' coordinate")
+        val endY = args["end_y"]?.toIntOrNull() ?: return StepResult.Failed("Missing or invalid 'end_y' coordinate")
+        val duration = (args["duration"]?.toIntOrNull() ?: 300).coerceIn(50, 5000)
+
+        // Use GestureController for the swipe
+        val success = com.jarvis.assistant.gesture.GestureController.performSwipe(
+            startX, startY, endX, endY, duration.toLong()
+        )
+
+        return if (success) {
+            Log.i(TAG, "[swipeGesture] Swipe ($startX,$startY) → ($endX,$endY) duration=${duration}ms")
+            StepResult.Success("Swiped from ($startX,$startY) to ($endX,$endY) in ${duration}ms")
+        } else {
+            // Shizuku fallback already handled by GestureController
+            StepResult.Failed("Swipe gesture failed from ($startX,$startY) to ($endX,$endY)")
+        }
+    }
 
     private fun launchApp(packageName: String, context: Context): Boolean {
         return try {

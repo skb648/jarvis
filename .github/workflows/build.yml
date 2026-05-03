@@ -12,6 +12,9 @@ env:
   CMAKE_VERSION: "3.22.1"
   RUST_TARGETS: "aarch64-linux-android armv7-linux-androideabi"
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -59,6 +62,15 @@ jobs:
         echo "Installed Rust targets:"
         rustup target list --installed | grep android
 
+    - name: Generate Cargo.lock
+      run: |
+        if [ ! -f rust/Cargo.lock ]; then
+          echo "Generating Cargo.lock for reproducible builds..."
+          (cd rust && cargo generate-lockfile 2>/dev/null || true)
+        else
+          echo "Cargo.lock already exists"
+        fi
+
     - name: Cache Rust cargo registry
       uses: actions/cache@v4
       with:
@@ -69,6 +81,7 @@ jobs:
         key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock', 'rust/Cargo.toml') }}
         restore-keys: |
           rust-${{ runner.os }}-
+        save-always: true
 
     # ─── Gradle Cache ─────────────────────────────────────────────
     - name: Cache Gradle packages
@@ -80,6 +93,7 @@ jobs:
         key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
         restore-keys: |
           gradle-
+        save-always: true
 
     # ─── Build Rust native libraries ──────────────────────────────
     # Build Rust .so files BEFORE Gradle so they get packaged.
@@ -93,16 +107,25 @@ jobs:
         echo "=== Building Rust native libraries ==="
         # Only build arm64 + armv7 (the targets installed above)
         # Do NOT use 'all' — x86/x86_64 targets are not installed
-        ./rust/build.sh arm64 release 2>&1 || true
+        FAILED=false
+        ./rust/build.sh arm64 release 2>&1 || {
+          echo "::warning::Rust arm64 build failed"
+          FAILED=true
+        }
         ./rust/build.sh arm release 2>&1 || {
+          echo "::warning::Rust arm build failed"
+          FAILED=true
+        }
+        if [ "$FAILED" = "true" ]; then
           echo "::warning::Rust build failed — CMake stub will be used as fallback"
           echo "rust_build_failed=true" >> "$GITHUB_OUTPUT"
           # Ensure jniLibs directories exist even if Rust build failed,
           # so CMake can find them and build the stub instead
           mkdir -p app/src/main/jniLibs/arm64-v8a
           mkdir -p app/src/main/jniLibs/armeabi-v7a
-          exit 0
-        }
+        else
+          echo "rust_build_failed=false" >> "$GITHUB_OUTPUT"
+        fi
       env:
         ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
@@ -112,8 +135,6 @@ jobs:
       if: steps.rust_build.outcome == 'success' && steps.rust_build.outputs.rust_build_failed != 'true'
       run: |
         echo "=== Rust .so files in jniLibs ==="
-        find app/src/main/jniLibs -name "*.so" -exec ls -lh {} \; 2>/dev/null || echo "No .so files found — CMake stub will be used"
-        echo ""
         for abi in arm64-v8a armeabi-v7a; do
           so_file="app/src/main/jniLibs/$abi/libjarvis_rust.so"
           if [ -f "$so_file" ]; then
@@ -127,12 +148,12 @@ jobs:
     - name: Warn about Rust build failure
       if: steps.rust_build.outputs.rust_build_failed == 'true'
       run: |
-        echo "::warning::Rust native build failed. The APK will be built with the CMake stub (JNI no-op fallback). Native AI features will not work — app will use Kotlin HTTP fallback."
+        echo "::warning::Rust native build failed. The APK will be built with the CMake stub (JNI no-op fallback). Native AI features will not work — app will use Kotlin HTTP (Groq) fallback."
 
     - name: Warn on Rust build failure (main branch)
       if: steps.rust_build.outputs.rust_build_failed == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
-        echo "::warning::Rust native build failed on main branch. The APK will use the CMake stub (JNI no-op fallback) but native AI features will not work. The Kotlin HTTP Gemini fallback is still functional."
+        echo "::warning::Rust native build failed on main branch. The APK will use the CMake stub (JNI no-op fallback) but native AI features will not work. The Kotlin HTTP (Groq) fallback is still functional."
 
     # ─── Ensure jniLibs directories exist ─────────────────────────
     - name: Ensure jniLibs directories exist
@@ -230,7 +251,12 @@ jobs:
         if [ "${{ steps.rust_build.outputs.rust_build_failed }}" = "true" ]; then
           echo "- Rust native build: **FAILED** — CMake stub used (app runs in Kotlin fallback mode)" >> "$GITHUB_STEP_SUMMARY"
         else
-          so_count=$(find app/src/main/jniLibs -name "libjarvis_rust.so" 2>/dev/null | wc -l)
+          so_count=0
+          for abi in arm64-v8a armeabi-v7a; do
+            if [ -f "app/src/main/jniLibs/$abi/libjarvis_rust.so" ]; then
+              so_count=$((so_count + 1))
+            fi
+          done
           echo "- Rust native build: **OK** ($so_count .so file(s) compiled)" >> "$GITHUB_STEP_SUMMARY"
         fi
 
@@ -257,13 +283,19 @@ jobs:
       run: |
         echo "## Build Results" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Artifact | Status | Size |" >> "$GITHUB_STEP_SUMMARY"
+        echo "|----------|--------|------|" >> "$GITHUB_STEP_SUMMARY"
         if ls app/build/outputs/apk/debug/*.apk 1> /dev/null 2>&1; then
-          echo "- Debug APK: Built successfully $(du -h app/build/outputs/apk/debug/*.apk | cut -f1 | head -1)" >> "$GITHUB_STEP_SUMMARY"
+          debug_size=$(du -h app/build/outputs/apk/debug/*.apk | cut -f1 | head -1)
+          echo "| Debug APK | ✅ Built | $debug_size |" >> "$GITHUB_STEP_SUMMARY"
         else
-          echo "- Debug APK: Build FAILED" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Debug APK | ❌ Failed | — |" >> "$GITHUB_STEP_SUMMARY"
         fi
         if ls app/build/outputs/apk/release/*.apk 1> /dev/null 2>&1; then
-          echo "- Release APK: Built successfully $(du -h app/build/outputs/apk/release/*.apk | cut -f1 | head -1)" >> "$GITHUB_STEP_SUMMARY"
+          release_size=$(du -h app/build/outputs/apk/release/*.apk | cut -f1 | head -1)
+          echo "| Release APK | ✅ Built | $release_size |" >> "$GITHUB_STEP_SUMMARY"
         else
-          echo "- Release APK: Build FAILED (may need signing config)" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Release APK | ❌ Failed | — |" >> "$GITHUB_STEP_SUMMARY"
         fi
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "**Rust Native**: ${{ steps.rust_build.outputs.rust_build_failed == 'true' && '⚠️ Failed (CMake stub fallback)' || '✅ Built' }}" >> "$GITHUB_STEP_SUMMARY"

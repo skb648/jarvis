@@ -153,7 +153,16 @@ fun JarvisNavGraph(
     computerActionLog: List<String> = emptyList(),
     onComputerCommand: (String) -> Unit = {},
     onActivateComputerUse: () -> Unit = {},
-    onDeactivateComputerUse: () -> Unit = {}
+    onDeactivateComputerUse: () -> Unit = {},
+    // HomeScreen additional state
+    isAccessibilityEnabled: Boolean = false,
+    isOverlayCursorRunning: Boolean = false,
+    // ComputerUse screen text data
+    screenTextData: String = "",
+    aiThinkingText: String = "",
+    currentRound: Int = 0,
+    // Overlay permission granted state
+    isOverlayPermissionGranted: Boolean = false
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -283,7 +292,10 @@ fun JarvisNavGraph(
                     locationContext = locationContext,
                     batteryLevel = diagnosticsBatteryLevel,
                     isCharging = diagnosticsIsCharging,
-                    onRequestDailyBrief = { onQuickAction("daily_brief") }
+                    onRequestDailyBrief = { onQuickAction("daily_brief") },
+                    isAccessibilityEnabled = isAccessibilityEnabled,
+                    isShizukuAvailable = isShizukuAvailable,
+                    isOverlayCursorRunning = isOverlayCursorRunning
                 )
             }
             composable("assistant") {
@@ -358,7 +370,10 @@ fun JarvisNavGraph(
                     actionLog = computerActionLog,
                     onCommand = onComputerCommand,
                     onTakeControl = onActivateComputerUse,
-                    onStop = onDeactivateComputerUse
+                    onStop = onDeactivateComputerUse,
+                    screenTextData = screenTextData,
+                    aiThinkingText = aiThinkingText,
+                    currentRound = currentRound
                 )
             }
             composable("diagnostics") {
@@ -385,6 +400,8 @@ fun JarvisNavGraph(
                     isBatteryOptimized = isBatteryOptimized,
                     isShizukuAvailable = isShizukuAvailable,
                     isRustReady = isRustReady,
+                    isAccessibilityEnabled = isAccessibilityEnabled,
+                    isOverlayPermissionGranted = isOverlayPermissionGranted,
                     onGroqApiKeyChange = onGroqApiKeyChange,
                     onElevenLabsApiKeyChange = onElevenLabsApiKeyChange,
                     onTtsVoiceChange = onTtsVoiceChange,

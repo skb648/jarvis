@@ -82,6 +82,7 @@ fun SettingsScreen(
     isRustReady: Boolean = false,
     isMqttConnected: Boolean = false,
     isAccessibilityEnabled: Boolean = false,
+    isOverlayPermissionGranted: Boolean = false,
     // Per-field real-time setters
     onGroqApiKeyChange: (String) -> Unit,
     onElevenLabsApiKeyChange: (String) -> Unit,
@@ -167,19 +168,19 @@ fun SettingsScreen(
     ) {
 
         // ══════════════════════════════════════════════════════════════════════
-        // QUICK SETUP — Step-by-step checklist for first-time users
+        // SETUP WIZARD — Step-by-step checklist for first-time users
         // ══════════════════════════════════════════════════════════════════════
-        SectionHeader("QUICK SETUP", Icons.Filled.Checklist)
+        SectionHeader("SETUP WIZARD", Icons.Filled.AutoFixHigh)
 
         val setupSteps = remember(
-            isShizukuAvailable, isAccessibilityEnabled,
+            isShizukuAvailable, isAccessibilityEnabled, isOverlayPermissionGranted,
             groqApiKey, elevenLabsApiKey, isWakeWordEnabled
         ) {
             listOf(
-                SetupStep("Grant Permissions", isComplete = true, icon = Icons.Filled.VerifiedUser),
+                SetupStep("Set Groq API Key", isComplete = groqApiKey.isNotBlank(), icon = Icons.Filled.Key),
                 SetupStep("Enable Accessibility", isComplete = isAccessibilityEnabled, icon = Icons.Filled.AccessibilityNew),
-                SetupStep("Configure Shizuku", isComplete = isShizukuAvailable, icon = Icons.Filled.Usb),
-                SetupStep("Enter API Key", isComplete = groqApiKey.isNotBlank(), icon = Icons.Filled.Key),
+                SetupStep("Grant Overlay Permission", isComplete = isOverlayPermissionGranted, icon = Icons.Filled.Visibility),
+                SetupStep("Enable Shizuku", isComplete = isShizukuAvailable, icon = Icons.Filled.Usb),
                 SetupStep("Test Voice", isComplete = isWakeWordEnabled && elevenLabsApiKey.isNotBlank(), icon = Icons.Filled.Mic)
             )
         }
@@ -230,51 +231,154 @@ fun SettingsScreen(
                     )
                 }
 
-                // Step items
+                // Step items with action buttons
                 setupSteps.forEachIndexed { index, step ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        // Step number circle or checkmark
-                        Box(
-                            modifier = Modifier
-                                .size(22.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (step.isComplete) JarvisGreen.copy(alpha = 0.2f)
-                                    else GlassBorder.copy(alpha = 0.15f)
-                                ),
-                            contentAlignment = Alignment.Center
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (step.isComplete) {
-                                Icon(
-                                    Icons.Filled.Check,
-                                    contentDescription = "Done",
-                                    tint = JarvisGreen,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                            } else {
-                                Text(
-                                    "${index + 1}",
-                                    color = TextTertiary,
-                                    fontSize = 10.sp,
-                                    fontFamily = FontFamily.Monospace
-                                )
+                            // Step number circle or checkmark
+                            Box(
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (step.isComplete) JarvisGreen.copy(alpha = 0.2f)
+                                        else GlassBorder.copy(alpha = 0.15f)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (step.isComplete) {
+                                    Icon(
+                                        Icons.Filled.Check,
+                                        contentDescription = "Done",
+                                        tint = JarvisGreen,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Filled.Warning,
+                                        contentDescription = "Incomplete",
+                                        tint = WarningAmber,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                }
+                            }
+                            Icon(
+                                step.icon,
+                                contentDescription = step.label,
+                                tint = if (step.isComplete) JarvisGreen else TextTertiary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                step.label,
+                                color = if (step.isComplete) JarvisGreen else TextSecondary,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.weight(1f)
+                            )
+                            // Step-specific action buttons
+                            if (!step.isComplete) {
+                                when (index) {
+                                    0 -> {
+                                        // Set Groq API Key — scroll to API Keys section
+                                        TextButton(
+                                            onClick = { /* Tapping SET KEY highlights the API Keys section below */ },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                "SET KEY",
+                                                color = JarvisCyan,
+                                                fontSize = 9.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                letterSpacing = 1.sp
+                                            )
+                                        }
+                                    }
+                                    1 -> {
+                                        // Enable Accessibility — open Settings
+                                        TextButton(
+                                            onClick = {
+                                                try {
+                                                    context.startActivity(
+                                                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                                    )
+                                                } catch (e: Exception) {
+                                                    // Fallback to general settings
+                                                    context.startActivity(
+                                                        Intent(Settings.ACTION_SETTINGS)
+                                                    )
+                                                }
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                "OPEN SETTINGS",
+                                                color = JarvisCyan,
+                                                fontSize = 9.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                letterSpacing = 1.sp
+                                            )
+                                        }
+                                    }
+                                    2 -> {
+                                        // Grant Overlay Permission
+                                        TextButton(
+                                            onClick = {
+                                                try {
+                                                    val intent = Intent(
+                                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                                        Uri.parse("package:${context.packageName}")
+                                                    )
+                                                    context.startActivity(intent)
+                                                } catch (e: Exception) {
+                                                    context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                                        data = Uri.parse("package:${context.packageName}")
+                                                    })
+                                                }
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                "OPEN SETTINGS",
+                                                color = JarvisCyan,
+                                                fontSize = 9.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                letterSpacing = 1.sp
+                                            )
+                                        }
+                                    }
+                                    3 -> {
+                                        // Enable Shizuku
+                                        TextButton(
+                                            onClick = onShizukuRequestPermission,
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                "SETUP",
+                                                color = JarvisCyan,
+                                                fontSize = 9.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                letterSpacing = 1.sp
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
-                        Icon(
-                            step.icon,
-                            contentDescription = step.label,
-                            tint = if (step.isComplete) JarvisGreen else TextTertiary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            step.label,
-                            color = if (step.isComplete) JarvisGreen else TextSecondary,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
+                        // Step-specific info text below certain steps
+                        if (index == 3 && !step.isComplete) {
+                            Text(
+                                text = "Shizuku allows JARVIS to control your device without root. Install the Shizuku app and follow its setup guide.",
+                                color = TextTertiary,
+                                fontSize = 9.sp,
+                                fontFamily = FontFamily.Monospace,
+                                lineHeight = 12.sp,
+                                modifier = Modifier.padding(start = 52.dp, top = 2.dp, bottom = 4.dp)
+                            )
+                        }
                     }
                 }
 

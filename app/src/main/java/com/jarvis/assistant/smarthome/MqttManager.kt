@@ -167,66 +167,78 @@ object MqttManager {
 
     /**
      * Subscribe to a topic.
+     * SUSPEND: Waits for the subscription result instead of returning true prematurely.
      */
-    fun subscribe(topic: String, qos: Int = 1): Boolean {
-        try {
-            client?.subscribe(topic, qos, null, object : IMqttActionListener {
-                override fun onSuccess(asyncActionToken: IMqttToken?) {
-                    subscribedTopics.add(topic)
-                    Log.d(TAG, "Subscribed to $topic (QoS $qos)")
-                }
-                override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                    Log.e(TAG, "Failed to subscribe to $topic", exception)
-                }
-            })
-            return true
+    suspend fun subscribe(topic: String, qos: Int = 1): Boolean {
+        return try {
+            suspendCancellableCoroutine { cont ->
+                client?.subscribe(topic, qos, null, object : IMqttActionListener {
+                    override fun onSuccess(asyncActionToken: IMqttToken?) {
+                        subscribedTopics.add(topic)
+                        Log.d(TAG, "Subscribed to $topic (QoS $qos)")
+                        if (cont.isActive) cont.resume(true) {}
+                    }
+                    override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                        Log.e(TAG, "Failed to subscribe to $topic", exception)
+                        if (cont.isActive) cont.resume(false) {}
+                    }
+                })
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Subscribe error", e)
-            return false
+            false
         }
     }
 
     /**
      * Unsubscribe from a topic.
+     * SUSPEND: Waits for the unsubscription result instead of returning true prematurely.
      */
-    fun unsubscribe(topic: String): Boolean {
-        try {
-            client?.unsubscribe(topic, null, object : IMqttActionListener {
-                override fun onSuccess(asyncActionToken: IMqttToken?) {
-                    subscribedTopics.remove(topic)
-                    Log.d(TAG, "Unsubscribed from $topic")
-                }
-                override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                    Log.e(TAG, "Failed to unsubscribe from $topic", exception)
-                }
-            })
-            return true
+    suspend fun unsubscribe(topic: String): Boolean {
+        return try {
+            suspendCancellableCoroutine { cont ->
+                client?.unsubscribe(topic, null, object : IMqttActionListener {
+                    override fun onSuccess(asyncActionToken: IMqttToken?) {
+                        subscribedTopics.remove(topic)
+                        Log.d(TAG, "Unsubscribed from $topic")
+                        if (cont.isActive) cont.resume(true) {}
+                    }
+                    override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                        Log.e(TAG, "Failed to unsubscribe from $topic", exception)
+                        if (cont.isActive) cont.resume(false) {}
+                    }
+                })
+            }
         } catch (e: Exception) {
-            return false
+            false
         }
     }
 
     /**
      * Publish a message to a topic.
+     * SUSPEND: Waits for the publish result instead of returning true prematurely.
      */
-    fun publish(topic: String, payload: String, qos: Int = 1, retained: Boolean = false): Boolean {
-        try {
+    suspend fun publish(topic: String, payload: String, qos: Int = 1, retained: Boolean = false): Boolean {
+        return try {
             val message = MqttMessage(payload.toByteArray()).apply {
                 this.qos = qos
                 this.isRetained = retained
             }
-            client?.publish(topic, message, null, object : IMqttActionListener {
-                override fun onSuccess(asyncActionToken: IMqttToken?) {
-                    Log.d(TAG, "Published to $topic: $payload")
-                }
-                override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                    Log.e(TAG, "Failed to publish to $topic", exception)
-                }
-            })
-            return true
+            suspendCancellableCoroutine { cont ->
+                client?.publish(topic, message, null, object : IMqttActionListener {
+                    override fun onSuccess(asyncActionToken: IMqttToken?) {
+                        Log.d(TAG, "Published to $topic: $payload")
+                        if (cont.isActive) cont.resume(true) {}
+                    }
+                    override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                        Log.e(TAG, "Failed to publish to $topic", exception)
+                        if (cont.isActive) cont.resume(false) {}
+                    }
+                })
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Publish error", e)
-            return false
+            false
         }
     }
 

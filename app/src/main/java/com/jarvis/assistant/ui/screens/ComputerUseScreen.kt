@@ -74,7 +74,11 @@ fun ComputerUseScreen(
     actionLog: List<String> = emptyList(),
     onCommand: (String) -> Unit = {},
     onTakeControl: () -> Unit = {},
-    onStop: () -> Unit = {}
+    onStop: () -> Unit = {},
+    screenTextData: String = "",
+    aiThinkingText: String = "",
+    currentRound: Int = 0,
+    maxRounds: Int = AutonomousAgentEngine.MAX_AUTONOMOUS_ROUNDS
 ) {
     // ── Internal command text state ─────────────────────────────────────────
     var commandText by remember { mutableStateOf("") }
@@ -84,13 +88,14 @@ fun ComputerUseScreen(
     var realCursorY by remember { mutableStateOf(JarviewModel.cursorY) }
 
     // Update from JarviewModel events
-    LaunchedEffect(Unit) {
-        JarviewModel.eventSink = { event, data ->
+    DisposableEffect(Unit) {
+        val removeListener = JarviewModel.addEventListener { event, data ->
             if (event == "cursor_moved") {
                 realCursorX = (data["x"] as? Int) ?: realCursorX
                 realCursorY = (data["y"] as? Int) ?: realCursorY
             }
         }
+        onDispose { removeListener() }
     }
 
     // ── Observe AutonomousAgentEngine state ─────────────────────────────────
@@ -208,7 +213,11 @@ fun ComputerUseScreen(
                 cursorPulse = cursorPulse,
                 scanLineProgress = scanLineProgress,
                 aiStatus = aiStatus,
-                statusColor = statusColor
+                statusColor = statusColor,
+                screenTextData = screenTextData,
+                aiThinkingText = aiThinkingText,
+                currentRound = currentRound,
+                maxRounds = maxRounds
             )
         }
 
@@ -357,7 +366,11 @@ private fun ScreenMirrorCanvas(
     cursorPulse: Float,
     scanLineProgress: Float,
     aiStatus: String,
-    statusColor: Color
+    statusColor: Color,
+    screenTextData: String,
+    aiThinkingText: String,
+    currentRound: Int,
+    maxRounds: Int
 ) {
     Box(
         modifier = Modifier
@@ -400,15 +413,16 @@ private fun ScreenMirrorCanvas(
                 )
             }
 
-            // Scan line
+            // Scan line — CYAN + PURPLE gradient, 3dp thick with enhanced glow
             val scanY = scanLineProgress * size.height
+            val scanStrokeW = 3.dp.toPx()
             drawLine(
                 brush = Brush.horizontalGradient(
                     colors = listOf(
                         Color.Transparent,
-                        JarvisCyan.copy(alpha = 0.15f),
-                        JarvisPurple.copy(alpha = 0.2f),
-                        JarvisCyan.copy(alpha = 0.15f),
+                        JarvisCyan.copy(alpha = 0.6f),
+                        JarvisPurple.copy(alpha = 0.7f),
+                        JarvisCyan.copy(alpha = 0.6f),
                         Color.Transparent
                     ),
                     startX = 0f,
@@ -416,21 +430,39 @@ private fun ScreenMirrorCanvas(
                 ),
                 start = Offset(0f, scanY),
                 end = Offset(size.width, scanY),
-                strokeWidth = 2.dp.toPx()
+                strokeWidth = scanStrokeW
             )
-            // Scan line glow
+            // Scan line glow — wide outer glow for visibility
             drawRect(
                 brush = Brush.verticalGradient(
                     colors = listOf(
                         Color.Transparent,
-                        JarvisCyan.copy(alpha = 0.03f),
+                        JarvisCyan.copy(alpha = 0.12f),
+                        JarvisPurple.copy(alpha = 0.08f),
+                        JarvisCyan.copy(alpha = 0.12f),
                         Color.Transparent
                     ),
-                    startY = scanY - 15.dp.toPx(),
-                    endY = scanY + 15.dp.toPx()
+                    startY = scanY - 36.dp.toPx(),
+                    endY = scanY + 36.dp.toPx()
                 ),
-                topLeft = Offset(0f, scanY - 15.dp.toPx()),
-                size = Size(size.width, 30.dp.toPx())
+                topLeft = Offset(0f, scanY - 36.dp.toPx()),
+                size = Size(size.width, 72.dp.toPx())
+            )
+            // Inner bright glow behind scan line
+            drawRect(
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        Color.White.copy(alpha = 0.08f),
+                        Color.White.copy(alpha = 0.12f),
+                        Color.White.copy(alpha = 0.08f),
+                        Color.Transparent
+                    ),
+                    startY = scanY - 12.dp.toPx(),
+                    endY = scanY + 12.dp.toPx()
+                ),
+                topLeft = Offset(0f, scanY - 12.dp.toPx()),
+                size = Size(size.width, 24.dp.toPx())
             )
 
             // Corner brackets
@@ -451,6 +483,186 @@ private fun ScreenMirrorCanvas(
             // Bottom-right
             drawLine(bracketColor, Offset(size.width - margin, size.height - margin), Offset(size.width - margin - bracketLen, size.height - margin), bracketStroke)
             drawLine(bracketColor, Offset(size.width - margin, size.height - margin), Offset(size.width - margin, size.height - margin - bracketLen), bracketStroke)
+        }
+
+        // ── Live Screen Text Summary (LazyColumn with monospace lines) ──
+        if (isAiActive) {
+            GlassmorphicCard(
+                backgroundColor = SurfaceNavyDeep.copy(alpha = 0.80f),
+                borderColor = JarvisCyan.copy(alpha = 0.18f),
+                cornerRadius = 10.dp,
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .align(Alignment.TopCenter)
+                    .padding(8.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Visibility,
+                            contentDescription = "Screen",
+                            tint = InfoBlue,
+                            modifier = Modifier.size(10.dp)
+                        )
+                        Text(
+                            text = "SCREEN CONTENT",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                color = InfoBlue,
+                                fontSize = 8.sp,
+                                letterSpacing = 1.sp
+                            )
+                        )
+                    }
+                    Spacer(Modifier.height(2.dp))
+                    if (screenTextData.isBlank()) {
+                        // Show "Reading screen..." when no data yet
+                        Text(
+                            text = "Reading screen...",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                color = JarvisCyan.copy(alpha = 0.5f),
+                                fontSize = 8.sp,
+                                lineHeight = 10.sp
+                            )
+                        )
+                    } else {
+                        // LazyColumn with line-by-line screen text
+                        val lines = screenTextData.lines().take(12)
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 72.dp),
+                            verticalArrangement = Arrangement.spacedBy(0.dp)
+                        ) {
+                            items(lines) { line ->
+                                Text(
+                                    text = line.ifBlank { " " },
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        fontFamily = FontFamily.Monospace,
+                                        color = JarvisCyan.copy(alpha = 0.55f),
+                                        fontSize = 8.sp,
+                                        lineHeight = 10.sp
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── AI Thinking Overlay (bottom-left) ────────────────────────────
+        if (isAiActive && aiThinkingText.isNotBlank()) {
+            GlassmorphicCard(
+                backgroundColor = JarvisPurple.copy(alpha = 0.08f),
+                borderColor = JarvisPurple.copy(alpha = 0.25f),
+                cornerRadius = 8.dp,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(10.dp)
+                    .fillMaxWidth(0.7f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.Top,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Psychology,
+                        contentDescription = "Thinking",
+                        tint = JarvisPurple,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Text(
+                        text = aiThinkingText.take(120),
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = JarvisPurple.copy(alpha = 0.9f),
+                            fontSize = 9.sp
+                        ),
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        // ── Coordinates Badge (top-right) ────────────────────────────────
+        if (isAiActive) {
+            val coordX = (animatedCursorX * JarviewModel.screenWidth).toInt()
+            val coordY = (animatedCursorY * JarviewModel.screenHeight).toInt()
+            GlassmorphicCard(
+                backgroundColor = JarvisCyan.copy(alpha = 0.08f),
+                borderColor = JarvisCyan.copy(alpha = 0.2f),
+                cornerRadius = 6.dp,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.MyLocation,
+                        contentDescription = "Coords",
+                        tint = JarvisCyan,
+                        modifier = Modifier.size(9.dp)
+                    )
+                    Text(
+                        text = "X:$coordX Y:$coordY",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = JarvisCyan,
+                            fontSize = 8.sp,
+                            letterSpacing = 0.5.sp
+                        )
+                    )
+                }
+            }
+        }
+
+        // ── Round Counter Badge (top-left corner) ────────────────────
+        if (isAiActive && currentRound > 0) {
+            GlassmorphicCard(
+                backgroundColor = WarningAmber.copy(alpha = 0.08f),
+                borderColor = WarningAmber.copy(alpha = 0.2f),
+                cornerRadius = 6.dp,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = "Round",
+                        tint = WarningAmber,
+                        modifier = Modifier.size(9.dp)
+                    )
+                    Text(
+                        text = "R$currentRound/$maxRounds",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = WarningAmber,
+                            fontSize = 8.sp,
+                            letterSpacing = 0.5.sp
+                        )
+                    )
+                }
+            }
         }
 
         // Placeholder text when AI is not active

@@ -208,6 +208,51 @@ object ToolDefinitions {
             "Take a screenshot of the current screen.",
             params()
         ))
+
+        // ─── Calendar ────────────────────────────────────────────────
+
+        put(tool("create_calendar_event",
+            "Create a calendar event using Android's Calendar Provider. Supports title, start time, end time, description, and location.",
+            params(
+                "title" to stringParam("The title/summary of the event (e.g., 'Team Meeting')"),
+                "start_time" to stringParam("Start time in ISO 8601 format (e.g., '2025-03-15T14:00:00')"),
+                "end_time" to stringParam("Optional end time in ISO 8601 format (e.g., '2025-03-15T15:00:00')"),
+                "description" to stringParam("Optional description or notes for the event"),
+                "location" to stringParam("Optional location for the event (e.g., 'Conference Room B')")
+            ),
+            required = listOf("title", "start_time")
+        ))
+
+        // ─── Notifications ──────────────────────────────────────────
+
+        put(tool("read_notifications",
+            "Read recent notifications from the device. Returns the most recent notifications with app name, title, and content.",
+            params(
+                "limit" to intParam("Maximum number of notifications to return (default 10, max 50)")
+            )
+        ))
+
+        // ─── Key Press ──────────────────────────────────────────────
+
+        put(tool("press_key",
+            "Press a specific hardware or system key. Useful for volume control, power button, and navigation keys.",
+            params("key" to enumParam("The key to press", listOf("volume_up", "volume_down", "power", "enter", "back", "home", "recent"))),
+            required = listOf("key")
+        ))
+
+        // ─── Swipe Gesture ──────────────────────────────────────────
+
+        put(tool("swipe_gesture",
+            "Perform a swipe gesture with custom start/end coordinates and duration. More flexible than dispatch_gesture for precise directional swipes.",
+            params(
+                "start_x" to intParam("Starting X coordinate on screen"),
+                "start_y" to intParam("Starting Y coordinate on screen"),
+                "end_x" to intParam("Ending X coordinate on screen"),
+                "end_y" to intParam("Ending Y coordinate on screen"),
+                "duration" to intParam("Duration of the swipe in milliseconds (default 300)")
+            ),
+            required = listOf("start_x", "start_y", "end_x", "end_y")
+        ))
     }
 
     /**
@@ -236,7 +281,11 @@ object ToolDefinitions {
 - make_phone_call: Make a phone call
 - send_sms: Send an SMS message
 - take_screenshot: Take a screenshot of the current screen
-- set_volume: Set the media volume"""
+- set_volume: Set the media volume
+- create_calendar_event: Create a calendar event with title, start time, and optional details
+- read_notifications: Read recent notifications from the device
+- press_key: Press a hardware or system key (volume, power, back, home, etc.)
+- swipe_gesture: Custom swipe with start/end coordinates and duration"""
 
     // ─── Helper functions for building tool definitions ──────────────
 

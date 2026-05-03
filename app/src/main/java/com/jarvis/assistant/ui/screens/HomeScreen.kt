@@ -38,11 +38,15 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatteryStd
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.StickyNote2
+import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -127,6 +131,9 @@ fun HomeScreen(
     availableMemoryMb: Long = -1L,
     recentCommands: List<String> = emptyList(),
     onRequestDailyBrief: () -> Unit = {},
+    isAccessibilityEnabled: Boolean = false,
+    isShizukuAvailable: Boolean = false,
+    isOverlayCursorRunning: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -636,6 +643,18 @@ fun HomeScreen(
                 }
             }
 
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // ══════════════════════════════════════════════════════════════
+            // SERVICE STATUS CARD — Accessibility / Shizuku / Overlay
+            // Below the JARVIS Core card for at-a-glance device control status
+            // ══════════════════════════════════════════════════════════════
+            AiControlStatusCard(
+                isAccessibilityEnabled = isAccessibilityEnabled,
+                isShizukuAvailable = isShizukuAvailable,
+                isOverlayCursorRunning = isOverlayCursorRunning
+            )
+
             Spacer(modifier = Modifier.height(32.dp))
         }
     }
@@ -1138,6 +1157,157 @@ private data class ParticleData(
     val alpha: Float,
     val phaseOffset: Float
 )
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AI CONTROL STATUS CARD — Accessibility / Shizuku / Overlay at-a-glance
+// ═══════════════════════════════════════════════════════════════════════════════
+
+@Composable
+private fun AiControlStatusCard(
+    isAccessibilityEnabled: Boolean,
+    isShizukuAvailable: Boolean,
+    isOverlayCursorRunning: Boolean
+) {
+    val allReady = isAccessibilityEnabled && isShizukuAvailable
+    val readyCount = listOf(isAccessibilityEnabled, isShizukuAvailable, isOverlayCursorRunning).count { it }
+    val statusColor = when {
+        readyCount == 3 -> JarvisGreen
+        readyCount >= 2 -> JarvisCyan
+        readyCount >= 1 -> WarningAmber
+        else -> JarvisRedPink
+    }
+
+    GlassmorphicCardSimple(
+        modifier = Modifier.fillMaxWidth(),
+        showHighlight = true,
+        highlightColor = statusColor.copy(alpha = 0.04f)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Psychology,
+                        contentDescription = "AI Control",
+                        tint = statusColor,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "AI CONTROL STATUS",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = TextTertiary,
+                            letterSpacing = 2.sp,
+                            fontSize = 9.sp
+                        )
+                    )
+                }
+                Text(
+                    text = "$readyCount/3",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        color = statusColor,
+                        fontSize = 10.sp
+                    )
+                )
+            }
+
+            // Status rows
+            ControlStatusRow(
+                icon = Icons.Filled.AccessibilityNew,
+                label = "Accessibility",
+                isConnected = isAccessibilityEnabled
+            )
+            ControlStatusRow(
+                icon = Icons.Filled.Usb,
+                label = "Shizuku",
+                isConnected = isShizukuAvailable
+            )
+            ControlStatusRow(
+                icon = Icons.Filled.Mouse,
+                label = "Overlay Cursor",
+                isConnected = isOverlayCursorRunning
+            )
+
+            if (allReady) {
+                Text(
+                    text = "All systems operational — AI has full control",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        color = JarvisGreen,
+                        fontSize = 9.sp
+                    )
+                )
+            } else if (!isAccessibilityEnabled) {
+                Text(
+                    text = "Enable Accessibility in Settings for device control",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        color = WarningAmber,
+                        fontSize = 9.sp
+                    )
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ControlStatusRow(
+    icon: ImageVector,
+    label: String,
+    isConnected: Boolean
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // Green check or red X icon
+        Icon(
+            imageVector = if (isConnected) Icons.Filled.CheckCircle else Icons.Filled.Cancel,
+            contentDescription = if (isConnected) "Connected" else "Disconnected",
+            tint = if (isConnected) JarvisGreen else JarvisRedPink,
+            modifier = Modifier.size(16.dp)
+        )
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = if (isConnected) TextSecondary else TextTertiary,
+            modifier = Modifier.size(14.dp)
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall.copy(
+                fontFamily = FontFamily.Monospace,
+                color = if (isConnected) TextPrimary else TextTertiary,
+                fontSize = 11.sp
+            ),
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            text = if (isConnected) "CONNECTED" else "DISCONNECTED",
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontFamily = FontFamily.Monospace,
+                color = if (isConnected) JarvisGreen else JarvisRedPink,
+                fontSize = 8.sp,
+                letterSpacing = 1.sp
+            )
+        )
+    }
+}
 
 private fun getGreeting(): String {
     val hour = LocalTime.now().hour

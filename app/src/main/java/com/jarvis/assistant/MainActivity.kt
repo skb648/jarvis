@@ -231,7 +231,7 @@ class MainActivity : ComponentActivity() {
             // MQTT Connect button — triggers actual MQTT reconnection
             onMqttConnect = { viewModel.triggerMqttConnect(context) },
             // HomeScreen location context
-            locationContext = viewModel.locationContext.value,
+            locationContext = viewModel.locationContext.collectAsState().value,
             // Wake flash effect
             wakeFlash = wakeFlash,
             // Voice direction (reserved for future use)
@@ -261,7 +261,16 @@ class MainActivity : ComponentActivity() {
             computerActionLog = viewModel.computerActionLog.collectAsState().value,
             onComputerCommand = { cmd -> viewModel.processComputerCommand(cmd, context) },
             onActivateComputerUse = { viewModel.activateComputerUse() },
-            onDeactivateComputerUse = { viewModel.deactivateComputerUse() }
+            onDeactivateComputerUse = { viewModel.deactivateComputerUse() },
+            // HomeScreen additional state
+            isAccessibilityEnabled = com.jarvis.assistant.channels.JarviewModel.hasAccessibilityEnabled,
+            isOverlayCursorRunning = com.jarvis.assistant.channels.JarviewModel.cursorServiceRunning,
+            // ComputerUse screen text data
+            screenTextData = com.jarvis.assistant.channels.JarviewModel.screenTextData,
+            aiThinkingText = com.jarvis.assistant.automation.AutonomousAgentEngine.actionLog.lastOrNull()?.result?.take(120) ?: "",
+            currentRound = com.jarvis.assistant.automation.AutonomousAgentEngine.actionLog.lastOrNull()?.round ?: 0,
+            // Overlay permission granted state for SettingsScreen setup wizard
+            isOverlayPermissionGranted = android.provider.Settings.canDrawOverlays(this@MainActivity)
         )
     }
 
