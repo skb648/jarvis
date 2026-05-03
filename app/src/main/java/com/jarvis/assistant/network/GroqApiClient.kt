@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -81,6 +82,15 @@ object GroqApiClient {
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .writeTimeout(10, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /** Client for Whisper STT requests — longer write timeout for audio uploads */
+    private val sttHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
             .build()
     }
 
@@ -285,4 +295,84 @@ object GroqApiClient {
             Pair(false, "Network error: ${e.message?.take(100)}")
         }
     }
+
+    /**
+     * Transcribe audio using Groq Whisper STT endpoint.
+     *
+     * This consolidates the Whisper STT logic that was previously scattered in JarvisViewModel.
+     * Accepts raw audio data (WAV format preferred), sends it to the Groq Whisper API,
+     * and returns the transcribed text.
+     *
+     * @param audioData Audio bytes in WAV format (16kHz, 16-bit, mono recommended)
+     * @param apiKey    Groq API key
+     * @return ApiResult.Success with transcription text, or ApiResult.HttpError/NetworkError on failure
+     */
+    suspend fun transcribeAudio(
+        audioData: ByteArray,
+        apiKey: String
+    ): ApiResult = withContext(Dispatchers.IO) {
+        val trimmedKey = apiKey.trim()
+        if (trimmedKey.isBlank()) return@withContext ApiResult.NetworkError("API key is empty")
+        if (audioData.isEmpty()) return@withContext ApiResult.NetworkError("Audio data is empty")
+
+        try {
+            val requestBody = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("model", "distil-whisper-large-v3-en")
+                .addFormDataPart("response_format", "json")
+                .addFormDataPart(
+                    "file", "recording.wav",
+                    audioData.toRequestBody("audio/wav".toMediaType())
+                )
+                .build()
+
+            val request = Request.Builder()
+                .url(STT_URL)
+                .addHeader("Authorization", "Bearer $trimmedKey")
+                .post(requestBody)
+                .build()
+
+            val response = sttHttpClient.newCall(request).execute()
+
+            response.use {
+                when (it.code) {
+                    200 -> {
+                        val responseBody = it.body?.string() ?: ""
+                        val transcribedText = try {
+                            val json = JSONObject(responseBody)
+                            json.optString("text", "")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[transcribeAudio] JSON parse error: ${e.message}")
+                            ""
+                        }
+                        Log.i(TAG, "[transcribeAudio] SUCCESS — transcription: \"${transcribedText.take(100)}\"")
+                        ApiResult.Success(responseBody, "distil-whisper-large-v3-en")
+                    }
+                    else -> {
+                        val errorBody = try {
+                            it.body?.string() ?: ""
+                        } catch (_: Exception) { "" }
+                        val friendlyMsg = when (it.code) {
+                            401 -> "Invalid API key (401)"
+                            413 -> "Audio file too large (413)"
+                            429 -> "Rate limited (429)"
+                            else -> "HTTP ${it.code}"
+                        }
+                        Log.e(TAG, "[transcribeAudio] $friendlyMsg: ${errorBody.take(300)}")
+                        ApiResult.HttpError(it.code, "$friendlyMsg — ${errorBody.take(200)}")
+                    }
+                }
+            }
+        } catch (e: java.net.SocketTimeoutException) {
+            Log.w(TAG, "[transcribeAudio] Timeout: ${e.message}")
+            ApiResult.NetworkError("Timeout: ${e.message}")
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "[transcribeAudio] IO error: ${e.message}")
+            ApiResult.NetworkError("Network error: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "[transcribeAudio] Error: ${e.message}")
+            ApiResult.NetworkError("Error: ${e.message?.take(100)}")
+        }
+    }
 }
+

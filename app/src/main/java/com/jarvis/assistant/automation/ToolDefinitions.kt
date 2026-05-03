@@ -4,11 +4,16 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * ToolDefinitions — SINGLE SOURCE OF TRUTH for all JARVIS tool definitions.
+ * ToolDefinitions — SINGLE SOURCE OF TRUTH for all JARVIS tool definitions
+ * and shared Groq API response types.
  *
  * All tool definitions used by GroqFunctionCaller and AutonomousAgentEngine
  * are defined HERE. This eliminates the 3x duplication bug where tools were
  * copy-pasted across multiple files, causing inconsistencies.
+ *
+ * The GroqResponse sealed class and parseGroqResponse() function are also
+ * defined here as shared top-level declarations, eliminating duplication
+ * between GroqFunctionCaller and AutonomousAgentEngine.
  *
  * When adding a new tool:
  *   1. Add the definition here
@@ -16,6 +21,70 @@ import org.json.JSONObject
  *   3. Add the tool name to AVAILABLE_TOOLS_LIST for the system prompt
  *   4. Done — both GroqFunctionCaller and AutonomousAgentEngine will pick it up
  */
+
+/**
+ * Parsed Groq API response — either a text response, a tool call, or an error.
+ *
+ * Shared by GroqFunctionCaller and AutonomousAgentEngine.
+ * SINGLE SOURCE OF TRUTH — do NOT duplicate in other files.
+ */
+sealed class GroqResponse {
+    data class Text(val text: String) : GroqResponse()
+    data class ToolCall(val id: String, val name: String, val args: Map<String, String>) : GroqResponse()
+    data class Error(val message: String) : GroqResponse()
+}
+
+/**
+ * Parse the Groq API response body and extract either text or tool calls.
+ * Handles the OpenAI-compatible format used by Groq.
+ *
+ * Shared by GroqFunctionCaller and AutonomousAgentEngine.
+ * SINGLE SOURCE OF TRUTH — do NOT duplicate in other files.
+ */
+fun parseGroqResponse(responseBody: String): GroqResponse {
+    return try {
+        val json = JSONObject(responseBody)
+        val choices = json.optJSONArray("choices")
+        if (choices == null || choices.length() == 0) {
+            return GroqResponse.Error("Empty response from Groq API")
+        }
+
+        val firstChoice = choices.getJSONObject(0)
+        val message = firstChoice.getJSONObject("message")
+        val toolCalls = message.optJSONArray("tool_calls")
+        val content = message.optString("content", "")
+
+        if (toolCalls != null && toolCalls.length() > 0) {
+            val firstToolCall = toolCalls.getJSONObject(0)
+            val id = firstToolCall.getString("id")
+            val function = firstToolCall.getJSONObject("function")
+            val name = function.getString("name")
+            val argsStr = function.getString("arguments")
+
+            val args = try {
+                val argsJson = JSONObject(argsStr)
+                val argsMap = mutableMapOf<String, String>()
+                val keys = argsJson.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    argsMap[key] = argsJson.getString(key)
+                }
+                argsMap.toMap()
+            } catch (e: Exception) {
+                emptyMap()
+            }
+
+            GroqResponse.ToolCall(id, name, args)
+        } else if (content.isNotBlank()) {
+            GroqResponse.Text(content)
+        } else {
+            GroqResponse.Error("Empty response content")
+        }
+    } catch (e: Exception) {
+        GroqResponse.Error("Failed to parse response: ${e.message?.take(100)}")
+    }
+}
+
 object ToolDefinitions {
 
     /**
@@ -253,6 +322,13 @@ object ToolDefinitions {
             ),
             required = listOf("start_x", "start_y", "end_x", "end_y")
         ))
+
+        // ─── Conversation ──────────────────────────────────────────
+
+        put(tool("export_conversation",
+            "Export the current conversation history as a formatted text file saved to the Downloads directory. Use when the user asks to save, export, or download the chat history.",
+            params()
+        ))
     }
 
     /**
@@ -285,7 +361,8 @@ object ToolDefinitions {
 - create_calendar_event: Create a calendar event with title, start time, and optional details
 - read_notifications: Read recent notifications from the device
 - press_key: Press a hardware or system key (volume, power, back, home, etc.)
-- swipe_gesture: Custom swipe with start/end coordinates and duration"""
+- swipe_gesture: Custom swipe with start/end coordinates and duration
+- export_conversation: Export chat history to a text file in Downloads"""
 
     // ─── Helper functions for building tool definitions ──────────────
 

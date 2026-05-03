@@ -78,14 +78,8 @@ object GroqFunctionCaller {
         data class Error(val message: String) : ProcessResult()
     }
 
-    /**
-     * Parsed Groq response — either a text response, a tool call, or an error.
-     */
-    sealed class GroqResponse {
-        data class Text(val text: String) : GroqResponse()
-        data class ToolCall(val id: String, val name: String, val args: Map<String, String>) : GroqResponse()
-        data class Error(val message: String) : GroqResponse()
-    }
+    // GroqResponse and parseGroqResponse are now defined in ToolDefinitions.kt
+    // as shared top-level declarations to avoid duplication.
 
     /**
      * Send a query to Groq with tool definitions and process the response.
@@ -236,57 +230,7 @@ ${ToolDefinitions.AVAILABLE_TOOLS_LIST}"""
         }.toString()
     }
 
-    /**
-     * Parse the Groq API response and extract either text or tool calls.
-     */
-    private fun parseGroqResponse(responseBody: String): GroqResponse {
-        return try {
-            val json = org.json.JSONObject(responseBody)
-            val choices = json.optJSONArray("choices")
-            if (choices == null || choices.length() == 0) {
-                return GroqResponse.Error("Empty response from Groq API")
-            }
-
-            val firstChoice = choices.getJSONObject(0)
-            val message = firstChoice.getJSONObject("message")
-            val toolCalls = message.optJSONArray("tool_calls")
-            val content = message.optString("content", "")
-
-            if (toolCalls != null && toolCalls.length() > 0) {
-                // Tool call response
-                val firstToolCall = toolCalls.getJSONObject(0)
-                val id = firstToolCall.getString("id")
-                val function = firstToolCall.getJSONObject("function")
-                val name = function.getString("name")
-                val argsStr = function.getString("arguments")
-
-                val args = try {
-                    val argsJson = org.json.JSONObject(argsStr)
-                    val argsMap = mutableMapOf<String, String>()
-                    val keys = argsJson.keys()
-                    while (keys.hasNext()) {
-                        val key = keys.next()
-                        argsMap[key] = argsJson.getString(key)
-                    }
-                    argsMap.toMap()
-                } catch (e: Exception) {
-                    Log.w(TAG, "[parseGroqResponse] Failed to parse tool args: $argsStr")
-                    emptyMap()
-                }
-
-                Log.i(TAG, "[parseGroqResponse] Tool call: $name($args)")
-                GroqResponse.ToolCall(id, name, args)
-            } else if (content.isNotBlank()) {
-                Log.i(TAG, "[parseGroqResponse] Text response: ${content.take(100)}")
-                GroqResponse.Text(content)
-            } else {
-                GroqResponse.Error("Empty response content")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "[parseGroqResponse] Parse error: ${e.message}")
-            GroqResponse.Error("Failed to parse response: ${e.message?.take(100)}")
-        }
-    }
+    // parseGroqResponse() is now a shared top-level function in ToolDefinitions.kt
 
     /**
      * Handle a tool call from Groq — execute it and send the result back.
@@ -477,12 +421,15 @@ ${ToolDefinitions.AVAILABLE_TOOLS_LIST}"""
             try {
                 val rootNode = accService.rootInActiveWindow
                 if (rootNode != null) {
-                    val screenElements = StringBuilder()
-                    traverseNode(rootNode, screenElements, 0)
-                    rootNode.recycle()
-                    if (screenElements.isNotEmpty()) {
-                        sb.append("Screen elements:\n$screenElements")
-                        return sb.toString().take(3000) // Limit context size
+                    try {
+                        val screenElements = StringBuilder()
+                        traverseNode(rootNode, screenElements, 0)
+                        if (screenElements.isNotEmpty()) {
+                            sb.append("Screen elements:\n$screenElements")
+                            return sb.toString().take(3000) // Limit context size
+                        }
+                    } finally {
+                        rootNode.recycle()
                     }
                 }
             } catch (e: Exception) {

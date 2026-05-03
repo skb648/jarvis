@@ -962,6 +962,9 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
     // ─── Init ─────────────────────────────────────────────────────────────
 
     init {
+        // Register this ViewModel with JarviewModel for cross-component access
+        com.jarvis.assistant.channels.JarviewModel.viewModel = java.lang.ref.WeakReference(this)
+
         Log.d(AUDIO_TAG, "[JarvisViewModel] init started")
         loadPersistedSettings()
         _isRustReady.value = RustBridge.isNativeReady()
@@ -1652,53 +1655,31 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                 val wavBytes = pcmToWav(resampledPcm, sampleRate = targetSampleRate, channels = 1, bitsPerSample = 16)
                 Log.d(AUDIO_TAG, "[transcribeViaGroqWhisper] Sending ${wavBytes.size} bytes WAV to Groq Whisper")
 
-                // Groq Whisper API uses multipart/form-data
-                val boundary = "JarvisBoundary_${System.currentTimeMillis()}"
-                val requestBody = okhttp3.MultipartBody.Builder(boundary)
-                    .setType(okhttp3.MultipartBody.FORM)
-                    .addFormDataPart("model", "distil-whisper-large-v3-en")
-                    // No language parameter — Groq Whisper auto-detects language (supports Hindi/Hinglish)
-                    .addFormDataPart("response_format", "json")
-                    .addFormDataPart(
-                        "file", "recording.wav",
-                        wavBytes.toRequestBody("audio/wav".toMediaType())
-                    )
-                    .build()
-
-                val request = okhttp3.Request.Builder()
-                    .url(com.jarvis.assistant.network.GroqApiClient.STT_URL)
-                    .addHeader("Authorization", "Bearer ${apiKey.trim()}")
-                    .post(requestBody)
-                    .build()
-
-                val client = okhttp3.OkHttpClient.Builder()
-                    .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-                    .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                    .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                    .build()
-
-                val response = client.newCall(request).execute()
-                if (response.code == 200) {
-                    val responseBody = response.body?.string() ?: ""
-                    response.close()
-                    val transcribedText = try {
-                        val root = JsonParser.parseString(responseBody).asJsonObject
-                        root.get("text")?.asString ?: ""
-                    } catch (e: Exception) {
-                        Log.e(AUDIO_TAG, "[transcribeViaGroqWhisper] JSON parsing failed: ${e.message}")
+                // Use the centralized GroqApiClient.transcribeAudio() method
+                val apiResult = com.jarvis.assistant.network.GroqApiClient.transcribeAudio(wavBytes, apiKey)
+                when (apiResult) {
+                    is com.jarvis.assistant.network.GroqApiClient.ApiResult.Success -> {
+                        val transcribedText = try {
+                            val root = JsonParser.parseString(apiResult.responseBody).asJsonObject
+                            root.get("text")?.asString ?: ""
+                        } catch (e: Exception) {
+                            Log.e(AUDIO_TAG, "[transcribeViaGroqWhisper] JSON parsing failed: ${e.message}")
+                            ""
+                        }
+                        if (transcribedText.isNotBlank()) {
+                            Log.i(AUDIO_TAG, "[transcribeViaGroqWhisper] Transcription: \"$transcribedText\"")
+                            return@withContext transcribedText
+                        }
                         ""
                     }
-
-                    if (transcribedText.isNotBlank()) {
-                        Log.i(AUDIO_TAG, "[transcribeViaGroqWhisper] Transcription: \"$transcribedText\"")
-                        return@withContext transcribedText
+                    is com.jarvis.assistant.network.GroqApiClient.ApiResult.HttpError -> {
+                        Log.w(AUDIO_TAG, "[transcribeViaGroqWhisper] HTTP error: ${apiResult.message}")
+                        ""
                     }
-                    return@withContext ""
-                } else {
-                    val errorBody = response.body?.string() ?: "unknown"
-                    response.close()
-                    Log.w(AUDIO_TAG, "[transcribeViaGroqWhisper] HTTP ${response.code}: ${errorBody.take(300)}")
-                    return@withContext ""
+                    is com.jarvis.assistant.network.GroqApiClient.ApiResult.NetworkError -> {
+                        Log.w(AUDIO_TAG, "[transcribeViaGroqWhisper] Network error: ${apiResult.message}")
+                        ""
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(AUDIO_TAG, "[transcribeViaGroqWhisper] Exception: ${e.message}", e)
@@ -3579,6 +3560,71 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
         _messages.value += ChatMessage(id = nextMessageId++, content = text, isFromUser = false, emotion = emotion)
         // Persist to Room DB
         persistMessage("model", text, emotion)
+    }
+
+    /**
+     * Export the current conversation history as a formatted text file.
+     *
+     * Saves to /sdcard/Download/Jarvis/ as jarvis_export_YYYYMMDD_HHmmss.txt
+     *
+     * @return The file path on success, or null on failure
+     */
+    suspend fun exportConversation(): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                val messages = _messages.value
+                if (messages.isEmpty()) {
+                    Log.w(TAG, "[exportConversation] No messages to export")
+                    return@withContext null
+                }
+
+                // Create export directory
+                val exportDir = File("/sdcard/Download/Jarvis")
+                if (!exportDir.exists()) {
+                    val created = exportDir.mkdirs()
+                    if (!created) {
+                        Log.e(TAG, "[exportConversation] Failed to create export directory")
+                        return@withContext null
+                    }
+                }
+
+                // Generate filename with timestamp
+                val dateFormat = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
+                val timestamp = dateFormat.format(System.currentTimeMillis())
+                val exportFile = File(exportDir, "jarvis_export_$timestamp.txt")
+
+                // Build formatted text
+                val sb = StringBuilder()
+                sb.append("═══════════════════════════════════════════════════════\n")
+                sb.append("  JARVIS — Conversation Export\n")
+                sb.append("  Exported: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(System.currentTimeMillis())}\n")
+                sb.append("  Messages: ${messages.size}\n")
+                sb.append("═══════════════════════════════════════════════════════\n\n")
+
+                for (msg in messages) {
+                    val sender = if (msg.isFromUser) "You" else "JARVIS"
+                    val timeFormat = java.text.SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                    val time = timeFormat.format(msg.timestamp)
+                    val emotionTag = if (!msg.isFromUser && msg.emotion != "neutral") " [${msg.emotion}]" else ""
+
+                    sb.append("[$time] $sender$emotionTag:\n")
+                    sb.append("${msg.content}\n\n")
+                }
+
+                sb.append("═══════════════════════════════════════════════════════\n")
+                sb.append("  End of conversation export\n")
+                sb.append("═══════════════════════════════════════════════════════\n")
+
+                // Write to file
+                exportFile.writeText(sb.toString())
+
+                Log.i(TAG, "[exportConversation] Exported ${messages.size} messages to ${exportFile.absolutePath}")
+                exportFile.absolutePath
+            } catch (e: Exception) {
+                Log.e(TAG, "[exportConversation] Failed: ${e.message}", e)
+                null
+            }
+        }
     }
 
     /**

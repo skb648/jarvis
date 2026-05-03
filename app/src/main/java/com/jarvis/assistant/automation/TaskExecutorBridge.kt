@@ -98,6 +98,7 @@ object TaskExecutorBridge {
             "read_notifications" -> executeReadNotifications(args)
             "press_key" -> executePressKey(args)
             "swipe_gesture" -> executeSwipeGesture(args)
+            "export_conversation" -> executeExportConversation(context)
             else -> StepResult.Failed("Unknown tool: $toolName")
         }
     }
@@ -1315,6 +1316,27 @@ object TaskExecutorBridge {
         } else {
             // Shizuku fallback already handled by GestureController
             StepResult.Failed("Swipe gesture failed from ($startX,$startY) to ($endX,$endY)")
+        }
+    }
+
+    /**
+     * export_conversation — Export the chat history to a text file.
+     * Delegates to JarvisViewModel.exportConversation().
+     */
+    private suspend fun executeExportConversation(context: Context): StepResult {
+        return try {
+            // Access the ViewModel via JarviewModel bridge
+            val filePath = com.jarvis.assistant.channels.JarviewModel.viewModel?.get()?.exportConversation()
+            if (filePath != null) {
+                Log.i(TAG, "[exportConversation] Exported to: $filePath")
+                StepResult.Success("Conversation exported to: $filePath")
+            } else {
+                Log.w(TAG, "[exportConversation] Export returned null — no messages or write failed")
+                StepResult.Failed("Could not export conversation — no messages or storage unavailable")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[exportConversation] Failed: ${e.message}")
+            StepResult.Failed("Export failed: ${e.message}")
         }
     }
 

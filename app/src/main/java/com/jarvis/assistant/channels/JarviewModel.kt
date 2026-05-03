@@ -68,6 +68,10 @@ object JarviewModel {
     @Volatile var keepAliveService: WeakReference<JarvisKeepAliveService>? = null
     @Volatile var overlayCursorService: WeakReference<OverlayCursorService>? = null
 
+    // ─── ViewModel Reference ───────────────────────────────────────
+    /** Weak reference to JarvisViewModel for cross-component access (e.g., conversation export) */
+    @Volatile var viewModel: WeakReference<com.jarvis.assistant.viewmodel.JarvisViewModel>? = null
+
     // ─── Permission States ────────────────────────────────────────
     @Volatile var hasOverlayPermission: Boolean = false
     @Volatile var hasAudioPermission: Boolean = false
@@ -241,6 +245,8 @@ object JarviewModel {
         speechService = null
         sensoryService = null
         keepAliveService = null
+        overlayCursorService = null
+        viewModel = null
         hasOverlayPermission = false
         hasAudioPermission = false
         hasCameraPermission = false
