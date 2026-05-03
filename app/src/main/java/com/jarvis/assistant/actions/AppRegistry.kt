@@ -25,10 +25,13 @@ object AppRegistry {
         // ── Google ──────────────────────────────────────────────
         "youtube"          to "com.google.android.youtube",
         "maps"             to "com.google.android.apps.maps",
+        "google maps"      to "com.google.android.apps.maps",
         "gmail"            to "com.google.android.gm",
         "chrome"           to "com.android.chrome",
         "drive"            to "com.google.android.apps.docs",
+        "google drive"     to "com.google.android.apps.docs",
         "photos"           to "com.google.android.apps.photos",
+        "google photos"    to "com.google.android.apps.photos",
         "play store"       to "com.android.vending",
         "play music"       to "com.google.android.apps.youtube.music",
         "youtube music"    to "com.google.android.apps.youtube.music",
@@ -36,22 +39,39 @@ object AppRegistry {
         "google"           to "com.google.android.googlequicksearchbox",
         "google home"      to "com.google.android.apps.chromecast.app",
         "translate"        to "com.google.android.apps.translate",
+        "google translate" to "com.google.android.apps.translate",
         "calendar"         to "com.google.android.calendar",
-        "clock"            to "com.android.deskclock",
+        "google calendar"  to "com.google.android.calendar",
+        "clock"            to "com.google.android.deskclock",
+        "alarm"            to "com.google.android.deskclock",
         "calculator"       to "com.google.android.calculator",
         "weather"          to "com.google.android.apps.weather",
+        "contacts"         to "com.google.android.contacts",
 
         // ── Social ──────────────────────────────────────────────
-        "whatsapp"         to "com.whatsapp",
-        "instagram"        to "com.instagram.android",
-        "twitter"          to "com.twitter.android",
-        "x"                to "com.twitter.android",
-        "facebook"         to "com.facebook.katana",
-        "telegram"         to "org.telegram.messenger",
-        "snapchat"         to "com.snapchat.android",
-        "discord"          to "com.discord",
+        "whatsapp"           to "com.whatsapp",
+        "whatsapp business"  to "com.whatsapp.w4b",
+        "instagram"          to "com.instagram.android",
+        "threads"            to "com.instagram.barcelona",
+        "twitter"            to "com.twitter.android",
+        "x"                  to "com.twitter.android",
+        "facebook"           to "com.facebook.katana",
+        "telegram"           to "org.telegram.messenger",
+        "telegram x"         to "org.telegram.plus",
+        "snapchat"           to "com.snapchat.android",
+        "discord"            to "com.discord",
+        "linkedin"           to "com.linkedin.android",
+        "pinterest"          to "com.pinterest",
+        "reddit"             to "com.reddit.frontpage",
+        "signal"             to "org.thoughtcrime.securesms",
+
+        // ── Streaming & Music ───────────────────────────────────
         "spotify"          to "com.spotify.music",
         "netflix"          to "com.netflix.mediaclient",
+        "prime video"      to "com.amazon.avod.thirdpartyclient",
+        "amazon prime"     to "com.amazon.avod.thirdpartyclient",
+        "twitch"           to "tv.twitch.android.app",
+        "vlc"              to "org.videolan.vlc",
 
         // ── Samsung ─────────────────────────────────────────────
         "samsung internet" to "com.sec.android.app.sbrowser",
@@ -67,6 +87,7 @@ object AppRegistry {
         // ── System ──────────────────────────────────────────────
         "settings"         to "com.android.settings",
         "files"            to "com.google.android.apps.nbu.files",
+        "file manager"     to "com.google.android.apps.nbu.files",
         "camera"           to "com.google.android.GoogleCamera",
 
         // ── Gaming ──────────────────────────────────────────────
@@ -102,11 +123,16 @@ object AppRegistry {
         "bharatpe"         to "com.bharatpe.app",
         "mobikwik"         to "com.mobikwik_new",
         "amazon pay"       to "in.amazon.mShop.android.shopping",
+        "truecaller"       to "com.truecaller",
+
+        // ── Ride-hailing ───────────────────────────────────────
+        "uber"             to "com.ubercab",
+        "ola"              to "com.olacabs.customer",
 
         // ── Indian Streaming ────────────────────────────────────
         "hotstar"          to "in.startv.hotstar",
         "disney hotstar"   to "in.startv.hotstar",
-        "jiocinema"        to "com.jio.media.vidplayer",
+        "jiocinema"        to "in.startv.hotstar",
         "zee5"             to "com.graymatrix.did",
         "mx player"        to "com.mxtech.videoplayer.ad",
         "sonyliv"          to "com.sonyliv",
@@ -132,6 +158,8 @@ object AppRegistry {
         "pizza hut"        to "com.yum.pizza",
 
         // ── E-commerce ──────────────────────────────────────────
+        "amazon"           to "in.amazon.mShop.android.shopping",
+        "amazon shopping"  to "in.amazon.mShop.android.shopping",
         "amazon india"     to "in.amazon.mShop.android.shopping",
         "flipkart"         to "com.flipkart.android",
         "myntra"           to "com.myntra.android",
@@ -148,8 +176,6 @@ object AppRegistry {
         "notion"           to "notion.id",
         "onedrive"         to "com.microsoft.skydrive",
         "dropbox"          to "com.dropbox.android",
-        "linkedin"         to "com.linkedin.android",
-        "reddit"           to "com.reddit.frontpage",
     )
 
     /**
