@@ -1,1 +1,0 @@
-/home/z/my-project/jarvis/app/src/main/cpp/CMakeLists.txt

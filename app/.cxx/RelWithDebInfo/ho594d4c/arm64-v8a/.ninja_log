@@ -1,6 +1,0 @@
-# ninja log v5
-0	84	1777775239002234549	CMakeFiles/jarvis_jni_bridge.dir/jni_bridge_stub.c.o	e7530d2e218db03a
-84	138	1777775239057234758	/home/z/my-project/jarvis/app/build/intermediates/cxx/RelWithDebInfo/ho594d4c/obj/arm64-v8a/libjarvis_jni_bridge.so	e73325e64c19d484
-0	5	0	clean	a889fc028a8d1070
-0	78	1777775904854778577	CMakeFiles/jarvis_jni_bridge.dir/jni_bridge_stub.c.o	e7530d2e218db03a
-78	170	1777775904945778925	/home/z/my-project/jarvis/app/build/intermediates/cxx/RelWithDebInfo/ho594d4c/obj/arm64-v8a/libjarvis_jni_bridge.so	e73325e64c19d484

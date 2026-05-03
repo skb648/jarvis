@@ -1,3 +1,0 @@
-/home/z/my-project/jarvis/app/.cxx/Debug/4s5y386j/armeabi-v7a/CMakeFiles/jarvis_jni_bridge.dir
-/home/z/my-project/jarvis/app/.cxx/Debug/4s5y386j/armeabi-v7a/CMakeFiles/edit_cache.dir
-/home/z/my-project/jarvis/app/.cxx/Debug/4s5y386j/armeabi-v7a/CMakeFiles/rebuild_cache.dir
