@@ -145,56 +145,50 @@ object GroqApiClient {
 
                     val response = httpClient.newCall(request).execute()
 
-                    when (response.code) {
-                        200 -> {
-                            val responseBody = response.body?.string() ?: ""
-                            response.close()
-                            Log.i(TAG, "[chatCompletion] SUCCESS with model=$model (attempt=${retries + 1})")
-                            return@withContext ApiResult.Success(responseBody, model)
-                        }
-
-                        503 -> {
-                            val backoffMs = (1000L * (1 shl retries))
-                            Log.w(TAG, "[chatCompletion] 503 for model=$model (attempt=${retries + 1}/$maxRetries)")
-                            response.close()
-                            delay(backoffMs)
-                            retries++
-                            continue
-                        }
-
-                        429 -> {
-                            val backoffMs = (2000L * (1 shl retries))
-                            Log.w(TAG, "[chatCompletion] 429 for model=$model (attempt=${retries + 1}/$maxRetries)")
-                            response.close()
-                            delay(backoffMs)
-                            retries++
-                            continue
-                        }
-
-                        500 -> {
-                            val backoffMs = (1000L * (1 shl retries))
-                            Log.w(TAG, "[chatCompletion] 500 for model=$model (attempt=${retries + 1}/$maxRetries)")
-                            response.close()
-                            delay(backoffMs)
-                            retries++
-                            continue
-                        }
-
-                        else -> {
-                            val errorBody = try {
-                                response.body?.string() ?: ""
-                            } catch (_: Exception) { "" }
-                            response.close()
-                            val friendlyMsg = when (response.code) {
-                                400 -> "Bad request (400)"
-                                401 -> "Invalid API key (401)"
-                                403 -> "Not authorized (403)"
-                                404 -> "Model not found (404) — try a different model"
-                                else -> "HTTP ${response.code}"
+                    response.use {
+                        when (it.code) {
+                            200 -> {
+                                val responseBody = it.body?.string() ?: ""
+                                Log.i(TAG, "[chatCompletion] SUCCESS with model=$model (attempt=${retries + 1})")
+                                return@withContext ApiResult.Success(responseBody, model)
                             }
-                            Log.e(TAG, "[chatCompletion] $friendlyMsg for model=$model: ${errorBody.take(300)}")
-                            lastError = ApiResult.HttpError(response.code, "$friendlyMsg — ${errorBody.take(200)}")
-                            break // Try next model
+
+                            503 -> {
+                                val backoffMs = (1000L * (1 shl retries))
+                                Log.w(TAG, "[chatCompletion] 503 for model=$model (attempt=${retries + 1}/$maxRetries)")
+                                delay(backoffMs)
+                                retries++
+                            }
+
+                            429 -> {
+                                val backoffMs = (2000L * (1 shl retries))
+                                Log.w(TAG, "[chatCompletion] 429 for model=$model (attempt=${retries + 1}/$maxRetries)")
+                                delay(backoffMs)
+                                retries++
+                            }
+
+                            500 -> {
+                                val backoffMs = (1000L * (1 shl retries))
+                                Log.w(TAG, "[chatCompletion] 500 for model=$model (attempt=${retries + 1}/$maxRetries)")
+                                delay(backoffMs)
+                                retries++
+                            }
+
+                            else -> {
+                                val errorBody = try {
+                                    it.body?.string() ?: ""
+                                } catch (_: Exception) { "" }
+                                val friendlyMsg = when (it.code) {
+                                    400 -> "Bad request (400)"
+                                    401 -> "Invalid API key (401)"
+                                    403 -> "Not authorized (403)"
+                                    404 -> "Model not found (404) — try a different model"
+                                    else -> "HTTP ${it.code}"
+                                }
+                                Log.e(TAG, "[chatCompletion] $friendlyMsg for model=$model: ${errorBody.take(300)}")
+                                lastError = ApiResult.HttpError(it.code, "$friendlyMsg — ${errorBody.take(200)}")
+                                break // Try next model
+                            }
                         }
                     }
                 } catch (e: java.net.SocketTimeoutException) {
@@ -257,33 +251,33 @@ object GroqApiClient {
                 .build()
 
             val response = testHttpClient.newCall(request).execute()
-            val code = response.code
 
-            when {
-                code == 200 -> {
-                    response.close()
-                    Log.i(TAG, "[testApiKey] SUCCESS — key is valid")
-                    Pair(true, "")
-                }
-                code == 429 -> {
-                    // Rate limited but key IS valid
-                    response.close()
-                    Log.i(TAG, "[testApiKey] 429 rate limited — key is valid but throttled")
-                    Pair(true, "")
-                }
-                else -> {
-                    val errorBody = try {
-                        response.body?.string() ?: ""
-                    } catch (_: Exception) { "" }
-                    response.close()
-                    val friendlyMsg = when (code) {
-                        401 -> "Invalid API key (401) — check your Groq key"
-                        403 -> "Access denied (403) — key may not have Groq access"
-                        404 -> "Model not found (404)"
-                        else -> "HTTP $code"
+            response.use {
+                val code = it.code
+
+                when {
+                    code == 200 -> {
+                        Log.i(TAG, "[testApiKey] SUCCESS — key is valid")
+                        Pair(true, "")
                     }
-                    Log.e(TAG, "[testApiKey] FAILED — $friendlyMsg: ${errorBody.take(300)}")
-                    Pair(false, "$friendlyMsg — ${errorBody.take(150)}")
+                    code == 429 -> {
+                        // Rate limited but key IS valid
+                        Log.i(TAG, "[testApiKey] 429 rate limited — key is valid but throttled")
+                        Pair(true, "")
+                    }
+                    else -> {
+                        val errorBody = try {
+                            it.body?.string() ?: ""
+                        } catch (_: Exception) { "" }
+                        val friendlyMsg = when (code) {
+                            401 -> "Invalid API key (401) — check your Groq key"
+                            403 -> "Access denied (403) — key may not have Groq access"
+                            404 -> "Model not found (404)"
+                            else -> "HTTP $code"
+                        }
+                        Log.e(TAG, "[testApiKey] FAILED — $friendlyMsg: ${errorBody.take(300)}")
+                        Pair(false, "$friendlyMsg — ${errorBody.take(150)}")
+                    }
                 }
             }
         } catch (e: Exception) {

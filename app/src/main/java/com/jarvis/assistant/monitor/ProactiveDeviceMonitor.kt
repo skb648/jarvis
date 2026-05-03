@@ -117,16 +117,11 @@ object ProactiveDeviceMonitor {
     }
 
     /**
-     * Stop monitoring and unregister receivers.
+     * Stop monitoring and update preferences.
+     * Delegates to the no-arg overload which handles receiver unregistration.
      */
     fun stopMonitoring(context: Context) {
         stopMonitoring()
-        try {
-            batteryReceiver?.let { context.unregisterReceiver(it) }
-        } catch (_: Exception) {}
-        try {
-            networkReceiver?.let { context.unregisterReceiver(it) }
-        } catch (_: Exception) {}
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putBoolean(KEY_MONITORING_ENABLED, false).apply()
     }
@@ -171,7 +166,7 @@ object ProactiveDeviceMonitor {
      * Get a comprehensive device status report.
      * Used for "battery kiti hai" / "phone status" commands.
      */
-    fun getDeviceStatusReport(context: Context): String {
+    suspend fun getDeviceStatusReport(context: Context): String {
         try {
             val battery = DeviceMonitor.getBatteryInfo(context)
             val memory = DeviceMonitor.getMemoryInfo(context)
@@ -207,11 +202,10 @@ object ProactiveDeviceMonitor {
                 sb.append("Network disconnected hai.")
             }
 
-            // Add location context if available
+            // Add location context if available — now calls suspend function directly
+            // instead of using runBlocking which could deadlock/ANR
             try {
-                val locationContext = kotlinx.coroutines.runBlocking {
-                    LocationAwarenessManager.getLocationContext(context)
-                }
+                val locationContext = LocationAwarenessManager.getLocationContext(context)
                 if (locationContext.isNotBlank()) {
                     sb.append(" $locationContext.")
                 }

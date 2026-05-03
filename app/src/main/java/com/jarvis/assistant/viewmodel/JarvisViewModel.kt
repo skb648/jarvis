@@ -63,8 +63,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import android.os.Handler
@@ -780,6 +778,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                         _brainState.value = BrainState.SPEAKING
                         _audioAmplitude.value = 0.5f
                         _computerAiStatus.value = "IDLE"
+                        isProcessing.set(false)
                         trySynthesizeAndPlay(msg, ctx)
                     }
                     is AutonomousAgentEngine.AgentResult.Partial -> {
@@ -791,6 +790,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                         _brainState.value = BrainState.SPEAKING
                         _audioAmplitude.value = 0.5f
                         _computerAiStatus.value = "IDLE"
+                        isProcessing.set(false)
                         trySynthesizeAndPlay(msg, ctx)
                     }
                     is AutonomousAgentEngine.AgentResult.Failed -> {
@@ -1994,7 +1994,9 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                     }
                     // Feature: Device Status
                     is CommandRouter.RouteResult.DeviceStatusCommand -> {
-                        val statusReport = ProactiveDeviceMonitor.getDeviceStatusReport(context)
+                        val statusReport = withContext(Dispatchers.IO) {
+                            ProactiveDeviceMonitor.getDeviceStatusReport(context)
+                        }
                         _emotion.value = "calm"
                         _lastResponse.value = statusReport
                         _isTyping.value = false
@@ -2135,18 +2137,34 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
             // MEMORY: Prepend memory context to history if available
             val enhancedHistoryJson = if (memoryContext.isNotBlank() || moodContext.isNotBlank() || locationBehaviorCtx.isNotBlank()) {
                 // Inject memory context into the history as a system-level context
-                val contextParts = mutableListOf<String>()
-                if (memoryContext.isNotBlank()) contextParts.add("[MEMORY CONTEXT]: $memoryContext")
-                if (moodContext.isNotBlank()) contextParts.add("[MOOD CONTEXT]: $moodContext")
-                if (locationBehaviorCtx.isNotBlank()) contextParts.add("[LOCATION CONTEXT]: $locationBehaviorCtx")
-                if (locationCtx.isNotBlank()) contextParts.add("[CURRENT LOCATION]: $locationCtx")
+                // Use proper JSON manipulation to avoid injection issues with special characters
+                try {
+                    val contextParts = mutableListOf<String>()
+                    if (memoryContext.isNotBlank()) contextParts.add("[MEMORY CONTEXT]: $memoryContext")
+                    if (moodContext.isNotBlank()) contextParts.add("[MOOD CONTEXT]: $moodContext")
+                    if (locationBehaviorCtx.isNotBlank()) contextParts.add("[LOCATION CONTEXT]: $locationBehaviorCtx")
+                    if (locationCtx.isNotBlank()) contextParts.add("[CURRENT LOCATION]: $locationCtx")
 
-                val contextEntry = """{"role":"user","content":"${contextParts.joinToString(" | ")}"}"""
-                val contextReply = """{"role":"model","content":"Understood. I will use this context (memory, mood, location) to adjust my responses naturally."}"""
-                if (historyJson.length > 2) {
-                    historyJson.dropLast(1) + "," + contextEntry + "," + contextReply + "]"
-                } else {
-                    "[$contextEntry,$contextReply]"
+                    val contextEntry = org.json.JSONObject().apply {
+                        put("role", "user")
+                        put("content", contextParts.joinToString(" | "))
+                    }
+                    val contextReply = org.json.JSONObject().apply {
+                        put("role", "model")
+                        put("content", "Understood. I will use this context (memory, mood, location) to adjust my responses naturally.")
+                    }
+
+                    val historyArray = if (historyJson.length > 2) {
+                        org.json.JSONArray(historyJson)
+                    } else {
+                        org.json.JSONArray()
+                    }
+                    historyArray.put(contextEntry)
+                    historyArray.put(contextReply)
+                    historyArray.toString()
+                } catch (e: Exception) {
+                    Log.w(TAG, "[handleAIQuery] Failed to enhance history JSON, using raw history: ${e.message}")
+                    historyJson
                 }
             } else {
                 historyJson
@@ -2221,6 +2239,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                             _brainState.value     = BrainState.SPEAKING
                             _audioAmplitude.value = 0.5f
                             _computerAiStatus.value = "IDLE"
+                            isProcessing.set(false)
                             trySynthesizeAndPlay(msg, context)
                             return
                         }
@@ -2233,6 +2252,7 @@ Prefix emotion: [EMOTION:neutral|happy|sad|angry|calm|surprised|urgent|stressed|
                             _brainState.value     = BrainState.SPEAKING
                             _audioAmplitude.value = 0.5f
                             _computerAiStatus.value = "IDLE"
+                            isProcessing.set(false)
                             trySynthesizeAndPlay(msg, context)
                             return
                         }

@@ -83,7 +83,7 @@ object MacroEngine {
             actions = listOf(
                 MacroAction(MacroActionType.SET_WIFI, enabled = true),
                 MacroAction(MacroActionType.SET_VOLUME, value = "70"),
-                MacroAction(MacroActionType.OPEN_APP, value = "com.google.android.music")
+                MacroAction(MacroActionType.OPEN_APP, value = "com.google.android.apps.youtube.music")
             )
         ),
         MacroDefinition(
@@ -617,7 +617,7 @@ object MacroEngine {
             actions.add(MacroAction(MacroActionType.SET_ALARM))
         }
         if (lower.contains("music") || lower.contains("gaana")) {
-            actions.add(MacroAction(MacroActionType.OPEN_APP, value = "com.google.android.music"))
+            actions.add(MacroAction(MacroActionType.OPEN_APP, value = "com.google.android.apps.youtube.music"))
         }
         if (lower.contains("notes") || lower.contains("yaad")) {
             actions.add(MacroAction(MacroActionType.OPEN_APP, value = "com.google.android.keep"))
