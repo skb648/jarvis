@@ -126,12 +126,12 @@ object MqttManager {
                         override fun onSuccess(asyncActionToken: IMqttToken?) {
                             mqttConnected = true
                             Log.i(TAG, "MQTT connected successfully")
-                            if (cont.isActive) cont.resume(true) {}
+                            if (cont.isActive) cont.resumeWith(Result.success(true))
                         }
                         override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                             mqttConnected = false
                             Log.e(TAG, "MQTT connection failed: ${exception?.message}")
-                            if (cont.isActive) cont.resume(false) {}
+                            if (cont.isActive) cont.resumeWith(Result.success(false))
                         }
                     })
                 }
@@ -176,11 +176,11 @@ object MqttManager {
                     override fun onSuccess(asyncActionToken: IMqttToken?) {
                         subscribedTopics.add(topic)
                         Log.d(TAG, "Subscribed to $topic (QoS $qos)")
-                        if (cont.isActive) cont.resume(true) {}
+                        if (cont.isActive) cont.resumeWith(Result.success(true))
                     }
                     override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                         Log.e(TAG, "Failed to subscribe to $topic", exception)
-                        if (cont.isActive) cont.resume(false) {}
+                        if (cont.isActive) cont.resumeWith(Result.success(false))
                     }
                 })
             }
@@ -201,11 +201,11 @@ object MqttManager {
                     override fun onSuccess(asyncActionToken: IMqttToken?) {
                         subscribedTopics.remove(topic)
                         Log.d(TAG, "Unsubscribed from $topic")
-                        if (cont.isActive) cont.resume(true) {}
+                        if (cont.isActive) cont.resumeWith(Result.success(true))
                     }
                     override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                         Log.e(TAG, "Failed to unsubscribe from $topic", exception)
-                        if (cont.isActive) cont.resume(false) {}
+                        if (cont.isActive) cont.resumeWith(Result.success(false))
                     }
                 })
             }
@@ -228,11 +228,11 @@ object MqttManager {
                 client?.publish(topic, message, null, object : IMqttActionListener {
                     override fun onSuccess(asyncActionToken: IMqttToken?) {
                         Log.d(TAG, "Published to $topic: $payload")
-                        if (cont.isActive) cont.resume(true) {}
+                        if (cont.isActive) cont.resumeWith(Result.success(true))
                     }
                     override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                         Log.e(TAG, "Failed to publish to $topic", exception)
-                        if (cont.isActive) cont.resume(false) {}
+                        if (cont.isActive) cont.resumeWith(Result.success(false))
                     }
                 })
             }
@@ -249,7 +249,7 @@ object MqttManager {
         val topics = subscribedTopics.toList()
         subscribedTopics.clear()
         topics.forEach { topic ->
-            subscribe(topic)
+            kotlinx.coroutines.runBlocking { subscribe(topic) }
         }
     }
 }

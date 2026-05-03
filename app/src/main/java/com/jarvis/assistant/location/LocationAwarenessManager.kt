@@ -314,8 +314,8 @@ object LocationAwarenessManager {
     private suspend fun <T> com.google.android.gms.tasks.Task<T>.await(): T? {
         return try {
             val result = kotlinx.coroutines.suspendCancellableCoroutine<T?> { cont ->
-                addOnSuccessListener { result -> cont.resume(result) { } }
-                addOnFailureListener { exception -> cont.resume(null) { } }
+                addOnSuccessListener { result -> cont.resumeWith(Result.success(result)) }
+                addOnFailureListener { exception -> cont.resumeWith(Result.success(null)) }
                 addOnCanceledListener { cont.cancel() }
             }
             result

@@ -206,6 +206,7 @@ class NotificationReaderService : NotificationListenerService() {
                     if (intent.action == TelephonyManager.ACTION_PHONE_STATE_CHANGED) {
                         val state = intent.getStringExtra(TelephonyManager.EXTRA_STATE)
                         if (state == TelephonyManager.EXTRA_STATE_RINGING) {
+                            @Suppress("DEPRECATION")
                             val number = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER) ?: "Unknown"
                             val callerName = resolveContactName(ctx, number) ?: number
                             Log.i(TAG, "[PhoneState] Incoming call from $callerName ($number)")

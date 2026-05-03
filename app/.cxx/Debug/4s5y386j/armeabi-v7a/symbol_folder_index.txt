@@ -1,0 +1,1 @@
+/home/z/my-project/jarvis/app/build/intermediates/cxx/Debug/4s5y386j/obj/armeabi-v7a

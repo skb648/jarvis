@@ -212,7 +212,9 @@ class RoutineEngine(private val context: Context) {
                         // Format: "topic:payload"
                         val parts = action.value.split(":", limit = 2)
                         if (parts.size == 2) {
-                            MqttManager.publish(parts[0], parts[1])
+                            kotlinx.coroutines.runBlocking {
+                                MqttManager.publish(parts[0], parts[1])
+                            }
                             Log.i(TAG, "Smart home action: ${parts[0]} → ${parts[1]}")
                         }
                     }

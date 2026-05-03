@@ -1,0 +1,6 @@
+# ninja log v5
+0	156	1777775024434420292	CMakeFiles/jarvis_jni_bridge.dir/jni_bridge_stub.c.o	9e03e45091667180
+156	315	1777775024584420861	/home/z/my-project/jarvis/app/build/intermediates/cxx/Debug/4s5y386j/obj/armeabi-v7a/libjarvis_jni_bridge.so	139f8d0da838cab1
+0	6	0	clean	a889fc028a8d1070
+1	98	1777775904418776910	CMakeFiles/jarvis_jni_bridge.dir/jni_bridge_stub.c.o	9e03e45091667180
+98	176	1777775904494777201	/home/z/my-project/jarvis/app/build/intermediates/cxx/Debug/4s5y386j/obj/armeabi-v7a/libjarvis_jni_bridge.so	139f8d0da838cab1

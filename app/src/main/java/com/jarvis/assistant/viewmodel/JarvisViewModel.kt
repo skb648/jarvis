@@ -59,6 +59,8 @@ import com.jarvis.assistant.ui.theme.JarvisRedPink
 import com.jarvis.assistant.vision.VisionManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import java.net.URL
+import java.net.HttpURLConnection
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File

@@ -871,6 +871,7 @@ object TaskExecutorBridge {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun executeGetDeviceInfo(context: Context): StepResult {
         return try {
             val info = StringBuilder()

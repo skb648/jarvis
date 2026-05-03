@@ -577,6 +577,7 @@ class OverlayCursorService : Service() {
         JarvisNotificationChannels.ensureChannels(this)
     }
 
+    @Suppress("DEPRECATION")
     private fun buildNotification(text: String): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this, 0,

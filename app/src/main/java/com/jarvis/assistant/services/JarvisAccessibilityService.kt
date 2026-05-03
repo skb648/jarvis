@@ -60,6 +60,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *      optimized for AI context window efficiency.
  * ═══════════════════════════════════════════════════════════════════════
  */
+@Suppress("DEPRECATION")
 class JarvisAccessibilityService : AccessibilityService() {
 
     companion object {

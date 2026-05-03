@@ -27,12 +27,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.NavigateNext
+import androidx.compose.material.icons.automirrored.filled.StickyNote2
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.NavigateNext
+
 import androidx.compose.material.icons.filled.OfflineBolt
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Psychology
@@ -310,7 +312,7 @@ fun HomeScreen(
                 QuickAction("Capture", Icons.Filled.PhotoCamera, "Capture screen", JarvisPurple),
                 QuickAction("Chat", Icons.AutoMirrored.Filled.Chat, "Open conversation", JarvisGreen),
                 QuickAction("Devices", Icons.Filled.Devices, "Smart home", WarningAmber),
-                QuickAction("Notes", Icons.Filled.StickyNote2, "Quick notes", JarvisOrange),
+                QuickAction("Notes", Icons.AutoMirrored.Filled.StickyNote2, "Quick notes", JarvisOrange),
                 QuickAction("Music", Icons.Filled.MusicNote, "Play music", JarvisRedPink),
                 QuickAction("Weather", Icons.Filled.WbSunny, "Weather update", JarvisGold),
                 QuickAction("Battery", Icons.Filled.BatteryStd, "Device status", SuccessGreen)
@@ -523,7 +525,7 @@ fun HomeScreen(
                         )
                     }
                     Icon(
-                        imageVector = Icons.Filled.NavigateNext,
+                        imageVector = Icons.AutoMirrored.Filled.NavigateNext,
                         contentDescription = "Navigate",
                         tint = TextTertiary,
                         modifier = Modifier.size(24.dp)

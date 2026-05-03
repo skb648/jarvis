@@ -1,0 +1,27 @@
+{
+  "buildFiles": [
+    "/home/z/my-project/jarvis/app/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/home/z/android-sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/home/z/my-project/jarvis/app/.cxx/RelWithDebInfo/ho594d4c/armeabi-v7a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/home/z/android-sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/home/z/my-project/jarvis/app/.cxx/RelWithDebInfo/ho594d4c/armeabi-v7a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "jarvis_jni_bridge::@6890427a1f51a3e7e1df": {
+      "artifactName": "jarvis_jni_bridge",
+      "abi": "armeabi-v7a",
+      "output": "/home/z/my-project/jarvis/app/build/intermediates/cxx/RelWithDebInfo/ho594d4c/obj/armeabi-v7a/libjarvis_jni_bridge.so",
+      "runtimeFiles": []
+    }
+  }
+}

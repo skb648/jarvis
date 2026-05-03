@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -485,7 +486,7 @@ private fun NoteCreateDialog(
                     ),
                     leadingIcon = {
                         Icon(
-                            Icons.Filled.Notes,
+                            Icons.AutoMirrored.Filled.Notes,
                             null,
                             tint = TextTertiary,
                             modifier = Modifier.size(18.dp)

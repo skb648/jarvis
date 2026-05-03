@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.jarvis.assistant.ui.orb.BrainState
 import com.jarvis.assistant.ui.theme.*
+import kotlinx.coroutines.delay
 import kotlin.math.*
 
 // ─── AssistantScreen — backward-compat wrapper ───────────────────────────────

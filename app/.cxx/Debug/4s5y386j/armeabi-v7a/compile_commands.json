@@ -1,0 +1,7 @@
+[
+{
+  "directory": "/home/z/my-project/jarvis/app/.cxx/Debug/4s5y386j/armeabi-v7a",
+  "command": "/home/z/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --target=armv7-none-linux-androideabi26 --sysroot=/home/z/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Djarvis_jni_bridge_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -march=armv7-a -mthumb -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -o CMakeFiles/jarvis_jni_bridge.dir/jni_bridge_stub.c.o -c /home/z/my-project/jarvis/app/src/main/cpp/jni_bridge_stub.c",
+  "file": "/home/z/my-project/jarvis/app/src/main/cpp/jni_bridge_stub.c"
+}
+]

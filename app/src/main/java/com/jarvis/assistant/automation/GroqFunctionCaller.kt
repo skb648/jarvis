@@ -45,6 +45,7 @@ import kotlinx.coroutines.delay
  *
  * ═══════════════════════════════════════════════════════════════════════
  */
+@Suppress("DEPRECATION")
 object GroqFunctionCaller {
 
     private const val TAG = "GroqFunctionCaller"

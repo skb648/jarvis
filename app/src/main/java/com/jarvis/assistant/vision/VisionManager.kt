@@ -231,6 +231,7 @@ class VisionManager {
     /**
      * Start a capture session and take a single photo.
      */
+    @Suppress("DEPRECATION")
     private fun startCaptureSession(camera: CameraDevice, latch: CountDownLatch) {
         val surface = imageReader?.surface ?: run {
             latch.countDown()

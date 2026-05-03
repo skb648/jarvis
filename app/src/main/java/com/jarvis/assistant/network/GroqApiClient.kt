@@ -155,10 +155,10 @@ object GroqApiClient {
 
                     val response = httpClient.newCall(request).execute()
 
-                    response.use {
-                        when (it.code) {
+                    try {
+                        when (response.code) {
                             200 -> {
-                                val responseBody = it.body?.string() ?: ""
+                                val responseBody = response.body?.string() ?: ""
                                 Log.i(TAG, "[chatCompletion] SUCCESS with model=$model (attempt=${retries + 1})")
                                 return@withContext ApiResult.Success(responseBody, model)
                             }
@@ -186,20 +186,23 @@ object GroqApiClient {
 
                             else -> {
                                 val errorBody = try {
-                                    it.body?.string() ?: ""
+                                    response.body?.string() ?: ""
                                 } catch (_: Exception) { "" }
-                                val friendlyMsg = when (it.code) {
+                                val friendlyMsg = when (response.code) {
                                     400 -> "Bad request (400)"
                                     401 -> "Invalid API key (401)"
                                     403 -> "Not authorized (403)"
                                     404 -> "Model not found (404) — try a different model"
-                                    else -> "HTTP ${it.code}"
+                                    else -> "HTTP ${response.code}"
                                 }
                                 Log.e(TAG, "[chatCompletion] $friendlyMsg for model=$model: ${errorBody.take(300)}")
-                                lastError = ApiResult.HttpError(it.code, "$friendlyMsg — ${errorBody.take(200)}")
-                                break // Try next model
+                                lastError = ApiResult.HttpError(response.code, "$friendlyMsg — ${errorBody.take(200)}")
+                                // Try next model
+                                retries = maxRetries // Force exit while loop → moves to next model
                             }
                         }
+                    } finally {
+                        response.close()
                     }
                 } catch (e: java.net.SocketTimeoutException) {
                     Log.w(TAG, "[chatCompletion] Timeout for model=$model (attempt=${retries + 1}/$maxRetries)")
@@ -208,7 +211,7 @@ object GroqApiClient {
                         retries++
                     } else {
                         lastError = ApiResult.NetworkError("Timeout: ${e.message}")
-                        break
+                        retries = maxRetries // Force exit while loop → moves to next model
                     }
                 } catch (e: java.io.IOException) {
                     Log.w(TAG, "[chatCompletion] IO error for model=$model: ${e.message}")
@@ -217,12 +220,12 @@ object GroqApiClient {
                         retries++
                     } else {
                         lastError = ApiResult.NetworkError("Network error: ${e.message}")
-                        break
+                        retries = maxRetries // Force exit while loop → moves to next model
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "[chatCompletion] Error for model=$model: ${e.message}")
                     lastError = ApiResult.NetworkError("Error: ${e.message?.take(100)}")
-                    break
+                    retries = maxRetries // Force exit while loop → moves to next model
                 }
             }
         }
