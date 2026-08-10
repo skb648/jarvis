@@ -119,6 +119,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
             is JarvisEvents.Event.JarvisMsg ->
                 addMessage(Role.JARVIS, event.text, event.emotion)
+
+            is JarvisEvents.Event.AgentStep ->
+                _uiState.update { it.copy(partial = "⚙️ ${event.text}") }
         }
     }
 

@@ -426,7 +426,9 @@ class JarvisService : Service() {
 
         scope.launch {
             val response = try {
-                app.brain.processUtterance(text, emotion, audioFile)
+                app.brain.processUtterance(text, emotion, audioFile) { step ->
+                    JarvisEvents.emit(JarvisEvents.Event.AgentStep(step))
+                }
             } catch (e: Exception) {
                 com.jarvis.assistant.ai.JarvisBrain.BrainResponse(
                     "Kuch gadbad ho gayi, boss. Thodi der baad try karte hain.",

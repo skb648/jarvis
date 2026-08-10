@@ -64,6 +64,12 @@ sealed class Command {
     data class GeofenceReminder(val text: String) : Command()
     object ReadNotifications : Command()
 
+    // ---- v3.0: agent tasks ----
+    data class InstallApp(val app: String) : Command()
+    data class WebSearch(val query: String) : Command()
+    data class PlayVideo(val query: String) : Command()
+    data class QuickToggle(val target: String, val on: Boolean?) : Command()
+
     data class Reply(val text: String, val emotion: Emotion) : Command()
     data class Unknown(val text: String) : Command()
 }
@@ -236,6 +242,55 @@ class IntentEngine {
                     Emotion.NEUTRAL
                 )
             }
+        }
+
+        // ---- Install app (agent) ----
+        val installM = Regex("\\b(?:install|download)\\s+(?:karo\\s+)?(?:the\\s+)?([a-z0-9 .+\\-]{2,})", RegexOption.IGNORE_CASE).find(t)
+            ?: Regex("\\b([a-z0-9 .+\\-]{2,})\\s+(?:install|download)\\s+(?:karo)?\\b", RegexOption.IGNORE_CASE).find(t)
+        if (installM != null) {
+            val appName = installM.groupValues[1].trim()
+            if (appName.length >= 2 && !appName.contains("karo")) {
+                return IntentResult(
+                    Command.InstallApp(appName),
+                    ""$appName" install kar raha hoon — Play Store kholega, search karega, aur Install dabayega. Sirf dekhna!",
+                    Emotion.EXCITED
+                )
+            }
+        }
+
+        // ---- Web search (agent) ----
+        val searchM = Regex("\\b(?:search|google|dhundh|khoj)\\s+(?:karo\\s+)?(?:the\\s+)?(.{2,})", RegexOption.IGNORE_CASE).find(t)
+            ?: Regex("\\b(.{2,})\\s+(?:search|google)\\s+(?:karo)?\\b", RegexOption.IGNORE_CASE).find(t)
+        if (searchM != null && !t.contains("screenshot") && !t.contains("news")) {
+            val q = searchM.groupValues[1].trim().trimEnd('.', '!', '?')
+            if (q.length >= 2) {
+                return IntentResult(Command.WebSearch(q), "Web par "$q" dhundh raha hoon!", Emotion.HAPPY)
+            }
+        }
+
+        // ---- YouTube video (agent) ----
+        if (Regex("\\b(video|youtube|yt)\\b").containsMatchIn(t) && Regex("\\b(chalao|bajao|play|dikhao)\\b").containsMatchIn(t)) {
+            val q = t.replace(Regex("\\b(chalao|bajao|play|dikhao|video|youtube|yt|ka|ki|pe|karo|aur)\\b"), " ")
+                .trim()
+            if (q.length >= 2) {
+                return IntentResult(Command.PlayVideo(q), "YouTube pe "$q" dhundh raha hoon!", Emotion.EXCITED)
+            }
+        }
+
+        // ---- Quick settings toggles (agent/system) ----
+        val qsM = Regex("\\b(?:turn\\s+)?(airplane mode|flight mode|do not disturb|dnd|auto rotate|rotation|nfc|data saver)\\s*(on|off)?\\b", RegexOption.IGNORE_CASE).find(t)
+        if (qsM != null) {
+            val target = qsM.groupValues[1].lowercase()
+            val on = when (qsM.groupValues[2].lowercase()) {
+                "on" -> true
+                "off" -> false
+                else -> null
+            }
+            return IntentResult(
+                Command.QuickToggle(target, on),
+                "$target ${if (on == true) "on" else if (on == false) "off" else "toggle"} kar raha hoon — system level!",
+                Emotion.NEUTRAL
+            )
         }
 
         // ---- Clipboard & paste ----

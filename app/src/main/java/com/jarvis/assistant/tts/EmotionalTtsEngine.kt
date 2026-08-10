@@ -14,6 +14,8 @@ import com.jarvis.assistant.JarvisApp
 import com.jarvis.assistant.model.Emotion
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -87,6 +89,16 @@ class EmotionalTtsEngine(context: Context) {
 
     @Volatile
     var preferredVoiceId: String? = null
+
+    // ---- v3.0 diagnostics ----
+    @Volatile
+    var lastEngine: String = "google"   // google | openai | elevenlabs
+
+    @Volatile
+    var lastError: String? = null
+
+    @Volatile
+    var ttsReady: Boolean = false
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -241,18 +253,49 @@ class EmotionalTtsEngine(context: Context) {
     }
 
     private fun execute(task: SpeakTask) {
-        val key = runCatching { runBlocking { app.settings.settings.first() }.elevenLabsKey }
-            .getOrDefault("")
-        if (key.isNotBlank()) {
-            cloudSpeak(task, key)
-        } else {
-            localSpeak(task)
+        val settings = runCatching { runBlocking { app.settings.settings.first() } }.getOrNull()
+        val eleven = settings?.elevenLabsKey.orEmpty()
+        val openai = settings?.openaiKey.orEmpty()
+        when {
+            eleven.isNotBlank() -> {
+                lastEngine = "elevenlabs"
+                cloudSpeak(task, eleven)
+            }
+            openai.isNotBlank() -> {
+                lastEngine = "openai"
+                openaiSpeak(task, openai, settings?.openaiVoice ?: "nova")
+            }
+            else -> {
+                lastEngine = "google"
+                localSpeak(task)
+            }
         }
+    }
+
+    /** OpenAI TTS premium tier. */
+    private fun openaiSpeak(task: SpeakTask, apiKey: String, voice: String) {
+        Thread {
+            val ok = runBlocking {
+                OpenAITtsClient(appContext).synthesize(
+                    apiKey, voice, task.text, task.emotion,
+                    File(appContext.cacheDir, "jarvis_openai_${utteranceCounter++}.mp3")
+                )
+            }
+            if (!ok) {
+                lastError = "openai failed -> google fallback"
+                mainHandler.post { localSpeak(task) }
+            } else {
+                val file = File(appContext.cacheDir, "jarvis_openai_${utteranceCounter - 1}.mp3")
+                mainHandler.post { playFile(task, file, modulate = false) }
+            }
+        }.start()
     }
 
     private fun localSpeak(task: SpeakTask) {
         val inst = tts
+        ttsReady = isReady()
         if (inst == null || !isReady()) {
+            lastError = "TTS engine not ready"
             finish(task, null, "TTS engine not ready")
             return
         }
@@ -322,6 +365,8 @@ class EmotionalTtsEngine(context: Context) {
     }
 
     private fun playFile(task: SpeakTask, file: File, modulate: Boolean) {
+        requestAudioFocus()
+        ensureAudibleVolume()
         val player = MediaPlayer()
         try {
             player.setDataSource(file.absolutePath)
@@ -435,10 +480,44 @@ class EmotionalTtsEngine(context: Context) {
                 mp?.release()
             } catch (_: Exception) {}
             if (currentPlayer === mp) currentPlayer = null
-            if (error != null) task.callback?.onError(error) else task.callback?.onDone()
+            if (error != null) {
+                lastError = error
+                task.callback?.onError(error)
+            } else {
+                task.callback?.onDone()
+            }
             unDuck()
+            abandonAudioFocus()
             busy = false
             pump()
+        }
+    }
+
+    // ------------------------------------------------- audio focus + volume
+
+    private fun requestAudioFocus() {
+        runCatching {
+            audioManager.requestAudioFocus(
+                null,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+            )
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        runCatching { audioManager.abandonAudioFocus(null) }
+    }
+
+    /** Agar music volume 0 hai to thoda upar karo taaki JARVIS sunai de. */
+    private fun ensureAudibleVolume() {
+        runCatching {
+            val vol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            if (vol == 0) {
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, (max * 0.25f).toInt().coerceAtLeast(1), 0)
+                lastError = "volume was 0 - raised temporarily"
+            }
         }
     }
 }

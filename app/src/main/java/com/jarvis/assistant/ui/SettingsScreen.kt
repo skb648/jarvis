@@ -254,6 +254,87 @@ fun SettingsScreen(
                 )
             }
 
+            SectionCard("VOICE STUDIO (PREMIUM)") {
+                Text(
+                    "Engine auto-detect: ElevenLabs key -> OpenAI key -> Google. Jo bhi key daaloge, wahi turant use hoga.",
+                    color = JarvisTextDim,
+                    fontSize = 12.sp
+                )
+                Spacer(Modifier.height(8.dp))
+                SettingsTextField(
+                    value = settings.openaiKey,
+                    onValueChange = { scope.launch { app.settings.setOpenaiKey(it) } },
+                    label = "OpenAI API key (premium voice)",
+                    placeholder = "sk-..."
+                )
+                Spacer(Modifier.height(8.dp))
+                var voiceMenu by remember { mutableStateOf(false) }
+                Text("OpenAI voice", color = JarvisTextDim, fontSize = 12.sp)
+                Box {
+                    OutlinedTextField(
+                        value = settings.openaiVoice,
+                        onValueChange = {},
+                        readOnly = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { voiceMenu = true },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = fieldColors()
+                    )
+                    DropdownMenu(expanded = voiceMenu, onDismissRequest = { voiceMenu = false }) {
+                        listOf("nova", "alloy", "echo", "fable", "onyx", "shimmer").forEach { v ->
+                            DropdownMenuItem(
+                                text = { Text(v) },
+                                onClick = { scope.launch { app.settings.setOpenaiVoice(v) }; voiceMenu = false }
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = {
+                        tts.speak(
+                            "Namaste boss! Ye aapke current voice engine ki awaaz hai. Ab premium lag rahi hai na?",
+                            Emotion.HAPPY
+                        )
+                    },
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = JarvisGold, contentColor = Color(0xFF332800))
+                ) { Text("🎧 Test current voice engine") }
+            }
+
+            SectionCard("VOICE DIAGNOSTICS") {
+                Text("TTS ready: ${if (tts.isReady()) "✅ haan" else "❌ nahi"}", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
+                Text("Engine in use: ${tts.lastEngine}", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
+                Text("Last error: ${tts.lastError ?: "koi nahi 👍"}", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Button(
+                    onClick = {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.google.android.tts"))
+                        )
+                    },
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = JarvisPanelHi, contentColor = JarvisCyan)
+                ) { Text("📦 Google TTS install karo (free)") }
+            }
+
+            SectionCard("AUTOPILOT AGENT (SMART TASKS)") {
+                ToggleRow("AutoPilot agent", "Pura task khud complete kare — install app, search, clicks, toggles", settings.agentEnabled) {
+                    scope.launch { app.settings.setAgentEnabled(it) }
+                }
+                Text(
+                    "Try karo: \"install karo spotify\", \"search karo cricket news\", \"youtube pe coldplay chalao\", \"flight mode on\", \"wifi settings kholo\". Agent Play Store kholke search karega, Install dabayega, screen verify karega. Gemini key ho to koi bhi task ka plan khud banayega.",
+                    color = JarvisTextDim,
+                    fontSize = 11.sp
+                )
+                Text(
+                    "Note: Accessibility service ON hona zaroori hai (agent clicks ke liye). Android 11+ pe screenshot verify bhi chalta hai.",
+                    color = JarvisTextDim,
+                    fontSize = 11.sp
+                )
+            }
+
             SectionCard("VOICE") {
                 LanguagePicker(settings.language) {
                     scope.launch { app.settings.setLanguage(it) }

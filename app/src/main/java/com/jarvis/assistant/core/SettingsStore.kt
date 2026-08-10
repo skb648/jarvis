@@ -42,7 +42,11 @@ data class Settings(
     val bubbleEnabled: Boolean = false,      // floating bubble
     val preferredVoice: String = "",         // TTS voice id (empty = auto)
     val autoSleepMinutes: Int = 25,          // idle -> sleep
-    val wakeTrained: Boolean = false         // custom wake-word template exists
+    val wakeTrained: Boolean = false,        // custom wake-word template exists
+    // ---- v3.0 ----
+    val openaiKey: String = "",              // OpenAI API key (premium voice tier)
+    val openaiVoice: String = "nova",        // alloy|echo|fable|onyx|nova|shimmer
+    val agentEnabled: Boolean = true         // AutoPilot agent (smart task execution)
 )
 
 class SettingsStore(private val context: Context) {
@@ -72,6 +76,9 @@ class SettingsStore(private val context: Context) {
         val VOICE = stringPreferencesKey("preferred_voice")
         val SLEEP_MIN = intPreferencesKey("auto_sleep_min")
         val WAKE_TRAINED = booleanPreferencesKey("wake_trained")
+        val OPENAI_KEY = stringPreferencesKey("openai_key")
+        val OPENAI_VOICE = stringPreferencesKey("openai_voice")
+        val AGENT_ENABLED = booleanPreferencesKey("agent_enabled")
     }
 
     val settings: Flow<Settings> = context.dataStore.data.map { p ->
@@ -99,7 +106,10 @@ class SettingsStore(private val context: Context) {
             bubbleEnabled = p[Keys.BUBBLE] ?: false,
             preferredVoice = p[Keys.VOICE] ?: "",
             autoSleepMinutes = p[Keys.SLEEP_MIN] ?: 25,
-            wakeTrained = p[Keys.WAKE_TRAINED] ?: false
+            wakeTrained = p[Keys.WAKE_TRAINED] ?: false,
+            openaiKey = p[Keys.OPENAI_KEY] ?: "",
+            openaiVoice = p[Keys.OPENAI_VOICE] ?: "nova",
+            agentEnabled = p[Keys.AGENT_ENABLED] ?: true
         )
     }
 
@@ -126,6 +136,9 @@ class SettingsStore(private val context: Context) {
     suspend fun setPreferredVoice(v: String) = context.dataStore.edit { it[Keys.VOICE] = v }
     suspend fun setAutoSleepMinutes(v: Int) = context.dataStore.edit { it[Keys.SLEEP_MIN] = v }
     suspend fun setWakeTrained(v: Boolean) = context.dataStore.edit { it[Keys.WAKE_TRAINED] = v }
+    suspend fun setOpenaiKey(v: String) = context.dataStore.edit { it[Keys.OPENAI_KEY] = v.trim() }
+    suspend fun setOpenaiVoice(v: String) = context.dataStore.edit { it[Keys.OPENAI_VOICE] = v }
+    suspend fun setAgentEnabled(v: Boolean) = context.dataStore.edit { it[Keys.AGENT_ENABLED] = v }
 
     suspend fun addRoutine(hour: Int, minute: Int, action: String) {
         context.dataStore.edit { p ->

@@ -17,6 +17,7 @@ object JarvisEvents {
         data class Partial(val text: String) : Event()
         data class UserMsg(val text: String, val emotion: Emotion) : Event()
         data class JarvisMsg(val text: String, val emotion: Emotion) : Event()
+        data class AgentStep(val text: String) : Event()
     }
 
     private val _events = MutableSharedFlow<Event>(extraBufferCapacity = 256)

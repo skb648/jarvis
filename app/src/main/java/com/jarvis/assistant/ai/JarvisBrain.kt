@@ -5,6 +5,7 @@ import com.jarvis.assistant.JarvisApp
 import com.jarvis.assistant.control.DeviceCommander
 import com.jarvis.assistant.core.MemoryStore
 import com.jarvis.assistant.model.Emotion
+import com.jarvis.assistant.agent.AutoPilot
 import com.jarvis.assistant.vision.VisionController
 import kotlinx.coroutines.flow.first
 import java.io.File
@@ -29,6 +30,7 @@ class JarvisBrain(private val context: Context) {
     private val gemini = GeminiClient(context)
     private val memory = MemoryStore(context)
     private val vision = VisionController(context)
+    private val autoPilot = AutoPilot(context)
     private val history = ArrayDeque<Pair<String, String>>(8) // role, text
 
     private val moodCounts = mutableMapOf<Emotion, Int>()
@@ -40,7 +42,8 @@ class JarvisBrain(private val context: Context) {
     suspend fun processUtterance(
         text: String,
         userEmotion: Emotion = Emotion.NEUTRAL,
-        audioFile: File? = null
+        audioFile: File? = null,
+        onAgentStep: (String) -> Unit = {}
     ): BrainResponse {
         val trimmed = text.trim()
 
@@ -56,7 +59,33 @@ class JarvisBrain(private val context: Context) {
         updateMood(userEmotion)
 
         val (reply, emotion) = when (val cmd = match.command) {
+            is Command.InstallApp -> {
+                val r = autoPilot.run("install ${cmd.app}", onAgentStep)
+                (r ?: "App install karne ka plan nahi bana — Play Store khol diya. \"$cmd.app\" search kar lena.").let {
+                    if (r == null) launcherFallbackOpen("playstore")
+                    it
+                } to Emotion.EXCITED
+            }
+            is Command.WebSearch -> {
+                val r = autoPilot.run("search web ${cmd.query}", onAgentStep)
+                (r ?: "Search khol diya — \"${cmd.query}\" type kar diya hai, ab Enter dabana.") to Emotion.HAPPY
+            }
+            is Command.PlayVideo -> {
+                val r = autoPilot.run("youtube pe ${cmd.query} chalao", onAgentStep)
+                (r ?: "YouTube khol diya — \"${cmd.query}\" search ho raha hai.") to Emotion.EXCITED
+            }
+            is Command.QuickToggle -> {
+                val r = autoPilot.run("toggle ${cmd.target}", onAgentStep)
+                (r ?: "Quick settings khol diya — tile tap kar dena.") to Emotion.NEUTRAL
+            }
             is Command.Unknown -> {
+                val agentStatus = runCatching {
+                    val settings = kotlinx.coroutines.runBlocking { app.settings.settings.first() }
+                    if (settings.agentEnabled) autoPilot.run(trimmed, onAgentStep) else null
+                }.getOrNull()
+                if (agentStatus != null) {
+                    agentStatus to Emotion.HAPPY
+                } else {
                 val aiReply = if (geminiEnabled()) {
                     gemini.ask(
                         systemPrompt = buildSystemPrompt(),
@@ -68,6 +97,7 @@ class JarvisBrain(private val context: Context) {
                 val text2 = aiReply
                     ?: "Ye main offline mode me nahi samajh paya, boss. Gemini AI key Settings me add karoge toh main kuch bhi kar sakunga. Ab batao, kya karna hai?"
                 text2 to (aiReply?.let { match.emotion } ?: userEmotion.takeIf { it != Emotion.NEUTRAL } ?: Emotion.NEUTRAL)
+                }
             }
             is Command.Reply -> {
                 val aiReply = if (geminiEnabled()) {
@@ -158,6 +188,10 @@ class JarvisBrain(private val context: Context) {
             "Known facts about the user (use naturally, never recite as a list): ${facts.map { "${it.key}: ${it.value}" }.joinToString("; ")}."
         }
         return SYSTEM_PROMPT + "\n" + factLine
+    }
+
+    private fun launcherFallbackOpen(appKey: String) {
+        runCatching { com.jarvis.assistant.control.AppLauncher(context).open(appKey) }
     }
 
     private fun geminiEnabled(): Boolean =
