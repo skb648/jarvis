@@ -252,7 +252,7 @@ class IntentEngine {
             if (appName.length >= 2 && !appName.contains("karo")) {
                 return IntentResult(
                     Command.InstallApp(appName),
-                    ""$appName" install kar raha hoon — Play Store kholega, search karega, aur Install dabayega. Sirf dekhna!",
+                    "\"$appName\" install kar raha hoon — Play Store kholega, search karega, aur Install dabayega. Sirf dekhna!",
                     Emotion.EXCITED
                 )
             }
@@ -264,7 +264,7 @@ class IntentEngine {
         if (searchM != null && !t.contains("screenshot") && !t.contains("news")) {
             val q = searchM.groupValues[1].trim().trimEnd('.', '!', '?')
             if (q.length >= 2) {
-                return IntentResult(Command.WebSearch(q), "Web par "$q" dhundh raha hoon!", Emotion.HAPPY)
+                return IntentResult(Command.WebSearch(q), "Web par \"$q\" dhundh raha hoon!", Emotion.HAPPY)
             }
         }
 
@@ -273,7 +273,7 @@ class IntentEngine {
             val q = t.replace(Regex("\\b(chalao|bajao|play|dikhao|video|youtube|yt|ka|ki|pe|karo|aur)\\b"), " ")
                 .trim()
             if (q.length >= 2) {
-                return IntentResult(Command.PlayVideo(q), "YouTube pe "$q" dhundh raha hoon!", Emotion.EXCITED)
+                return IntentResult(Command.PlayVideo(q), "YouTube pe \"$q\" dhundh raha hoon!", Emotion.EXCITED)
             }
         }
 
