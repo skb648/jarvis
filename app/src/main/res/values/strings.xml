@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JARVIS AI</string>
+
+    <string name="accessibility_service_label">JARVIS UI Control</string>
+    <string name="accessibility_service_description">JARVIS ko apne phone ka poora control deta hai — voice se kisi bhi app me text par click karna, scroll karna, type karna, screenshot lena, phone lock karna. JARVIS sirf tabhi active hota hai jab aap usse kaho.</string>
+
+    <string name="notification_listener_label">JARVIS Media Control</string>
+
+    <string name="service_notification_title">J.A.R.V.I.S. active</string>
+    <string name="service_notification_text">"Hey Jarvis" bolo — ya notification se baat shuru karo</string>
+    <string name="action_talk">Baat karo</string>
+    <string name="action_stop">Band karo</string>
+
+    <string name="channel_service">jarvis_service</string>
+    <string name="channel_service_name">JARVIS Service</string>
+    <string name="channel_commands">jarvis_commands</string>
+    <string name="channel_commands_name">JARVIS Commands</string>
+    <string name="channel_alarms">jarvis_alarms</string>
+    <string name="channel_alarms_name">JARVIS Alarms &amp; Timers</string>
+
+    <string name="tile_label">JARVIS</string>
+    <string name="widget_label">JARVIS</string>
+    <string name="widget_tap">Tap to talk</string>
+</resources>

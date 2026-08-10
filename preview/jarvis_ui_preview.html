@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>J.A.R.V.I.S. — UI Preview</title>
+<style>
+  :root{
+    --bg:#04060D; --panel:#0A1120; --panel-hi:#101B30; --cyan:#00E5FF; --cyan-dim:#0D3B4D;
+    --gold:#FFC400; --text:#E8F1FF; --dim:#8CA3C7; --red:#FF5C5C; --green:#69F0AE;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;}
+  body{background:radial-gradient(1200px 800px at 50% -10%,#081226 0%,var(--bg) 60%);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}
+  .phone{width:400px;max-width:100%;background:var(--bg);border:1px solid #12233f;border-radius:38px;box-shadow:0 0 80px rgba(0,229,255,.08),0 30px 60px rgba(0,0,0,.6);overflow:hidden;position:relative;}
+  .screen{padding:18px 16px 0;height:100%;display:flex;flex-direction:column;}
+
+  /* header */
+  .header{display:flex;align-items:center;gap:10px;}
+  .title h1{font-size:21px;font-weight:900;letter-spacing:4px;color:var(--gold);text-shadow:0 0 18px rgba(255,196,0,.35);}
+  .title p{font-size:9px;letter-spacing:1.5px;color:var(--dim);}
+  .spacer{flex:1;}
+  .pill{display:flex;align-items:center;gap:6px;border:1px solid rgba(0,229,255,.5);background:var(--panel-hi);border-radius:50px;padding:5px 10px;}
+  .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--cyan);animation:blink 1.4s infinite;}
+  .pill span{font-size:9px;font-weight:700;letter-spacing:1.5px;color:var(--cyan);}
+  .activate{border:none;background:var(--cyan);color:#00202A;font-weight:800;font-size:11px;letter-spacing:1px;padding:8px 14px;border-radius:12px;cursor:pointer;}
+  .gear{color:var(--dim);font-size:20px;background:none;border:none;cursor:pointer;}
+
+  /* arc reactor */
+  .reactor-wrap{display:flex;justify-content:center;padding:26px 0 18px;}
+  .reactor{width:235px;height:235px;position:relative;border-radius:50%;animation:pulse 1.6s ease-in-out infinite;}
+  .glow{position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle, rgba(0,229,255,.30) 0%, rgba(0,229,255,.06) 45%, transparent 70%);}
+  .ring-outer{position:absolute;inset:3px;border-radius:50%;border:1.5px solid rgba(255,255,255,.07);}
+  .ring-main{position:absolute;inset:14px;border-radius:50%;border:2.5px solid var(--cyan);box-shadow:0 0 16px rgba(0,229,255,.55), inset 0 0 16px rgba(0,229,255,.25);}
+  .arc1,.arc2{position:absolute;border-radius:50%;}
+  .arc1{inset:14px;border:4px solid transparent;border-top-color:var(--cyan);border-right-color:var(--cyan);filter:drop-shadow(0 0 6px var(--cyan));animation:spin 4.5s linear infinite;}
+  .arc2{inset:34px;border:3px solid transparent;border-bottom-color:var(--gold);border-left-color:var(--gold);filter:drop-shadow(0 0 6px var(--gold));animation:spin 7s linear infinite reverse;}
+  .bars{position:absolute;inset:38px;border-radius:50%;}
+  .bars b{position:absolute;left:50%;top:50%;width:2.5px;border-radius:3px;background:var(--cyan);transform-origin:0 0;opacity:.25;}
+  .core{position:absolute;inset:74px;border-radius:50%;background:radial-gradient(circle at 35% 35%, rgba(0,229,255,.35), rgba(0,229,255,.08) 70%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;}
+  .core .emoji{font-size:30px;}
+  .core .emolabel{color:var(--cyan);font-size:11px;font-weight:800;letter-spacing:2.5px;text-shadow:0 0 10px rgba(0,229,255,.8);}
+  .core .conf{color:var(--dim);font-size:9px;}
+  .core .status{font-size:9.5px;letter-spacing:1.6px;color:var(--cyan);}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.035);}}
+  @keyframes blink{0%,100%{opacity:1;}50%{opacity:.25;}}
+
+  /* chat */
+  .chat{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:4px 2px 10px;min-height:190px;max-height:270px;}
+  .msg{display:flex;gap:8px;max-width:88%;}
+  .msg.user{align-self:flex-end;flex-direction:row-reverse;}
+  .avatar{width:26px;height:26px;min-width:26px;border-radius:50%;background:var(--panel-hi);border:1.5px solid rgba(0,229,255,.6);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;color:var(--cyan);}
+  .bubble{padding:9px 12px;border-radius:14px;font-size:13px;line-height:1.5;color:var(--text);}
+  .msg.jarvis .bubble{background:rgba(10,17,32,.95);border:1px solid var(--panel-hi);border-top-left-radius:4px;}
+  .msg.user .bubble{background:rgba(0,229,255,.12);border:1px solid rgba(0,229,255,.35);border-top-right-radius:4px;}
+  .msg .emol{font-size:10px;margin-top:3px;}
+
+  /* chips */
+  .chips{display:flex;gap:8px;padding:4px 0;}
+  .chip{display:flex;align-items:center;gap:5px;background:var(--panel-hi);border:1px solid rgba(0,229,255,.25);color:var(--text);font-size:10.5px;padding:6px 11px;border-radius:10px;cursor:pointer;transition:.15s;}
+  .chip:hover{border-color:var(--cyan);}
+  .chip .ic{color:var(--cyan);font-size:12px;}
+
+  /* input */
+  .inputbar{background:var(--panel);border-radius:18px 18px 0 0;padding:10px 12px 14px;display:flex;gap:8px;align-items:center;border-top:1px solid #12233f;}
+  .field{flex:1;display:flex;align-items:center;background:var(--panel-hi);border:1px solid var(--panel-hi);border-radius:14px;padding:0 12px;height:46px;color:var(--dim);font-size:12.5px;transition:.15s;}
+  .field:focus-within{border-color:var(--cyan);}
+  .send{width:44px;height:44px;min-width:44px;border-radius:50%;background:var(--panel-hi);border:1px solid var(--panel-hi);color:var(--cyan);font-size:17px;cursor:pointer;}
+  .mic{width:58px;height:58px;min-width:58px;border-radius:50%;border:2px solid var(--gold);background:linear-gradient(135deg,var(--cyan),#0086A8);color:#fff;font-size:24px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 22px rgba(0,229,255,.35);}
+  .mic.listening{background:linear-gradient(135deg,#FF5C5C,#B71C1C);animation:blink 0.9s infinite;}
+  .partial{color:var(--gold);font-size:11.5px;padding:7px 4px 0;font-style:italic;min-height:18px;}
+  .footnote{text-align:center;font-size:9px;color:var(--dim);padding:6px 0 10px;letter-spacing:1px;}
+</style>
+</head>
+<body>
+<div class="phone">
+  <div class="screen">
+    <div class="header">
+      <div class="title"><h1>J.A.R.V.I.S.</h1><p>JUST A RATHER VERY INTELLIGENT SYSTEM</p></div>
+      <div class="spacer"></div>
+      <div class="pill"><div class="dot"></div><span>WAKE</span></div>
+      <button class="gear">⚙️</button>
+    </div>
+
+    <div class="reactor-wrap">
+      <div class="reactor" id="reactor">
+        <div class="glow"></div>
+        <div class="ring-outer"></div>
+        <div class="ring-main"></div>
+        <div class="arc1"></div>
+        <div class="arc2"></div>
+        <div class="bars" id="bars"></div>
+        <div class="core">
+          <div class="emoji" id="emoji">😄</div>
+          <div class="emolabel" id="emolabel">HAPPY</div>
+          <div class="conf" id="conf">82% confidence</div>
+          <div class="status" id="status">◉ wake word active</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="chat" id="chat"></div>
+
+    <div class="chips">
+      <div class="chip" onclick="demo('2 minute ka timer')"><span class="ic">⏱️</span>Timer</div>
+      <div class="chip" onclick="demo('torch on')"><span class="ic">🔦</span>Torch</div>
+      <div class="chip" onclick="demo('weather batao')"><span class="ic">🌤️</span>Weather</div>
+      <div class="chip" onclick="demo('gaana chalao')"><span class="ic">🎵</span>Music</div>
+    </div>
+
+    <div class="partial" id="partial"></div>
+
+    <div class="inputbar">
+      <div class="field" contenteditable="true" id="field">Type karke bhi bol sakte ho...</div>
+      <button class="send" onclick="sendTyped()">➤</button>
+      <div class="mic" id="mic" onclick="toggleMic()">🎤</div>
+    </div>
+    <div class="footnote">JARVIS AI — UI PREVIEW • REAL APP: Jetpack Compose</div>
+  </div>
+</div>
+
+<script>
+  // ---- 48 waveform bars ----
+  const barsEl = document.getElementById('bars');
+  const N = 48;
+  for (let i=0;i<N;i++){
+    const b = document.createElement('b');
+    const a = (i*360/N) * Math.PI/180;
+    b.style.transform = `rotate(${a}rad) translateY(-46px) scaleY(${0.08+Math.random()*0.1})`;
+    barsEl.appendChild(b);
+  }
+  const bars = [...barsEl.children];
+  function tickWave(){
+    bars.forEach((b,i)=>{
+      const v = Math.random();
+      const s = 0.1 + v*1.6;
+      b.style.transform = `rotate(${i*2*Math.PI/N}rad) translateY(-46px) scaleY(${s})`;
+      b.style.opacity = v>0.12 ? 0.35+v*0.65 : 0.08;
+      b.style.background = v>0.12 ? 'var(--cyan)' : 'rgba(255,255,255,.35)';
+      b.style.boxShadow = v>0.3 ? '0 0 6px var(--cyan)' : 'none';
+    });
+  }
+  setInterval(tickWave, 120);
+
+  // ---- emotion showcase (cycles through emotions) ----
+  const emotions = [
+    {emoji:'😄',label:'HAPPY',conf:'82% confidence',color:'#66BB6A'},
+    {emoji:'😠',label:'ANGRY',conf:'74% confidence',color:'#EF5350'},
+    {emoji:'😢',label:'SAD',conf:'68% confidence',color:'#5C6BC0'},
+    {emoji:'🤩',label:'EXCITED',conf:'91% confidence',color:'#FFA726'},
+    {emoji:'😌',label:'CALM',conf:'77% confidence',color:'#26A69A'},
+    {emoji:'😰',label:'STRESSED',conf:'63% confidence',color:'#AB47BC'},
+    {emoji:'😐',label:'NEUTRAL',conf:'55% confidence',color:'#4FC3F7'},
+  ];
+  let ei = 0;
+  setInterval(()=>{
+    const e = emotions[ei++ % emotions.length];
+    document.getElementById('emoji').textContent = e.emoji;
+    const l = document.getElementById('emolabel'); l.textContent = e.label; l.style.color = e.color;
+    document.getElementById('conf').textContent = e.conf;
+    const rm = document.querySelector('.ring-main');
+    rm.style.borderColor = e.color;
+    rm.style.boxShadow = `0 0 16px ${e.color}, inset 0 0 16px ${e.color}55`;
+    const glow = document.querySelector('.glow');
+    glow.style.background = `radial-gradient(circle, ${e.color}44 0%, ${e.color}0d 45%, transparent 70%)`;
+    const arc1 = document.querySelector('.arc1');
+    arc1.style.borderTopColor = e.color; arc1.style.borderRightColor = e.color;
+  }, 2400);
+
+  // ---- chat demo ----
+  const chat = document.getElementById('chat');
+  const demoMsgs = [
+    {who:'jarvis', emo:'😄', text:'Namaste boss! Main JARVIS hoon. Aapki awaaz se lag raha hai aaj mood accha hai! 🎉 Kya karna hai?'},
+    {who:'user', text:'Hey Jarvis, gaana chalao!'},
+    {who:'jarvis', emo:'🤩', text:'Ho gaya boss! Music on! 🎵 Aaj kaun sa vibe chalega?'},
+  ];
+  demoMsgs.forEach(m => addMsg(m.who, m.text, m.emo));
+  function addMsg(who, text, emo){
+    const m = document.createElement('div');
+    m.className = 'msg ' + who;
+    const avatar = who==='jarvis' ? '<div class="avatar">J</div>' : '';
+    const emol = who==='jarvis' ? `<div class="emol">${emo||'😐'}</div>` : '';
+    m.innerHTML = avatar + `<div class="bubble">${text}</div>`;
+    chat.appendChild(m);
+    const emoRow = document.createElement('div');
+    if (who==='jarvis'){ emoRow.className='emol'; emoRow.textContent = emo||'😐'; m.appendChild(emoRow);}
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  // ---- mic demo ----
+  let listening = false;
+  const micBtn = document.getElementById('mic');
+  const statusEl = document.getElementById('status');
+  function toggleMic(){
+    listening = !listening;
+    micBtn.classList.toggle('listening', listening);
+    micBtn.textContent = listening ? '⏹' : '🎤';
+    statusEl.textContent = listening ? '● sun raha hoon...' : '◉ wake word active';
+    if (listening){
+      const p = document.getElementById('partial');
+      p.textContent = '“"..."';
+      setTimeout(()=>{ p.textContent = '“gaana chalao...”'; }, 1200);
+      setTimeout(()=>{
+        p.textContent = '';
+        toggleMic();
+        addMsg('user','gaana chalao');
+        statusEl.textContent = '► bol raha hoon...';
+        setTimeout(()=>{
+          addMsg('jarvis','🤩','Ho gaya boss! Music on! 🎵');
+          statusEl.textContent = '◉ wake word active';
+        }, 900);
+      }, 2400);
+    }
+  }
+
+  // ---- typed demo ----
+  function sendTyped(){
+    const f = document.getElementById('field');
+    const t = f.textContent.trim().replace(/^Type karke bhi bol sakte ho...$/,'');
+    if (!t) return;
+    f.textContent = 'Type karke bhi bol sakte ho...';
+    demo(t);
+  }
+  function demo(t){
+    addMsg('user', t);
+    const statusEl = document.getElementById('status');
+    statusEl.textContent = '◌ soch raha hoon...';
+    const replies = {
+      '2 minute ka timer':'2 minute ka timer set! Time hone pe bata dunga. ⏱️',
+      'torch on':'Torch on! Roshni aa gayi. 🔦',
+      'weather batao':'Abhi 34 degree, halke baadal. Garmi hai boss — paani piyo! 🌤️',
+      'gaana chalao':'Ho gaya! Music on! 🎵',
+      'time kya hai':'Abhi 6:42 PM hai boss.',
+      'battery kya hai':'Battery 78 percent hai, sab under control! ⚡',
+    };
+    setTimeout(()=>{
+      const r = replies[t] || `Boss, "${t}" — main offline mode me bhi ye kar sakta hoon! (Real app me Gemini key ke saath kuch bhi)`;
+      addMsg('jarvis', '😄', r);
+      statusEl.textContent = '◉ wake word active';
+    }, 1100);
+  }
+</script>
+</body>
+</html>
